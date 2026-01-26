@@ -1,0 +1,16 @@
+[package]
+name = "context-footprint"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+prost = "0.13"
+prost-types = "0.13"
+petgraph = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+memmap2 = "0.9"
+
+[build-dependencies]
+prost-build = "0.13"

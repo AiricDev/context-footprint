@@ -6,6 +6,7 @@ use context_footprint::domain::builder::GraphBuilder;
 use context_footprint::domain::edge::EdgeKind;
 
 use common::fixtures::{
+    create_semantic_data_empty_document, create_semantic_data_multiple_callers,
     create_semantic_data_simple, create_semantic_data_two_files, create_semantic_data_with_cycle,
     create_semantic_data_with_shared_state, source_reader_for_semantic_data,
 };
@@ -90,4 +91,61 @@ fn test_shared_state_fixture_produces_shared_state_write_edges() {
         .edge_references()
         .any(|e| matches!(e.weight(), EdgeKind::SharedStateWrite));
     assert!(has_shared_state_write);
+}
+
+#[test]
+fn test_empty_document_produces_no_nodes() {
+    let semantic_data = create_semantic_data_empty_document();
+    let reader = source_reader_for_semantic_data(&semantic_data, "");
+
+    let size_fn = Box::new(MockSizeFunction::new());
+    let doc_scorer = Box::new(MockDocScorer::new());
+    let builder = GraphBuilder::new(size_fn, doc_scorer);
+    let graph = builder.build(semantic_data, &reader).unwrap();
+
+    assert_eq!(graph.graph.node_count(), 0);
+    assert_eq!(graph.graph.edge_count(), 0);
+}
+
+#[test]
+fn test_multiple_writers_all_connected_to_reader() {
+    let semantic_data = create_semantic_data_with_shared_state();
+    let reader = source_reader_for_semantic_data(&semantic_data, DUMMY_SOURCE);
+
+    let size_fn = Box::new(MockSizeFunction::new());
+    let doc_scorer = Box::new(MockDocScorer::new());
+    let builder = GraphBuilder::new(size_fn, doc_scorer);
+    let graph = builder.build(semantic_data, &reader).unwrap();
+
+    let shared_state_write_count = graph
+        .graph
+        .edge_references()
+        .filter(|e| matches!(e.weight(), EdgeKind::SharedStateWrite))
+        .count();
+    assert_eq!(
+        shared_state_write_count, 2,
+        "Reader R should have SharedStateWrite to W1 and W2"
+    );
+}
+
+#[test]
+fn test_multiple_callers_all_connected_to_callee() {
+    let semantic_data = create_semantic_data_multiple_callers();
+    let reader = source_reader_for_semantic_data(&semantic_data, DUMMY_SOURCE);
+
+    let size_fn = Box::new(MockSizeFunction::new());
+    let doc_scorer = Box::new(MockDocScorer::new());
+    let builder = GraphBuilder::new(size_fn, doc_scorer);
+    let graph = builder.build(semantic_data, &reader).unwrap();
+
+    assert_eq!(graph.graph.node_count(), 3);
+    let call_in_count = graph
+        .graph
+        .edge_references()
+        .filter(|e| matches!(e.weight(), EdgeKind::CallIn))
+        .count();
+    assert_eq!(
+        call_in_count, 2,
+        "Callee C should have CallIn edges to caller A and B"
+    );
 }

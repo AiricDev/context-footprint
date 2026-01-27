@@ -23,15 +23,15 @@ cargo clippy -- -D warnings
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Unit Tests (44)                      │
-│  src/domain/graph.rs, solver.rs, policy/academic.rs    │
+│                    Unit Tests (65)                      │
+│  domain/, adapters/policy, doc_scorer, scip, ...       │
 │  Fast, isolated, test internal logic                   │
 └─────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────┐
-│               Integration Tests (9)                     │
-│  tests/graph_builder_test.rs, lib_accessible.rs        │
+│              Integration Tests (15)                     │
+│  graph_builder_test, lib_accessible, policy_comparison │
 │  Use mocks, test component interactions                │
 └─────────────────────────────────────────────────────────┘
                            │
@@ -43,7 +43,7 @@ cargo clippy -- -D warnings
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Unit Tests (44 tests)
+## Unit Tests (65 tests)
 
 Located in `#[cfg(test)]` modules within source files. Can access private functions.
 
@@ -67,7 +67,17 @@ Located in `#[cfg(test)]` modules within source files. Can access private functi
 - Special edge handling: SharedStateWrite (always transparent), CallIn (depends on signature)
 - Documentation threshold impact
 
+**StrictPolicy** (`src/adapters/policy/strict.rs` - 10 tests)
+- External nodes always boundary; abstract types boundary only when doc_score ≥ threshold (0.8)
+- Functions and variables always transparent (vs Academic)
+- SharedStateWrite and CallIn edge handling; doc_threshold configurable
+
 ### Adapters Layer
+
+**HeuristicDocScorer** (`src/adapters/doc_scorer/heuristic.rs` - 8 tests)
+- Length-based score (word count tiers: >5, >10, >20, >50)
+- Keyword-based score (returns, args, raises, example); keyword contribution capped at 0.6
+- Total score capped at 1.0; empty/no doc returns 0.0
 
 **TiktokenSizeFunction** (`src/adapters/size_function/tiktoken.rs` - 5 tests)
 - Single-line and multi-line span extraction
@@ -79,7 +89,12 @@ Located in `#[cfg(test)]` modules within source files. Can access private functi
 - Empty doc → 0.0
 - Valid doc → 1.0
 
-## Integration Tests (9 tests)
+**SCIP Adapter** (`src/adapters/scip/adapter.rs` - 3 tests)
+- Load nonexistent file returns error
+- Load invalid protobuf returns error
+- Empty SCIP index returns empty SemanticData
+
+## Integration Tests (15 tests)
 
 Located in `tests/` directory. Use public API only.
 
@@ -95,9 +110,12 @@ Located in `tests/` directory. Use public API only.
 - `create_semantic_data_two_files()`: Cross-file dependency
 - `create_semantic_data_with_cycle()`: Circular dependencies
 - `create_semantic_data_with_shared_state()`: Reader + multiple writers
+- `create_semantic_data_empty_document()`: No definitions → 0 nodes
+- `create_semantic_data_multiple_callers()`: One callee, two callers (CallIn edges)
+- `create_semantic_data_chain_well_documented_middle()`: A→B→C with B well-documented (policy comparison)
 - `source_reader_for_semantic_data()`: Helper to create source readers
 
-### GraphBuilder Tests (`tests/graph_builder_test.rs` - 5 tests)
+### GraphBuilder Tests (`tests/graph_builder_test.rs` - 8 tests)
 
 ```rust
 test_build_graph_from_semantic_data_simple  // Basic graph construction
@@ -105,7 +123,16 @@ test_build_graph_two_files                  // Multi-file project
 test_three_pass_creates_nodes_then_edges    // Verify three-pass strategy
 test_cycle_fixture_produces_cycle_edges     // Circular dependency handling
 test_shared_state_fixture_produces_...      // SharedStateWrite edge creation
+test_empty_document_produces_no_nodes       // No definitions → empty graph
+test_multiple_writers_all_connected_to_reader  // SharedStateWrite count
+test_multiple_callers_all_connected_to_callee // CallIn edges from callee to callers
 ```
+
+### Policy Comparison Tests (`tests/policy_comparison_test.rs` - 3 tests)
+
+- `test_academic_vs_strict_different_cf`: Same graph, different policies → different CF (Academic stops at well-doc nodes, Strict continues).
+- `test_heuristic_scorer_vs_simple_scorer`: Build with Heuristic vs Simple doc scorer → different doc_score on nodes.
+- `test_strict_policy_smaller_context_footprint`: CF with Strict policy completes and yields valid result.
 
 ### Library Accessibility (`tests/lib_accessible.rs` - 4 tests)
 
@@ -264,22 +291,26 @@ View coverage locally:
 # Install tarpaulin
 cargo install cargo-tarpaulin
 
-# Generate HTML report
+# Generate HTML report (runs all tests: unit, integration, E2E)
 cargo tarpaulin --out Html
 
-# Open coverage/index.html in browser
+# Report is written to tarpaulin-report.html
 ```
+
+**Coverage target**: 85%+ (domain ≥85%, policies ≥80%, adapters ≥70%).  
+**Current coverage**: ~80% (tarpaulin with all tests; HeuristicDocScorer and StrictPolicy at or near 100%).
 
 ## Current Test Statistics
 
-- **Total tests**: 55
-- **Unit tests**: 44 (80%)
-  - Domain layer: 36 tests
-  - Adapters layer: 8 tests
-- **Integration tests**: 9 (16%)
-- **E2E tests**: 2 (4%)
+- **Total tests**: 82 (65 unit + 15 integration + 2 E2E)
+- **Unit tests**: 65 (~79%)
+  - Domain layer: 36 tests (graph, solver, builder)
+  - Adapters: 29 tests (academic, strict, heuristic, simple, tiktoken, scip adapter)
+- **Integration tests**: 15 (~18%)
+  - graph_builder_test: 8, lib_accessible: 4, policy_comparison_test: 3
+- **E2E tests**: 2 (~2%)
 
-**All tests passing** ✓
+**All unit and integration tests passing** ✓ (E2E may skip if SCIP fixtures missing)
 
 ## Known Limitations
 

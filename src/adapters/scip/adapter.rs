@@ -244,3 +244,61 @@ fn convert_role(symbol_roles: i32) -> ReferenceRole {
         ReferenceRole::Call
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+    use std::io::Write;
+
+    #[test]
+    fn test_load_nonexistent_file_returns_error() {
+        let adapter = ScipDataSourceAdapter::new("/nonexistent/path/to/index.scip");
+        let result = adapter.load();
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Failed to open") || err_msg.contains("nonexistent"),
+            "expected open/decode error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_load_invalid_protobuf_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.scip");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"not valid protobuf content").unwrap();
+        drop(f);
+
+        let adapter = ScipDataSourceAdapter::new(&path);
+        let result = adapter.load();
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("decode") || err_msg.contains("Failed"),
+            "expected decode error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_empty_scip_index_returns_empty_data() {
+        let empty_index = scip::Index::default();
+        let mut buf = Vec::new();
+        empty_index.encode(&mut buf).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.scip");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&buf).unwrap();
+        drop(f);
+
+        let adapter = ScipDataSourceAdapter::new(&path);
+        let result = adapter.load().unwrap();
+        assert!(result.documents.is_empty());
+        assert!(result.external_symbols.is_empty());
+        assert!(result.project_root.is_empty());
+    }
+}

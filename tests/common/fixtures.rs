@@ -282,6 +282,141 @@ pub fn create_semantic_data_with_shared_state() -> SemanticData {
     }
 }
 
+/// Chain A -> B -> C with B well-documented. Used to compare policies: Academic stops at B, Strict continues to C.
+pub fn create_semantic_data_chain_well_documented_middle() -> SemanticData {
+    let sym_a = "sym::chain_a";
+    let sym_b = "sym::chain_b";
+    let sym_c = "sym::chain_c";
+
+    SemanticData {
+        project_root: "/test".into(),
+        documents: vec![DocumentData {
+            relative_path: "chain.py".into(),
+            language: "python".into(),
+            definitions: vec![
+                Definition {
+                    symbol: sym_a.to_string(),
+                    range: default_range(),
+                    enclosing_range: default_range(),
+                    metadata: metadata(sym_a, "chain_a", SymbolKind::Function, vec![], None, false),
+                },
+                Definition {
+                    symbol: sym_b.to_string(),
+                    range: default_range(),
+                    enclosing_range: default_range(),
+                    metadata: metadata(
+                        sym_b,
+                        "chain_b",
+                        SymbolKind::Function,
+                        vec!["Well documented.".into()],
+                        Some("() -> int".into()),
+                        false,
+                    ),
+                },
+                Definition {
+                    symbol: sym_c.to_string(),
+                    range: default_range(),
+                    enclosing_range: default_range(),
+                    metadata: metadata(sym_c, "chain_c", SymbolKind::Function, vec![], None, false),
+                },
+            ],
+            references: vec![
+                Reference {
+                    symbol: sym_b.to_string(),
+                    range: default_range(),
+                    enclosing_symbol: sym_a.to_string(),
+                    role: ReferenceRole::Call,
+                },
+                Reference {
+                    symbol: sym_c.to_string(),
+                    range: default_range(),
+                    enclosing_symbol: sym_b.to_string(),
+                    role: ReferenceRole::Call,
+                },
+            ],
+        }],
+        external_symbols: vec![],
+    }
+}
+
+/// One document with no definitions and no references. Builder should produce 0 nodes.
+pub fn create_semantic_data_empty_document() -> SemanticData {
+    SemanticData {
+        project_root: "/test".into(),
+        documents: vec![DocumentData {
+            relative_path: "empty.py".into(),
+            language: "python".into(),
+            definitions: vec![],
+            references: vec![],
+        }],
+        external_symbols: vec![],
+    }
+}
+
+/// Multiple callers: callee C is called by A and by B. Builder should add CallIn edges C->A and C->B.
+pub fn create_semantic_data_multiple_callers() -> SemanticData {
+    let sym_a = "sym::caller_a";
+    let sym_b = "sym::caller_b";
+    let sym_c = "sym::callee";
+
+    SemanticData {
+        project_root: "/test".into(),
+        documents: vec![DocumentData {
+            relative_path: "multi_call.py".into(),
+            language: "python".into(),
+            definitions: vec![
+                Definition {
+                    symbol: sym_a.to_string(),
+                    range: default_range(),
+                    enclosing_range: default_range(),
+                    metadata: metadata(
+                        sym_a,
+                        "caller_a",
+                        SymbolKind::Function,
+                        vec![],
+                        None,
+                        false,
+                    ),
+                },
+                Definition {
+                    symbol: sym_b.to_string(),
+                    range: default_range(),
+                    enclosing_range: default_range(),
+                    metadata: metadata(
+                        sym_b,
+                        "caller_b",
+                        SymbolKind::Function,
+                        vec![],
+                        None,
+                        false,
+                    ),
+                },
+                Definition {
+                    symbol: sym_c.to_string(),
+                    range: default_range(),
+                    enclosing_range: default_range(),
+                    metadata: metadata(sym_c, "callee", SymbolKind::Function, vec![], None, false),
+                },
+            ],
+            references: vec![
+                Reference {
+                    symbol: sym_c.to_string(),
+                    range: default_range(),
+                    enclosing_symbol: sym_a.to_string(),
+                    role: ReferenceRole::Call,
+                },
+                Reference {
+                    symbol: sym_c.to_string(),
+                    range: default_range(),
+                    enclosing_symbol: sym_b.to_string(),
+                    role: ReferenceRole::Call,
+                },
+            ],
+        }],
+        external_symbols: vec![],
+    }
+}
+
 /// Helper to build a MockSourceReader that has file contents for all documents in the semantic data.
 /// Caller can pass the SemanticData and optionally override content per path.
 pub fn source_reader_for_semantic_data(

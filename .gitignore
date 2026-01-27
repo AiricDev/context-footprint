@@ -19,6 +19,7 @@ target
 
 # Test fixtures - real projects
 /tests/fixtures/fastapi/
+/tests/fixtures/LLMRelay/
 /tests/fixtures/*/index.scip
 
 # Coverage Reports

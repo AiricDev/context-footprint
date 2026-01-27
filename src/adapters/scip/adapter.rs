@@ -59,7 +59,7 @@ impl SemanticDataSource for ScipDataSourceAdapter {
             })
             .collect();
 
-        Ok(SemanticData {
+        let mut semantic_data = SemanticData {
             project_root: index
                 .metadata
                 .as_ref()
@@ -67,7 +67,12 @@ impl SemanticDataSource for ScipDataSourceAdapter {
                 .unwrap_or_default(),
             documents,
             external_symbols,
-        })
+        };
+
+        // Enrich semantic data with language-specific inferences
+        enrich_semantic_data(&mut semantic_data)?;
+
+        Ok(semantic_data)
     }
 }
 
@@ -335,6 +340,131 @@ fn convert_role(symbol_roles: i32) -> ReferenceRole {
         // Need to infer from context - default to Call for now
         ReferenceRole::Call
     }
+}
+
+/// Enrich semantic data with language-specific inferences
+/// This handles cases where the SCIP indexer doesn't provide complete relationship information
+fn enrich_semantic_data(data: &mut SemanticData) -> Result<()> {
+    for document in &mut data.documents {
+        // Determine language by file extension if language field is empty
+        let language = if !document.language.is_empty() {
+            document.language.as_str()
+        } else if document.relative_path.ends_with(".py") {
+            "python"
+        } else {
+            ""
+        };
+        
+        match language {
+            "python" => enrich_python_return_types(document, &data.project_root)?,
+            // Other languages can be added here as needed
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Enrich Python function definitions with return type relationships
+/// 
+/// SCIP-python doesn't always generate TypeDefinition relationships for return types.
+/// This function infers return types by analyzing occurrences and source code patterns.
+fn enrich_python_return_types(doc: &mut DocumentData, project_root: &str) -> Result<()> {
+    use std::path::Path;
+    
+    // Handle file:// URI format in project_root
+    let root_path = if project_root.starts_with("file://") {
+        &project_root[7..] // Strip "file://" prefix
+    } else {
+        project_root
+    };
+    
+    // Read source file
+    let source_path = Path::new(root_path).join(&doc.relative_path);
+    let source_code = std::fs::read_to_string(&source_path)
+        .context(format!("Failed to read source file: {:?}", source_path))?;
+    let lines: Vec<&str> = source_code.lines().collect();
+    
+    // Process each function definition
+    for definition in &mut doc.definitions {
+        // Only process functions
+        if !matches!(
+            definition.metadata.kind,
+            SymbolKind::Function 
+                | SymbolKind::Method 
+                | SymbolKind::Constructor 
+                | SymbolKind::StaticMethod
+                | SymbolKind::AbstractMethod
+        ) {
+            continue;
+        }
+        
+        // Find return type candidates from references in this document
+        for reference in &doc.references {
+            // Must be enclosed by this function
+            if reference.enclosing_symbol != definition.symbol {
+                continue;
+            }
+            
+            // Must be a type usage (or Read, which scip-python uses for type annotations)
+            if !matches!(reference.role, ReferenceRole::TypeUsage | ReferenceRole::Call | ReferenceRole::Read) {
+                continue;
+            }
+            
+            // Check if this is a return type annotation using Python syntax patterns
+            // This will filter out non-return-type references by checking for -> and : pattern
+            if is_python_return_type_annotation(reference, definition, &lines) {
+                // Check if we already have this relationship
+                let already_exists = definition.metadata.relationships.iter().any(|r| {
+                    r.target_symbol == reference.symbol 
+                        && matches!(r.kind, RelationshipKind::TypeDefinition)
+                });
+                
+                if !already_exists {
+                    definition.metadata.relationships.push(Relationship {
+                        target_symbol: reference.symbol.clone(),
+                        kind: RelationshipKind::TypeDefinition,
+                    });
+                }
+                
+                // Only one return type per function
+                break;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Check if a type reference is a Python return type annotation
+/// 
+/// Python return type syntax: `def func(...) -> ReturnType:`
+/// We verify this by checking for the presence of `->` and `:` on the same line
+fn is_python_return_type_annotation(
+    type_ref: &Reference,
+    function_def: &Definition,
+    lines: &[&str],
+) -> bool {
+    // Must be in the signature area (within a few lines of function definition)
+    let line_num = type_ref.range.start_line as usize;
+    let func_line = function_def.range.start_line as usize;
+    
+    if line_num < func_line || line_num > func_line + 5 {
+        return false;
+    }
+    
+    // Get the line containing the type reference
+    if line_num >= lines.len() {
+        return false;
+    }
+    
+    let line = lines[line_num];
+    
+    // Python return type pattern: must contain both "->" and end with ":"
+    // Examples:
+    //   def func() -> Type:
+    //   def func(x: int) -> Type:
+    //   ) -> Type:  (multiline signature)
+    line.contains("->") && line.trim_end().ends_with(':')
 }
 
 #[cfg(test)]

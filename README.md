@@ -250,21 +250,6 @@ cargo test test_fastapi_project
 
 **Testing Guide**: Comprehensive testing strategy documented in [`docs/testing.md`](docs/testing.md) (55 tests, 85%+ coverage).
 
-## 📚 Documentation
-
-- **[Design Document](docs/design.md)**: Formal algorithm definition and graph model
-- **[Development Guide](AGENTS.md)**: Architecture decisions, coding conventions, extension points
-- **[Testing Guide](docs/testing.md)**: Test organization and coverage goals
-
-## 🤝 Contributing
-
-Contributions welcome! This project follows Rust best practices:
-
-1. **Format code**: `cargo fmt`
-2. **Pass tests**: `cargo test --lib --tests`
-3. **No warnings**: `cargo clippy -- -D warnings`
-4. **Write tests**: Add unit tests for new features
-
 ## 📄 License
 
 [Apache 2.0](LICENSE) — Free for academic and commercial use.
@@ -272,7 +257,6 @@ Contributions welcome! This project follows Rust best practices:
 ## 🔗 Related Work
 
 - [SCIP Protocol](https://github.com/sourcegraph/scip) — Language-agnostic semantic indexing
-- [Sourcegraph](https://sourcegraph.com/) — Code intelligence platform
 - [Context Footprint Paper](docs/the-paper.md) — Theoretical foundation
 
 ---

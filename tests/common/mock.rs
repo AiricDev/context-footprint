@@ -123,9 +123,9 @@ impl SourceReader for MockSourceReader {
         
         let lines: Vec<String> = content.lines().map(String::from).collect();
         
-        // Convert 1-indexed to 0-indexed and ensure valid range
-        let start_idx = start_line.saturating_sub(1);
-        let end_idx = end_line.min(lines.len());
+        // SCIP ranges are 0-indexed.
+        let start_idx = start_line;
+        let end_idx = (end_line + 1).min(lines.len());
         
         if start_idx >= lines.len() {
             return Ok(Vec::new());

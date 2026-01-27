@@ -36,20 +36,66 @@ impl GraphBuilder {
     ) -> Result<ContextGraph> {
         let mut graph = ContextGraph::new();
 
+        // 1. Pre-collect kinds and parentage for all definitions
+        let mut symbol_to_kind: HashMap<String, SymbolKind> = HashMap::new();
+        let mut symbol_to_parent: HashMap<String, String> = HashMap::new();
+
+        for document in &semantic_data.documents {
+            for definition in &document.definitions {
+                symbol_to_kind.insert(definition.symbol.clone(), definition.metadata.kind.clone());
+                if let Some(parent) = &definition.metadata.enclosing_symbol {
+                    symbol_to_parent.insert(definition.symbol.clone(), parent.clone());
+                }
+            }
+        }
+
         // Pass 1: Node Allocation
         for document in &semantic_data.documents {
             let source_path = Path::new(&semantic_data.project_root).join(&document.relative_path);
             let source_code = source_reader.read(&source_path)?;
 
             for definition in &document.definitions {
-                // Skip scope-only symbols (they're preserved as enclosing_symbol in other nodes)
-                if matches!(
-                    definition.metadata.kind,
-                    SymbolKind::Module
-                        | SymbolKind::Namespace
-                        | SymbolKind::Package
-                        | SymbolKind::Macro
-                ) {
+                let kind = &definition.metadata.kind;
+                
+                // Determine if this symbol should be an independent node
+                let should_be_node = match kind {
+                    // Always nodes
+                    SymbolKind::Function
+                    | SymbolKind::Method
+                    | SymbolKind::Constructor
+                    | SymbolKind::StaticMethod
+                    | SymbolKind::AbstractMethod
+                    | SymbolKind::Class
+                    | SymbolKind::Interface
+                    | SymbolKind::Struct
+                    | SymbolKind::Enum
+                    | SymbolKind::TypeAlias
+                    | SymbolKind::Trait
+                    | SymbolKind::Protocol => true,
+
+                    // Variable-like nodes: only if they are not parameters or local-like
+                    SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant => {
+                        if let Some(parent_sym) = &definition.metadata.enclosing_symbol {
+                            if let Some(parent_kind) = symbol_to_kind.get(parent_sym) {
+                                match parent_kind {
+                                    SymbolKind::Function
+                                    | SymbolKind::Method
+                                    | SymbolKind::Constructor
+                                    | SymbolKind::StaticMethod
+                                    | SymbolKind::AbstractMethod => false, // Local variable or parameter
+                                    _ => true, // Global or class field
+                                }
+                            } else {
+                                true // Parent not in this index -> Assume Global
+                            }
+                        } else {
+                            true // No parent -> Global
+                        }
+                    }
+                    _ => false, // Parameters, Modules, etc. are not independent nodes
+                };
+
+                if !should_be_node {
                     continue;
                 }
 
@@ -71,7 +117,7 @@ impl GraphBuilder {
                     .first()
                     .map(|s| s.as_str());
                 let node_info = NodeInfo {
-                    node_type: infer_node_type_from_kind(&definition.metadata.kind),
+                    node_type: infer_node_type_from_kind(kind),
                     name: definition.metadata.display_name.clone(),
                     signature: definition.metadata.signature.clone(),
                 };
@@ -83,12 +129,7 @@ impl GraphBuilder {
                     definition.metadata.display_name.clone(),
                     definition.metadata.enclosing_symbol.clone(),
                     context_size,
-                    SourceSpan {
-                        start_line: definition.range.start_line,
-                        start_column: definition.range.start_column,
-                        end_line: definition.range.end_line,
-                        end_column: definition.range.end_column,
-                    },
+                    span,
                     doc_score,
                     definition.metadata.is_external,
                     document.relative_path.clone(),
@@ -100,41 +141,102 @@ impl GraphBuilder {
             }
         }
 
-        // Pass 2: Edge Wiring and Collection for Dynamic Expansion
+        // Helper to resolve a symbol to the nearest ancestor that IS a node
+        let resolve_to_node_symbol = |mut sym: String, graph: &ContextGraph, symbol_to_parent: &HashMap<String, String>| -> Option<String> {
+            while !graph.symbol_to_node.contains_key(&sym) {
+                if let Some(parent) = symbol_to_parent.get(&sym) {
+                    sym = parent.clone();
+                } else {
+                    return None;
+                }
+            }
+            Some(sym)
+        };
+
+        // Pass 2: Edge Wiring
         let mut state_writers: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
         let mut callers: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
         let mut readers: Vec<(petgraph::graph::NodeIndex, String)> = Vec::new();
 
         for document in &semantic_data.documents {
             for reference in &document.references {
-                if let (Some(source_idx), Some(target_idx)) = (
-                    graph.get_node_by_symbol(&reference.enclosing_symbol),
-                    graph.get_node_by_symbol(&reference.symbol),
-                ) {
+                let resolved_source_sym = resolve_to_node_symbol(reference.enclosing_symbol.clone(), &graph, &symbol_to_parent);
+                let resolved_target_sym = resolve_to_node_symbol(reference.symbol.clone(), &graph, &symbol_to_parent);
+
+                if let (Some(source_sym), Some(target_sym)) = (resolved_source_sym, resolved_target_sym) {
+                    let source_idx = *graph.symbol_to_node.get(&source_sym).unwrap();
+                    let target_idx = *graph.symbol_to_node.get(&target_sym).unwrap();
+
+                    if source_idx == target_idx {
+                        continue;
+                    }
+
                     let edge_kind = infer_edge_kind(&reference.role, source_idx, target_idx);
 
-                    // Track writers for SharedStateWrite expansion
                     if matches!(edge_kind, EdgeKind::Write) {
-                        state_writers
-                            .entry(reference.symbol.clone())
-                            .or_default()
-                            .push(source_idx);
+                        state_writers.entry(target_sym.clone()).or_default().push(source_idx);
                     }
-
-                    // Track readers for SharedStateWrite expansion
                     if matches!(edge_kind, EdgeKind::Read) {
-                        readers.push((source_idx, reference.symbol.clone()));
+                        readers.push((source_idx, target_sym.clone()));
                     }
-
-                    // Track callers for CallIn expansion
                     if matches!(edge_kind, EdgeKind::Call) {
-                        callers
-                            .entry(reference.symbol.clone())
-                            .or_default()
-                            .push(source_idx);
+                        callers.entry(target_sym.clone()).or_default().push(source_idx);
                     }
 
                     graph.add_edge(source_idx, target_idx, edge_kind);
+                }
+            }
+        }
+
+        // Pass 2.5: Process relationships from definitions (e.g., return types, implements, inherits)
+        for document in &semantic_data.documents {
+            for definition in &document.definitions {
+                if let Some(&source_idx) = graph.symbol_to_node.get(&definition.symbol) {
+                    for relationship in &definition.metadata.relationships {
+                        // Resolve target symbol to a node symbol
+                        if let Some(resolved_target) = resolve_to_node_symbol(
+                            relationship.target_symbol.clone(),
+                            &graph,
+                            &symbol_to_parent,
+                        ) {
+                            if let Some(&target_idx) = graph.symbol_to_node.get(&resolved_target) {
+                                if source_idx == target_idx {
+                                    continue;
+                                }
+
+                                // Convert relationship kind to edge kind based on source node type
+                                let edge_kind = match relationship.kind {
+                                    crate::domain::semantic::RelationshipKind::TypeDefinition => {
+                                        // TypeDefinition means "source uses target as a type"
+                                        // The specific edge depends on what the source is
+                                        match graph.node(source_idx) {
+                                            crate::domain::node::Node::Function(_) => {
+                                                EdgeKind::ReturnType
+                                            }
+                                            crate::domain::node::Node::Variable(_) => {
+                                                EdgeKind::VariableType
+                                            }
+                                            crate::domain::node::Node::Type(_) => {
+                                                EdgeKind::FieldType
+                                            }
+                                        }
+                                    }
+                                    crate::domain::semantic::RelationshipKind::Implements => {
+                                        EdgeKind::Implements
+                                    }
+                                    crate::domain::semantic::RelationshipKind::Inherits => {
+                                        EdgeKind::Inherits
+                                    }
+                                    crate::domain::semantic::RelationshipKind::References => {
+                                        // Generic references - skip, handled by occurrences
+                                        continue;
+                                    }
+                                };
+
+                                graph.add_edge(source_idx, target_idx, edge_kind);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -219,13 +321,24 @@ fn create_node_from_definition(core: NodeCore, metadata: &SymbolMetadata) -> Res
             }))
         }
         NodeType::Type => {
-            let is_abstract = matches!(
+            // Check if it's abstract based on kind
+            let mut is_abstract = matches!(
                 metadata.kind,
                 SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Protocol
             );
+            
+            // Python Protocol detection: SCIP-python marks Protocols as Class but with Implements relationship to typing.Protocol
+            if matches!(metadata.kind, SymbolKind::Class) {
+                is_abstract = metadata.relationships.iter().any(|r| {
+                    matches!(r.kind, crate::domain::semantic::RelationshipKind::Implements)
+                        && r.target_symbol.contains("typing/Protocol#")
+                });
+            }
+            
             Ok(Node::Type(TypeNode {
                 core,
                 type_kind: match metadata.kind {
+                    SymbolKind::Class if is_abstract => TypeKind::Protocol, // Python Protocol
                     SymbolKind::Class => TypeKind::Class,
                     SymbolKind::Interface => TypeKind::Interface,
                     SymbolKind::Struct => TypeKind::Struct,

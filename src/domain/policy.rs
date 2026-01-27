@@ -1,6 +1,6 @@
-use crate::domain::node::Node;
 use crate::domain::edge::EdgeKind;
 use crate::domain::graph::ContextGraph;
+use crate::domain::node::Node;
 
 /// Node type for documentation scoring
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,15 +13,21 @@ pub enum NodeType {
 /// Pruning decision
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PruningDecision {
-    Boundary,     // Stop traversal here; node is a valid abstraction
-    Transparent,  // Continue traversal through this node
+    Boundary,    // Stop traversal here; node is a valid abstraction
+    Transparent, // Continue traversal through this node
 }
 
 /// Pruning policy trait - determines if a node acts as a Context Boundary
 pub trait PruningPolicy: Send + Sync {
     /// Evaluate if a node acts as a valid Context Boundary
-    fn evaluate(&self, source: &Node, target: &Node, edge_kind: &EdgeKind, graph: &ContextGraph) -> PruningDecision;
-    
+    fn evaluate(
+        &self,
+        source: &Node,
+        target: &Node,
+        edge_kind: &EdgeKind,
+        graph: &ContextGraph,
+    ) -> PruningDecision;
+
     /// Documentation score threshold (exceeding this value is considered "sufficient documentation")
     fn doc_threshold(&self) -> f32 {
         0.5
@@ -49,5 +55,5 @@ pub trait DocumentationScorer: Send + Sync {
 pub struct NodeInfo {
     pub node_type: NodeType,
     pub name: String,
-    pub signature: Option<String>,  // Function signature
+    pub signature: Option<String>, // Function signature
 }

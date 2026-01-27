@@ -1,7 +1,7 @@
-use crate::domain::policy::{PruningPolicy, PruningDecision};
-use crate::domain::node::Node;
 use crate::domain::edge::EdgeKind;
 use crate::domain::graph::ContextGraph;
+use crate::domain::node::Node;
+use crate::domain::policy::{PruningDecision, PruningPolicy};
 
 /// Strict pruning policy
 /// Only trusts external + interface with high threshold
@@ -9,18 +9,26 @@ pub struct StrictPolicy {
     doc_threshold: f32,
 }
 
-impl StrictPolicy {
-    pub fn new(doc_threshold: f32) -> Self {
-        Self { doc_threshold }
-    }
-    
-    pub fn default() -> Self {
+impl Default for StrictPolicy {
+    fn default() -> Self {
         Self::new(0.8) // Higher threshold
     }
 }
 
+impl StrictPolicy {
+    pub fn new(doc_threshold: f32) -> Self {
+        Self { doc_threshold }
+    }
+}
+
 impl PruningPolicy for StrictPolicy {
-    fn evaluate(&self, source: &Node, target: &Node, edge_kind: &EdgeKind, _graph: &ContextGraph) -> PruningDecision {
+    fn evaluate(
+        &self,
+        source: &Node,
+        target: &Node,
+        edge_kind: &EdgeKind,
+        _graph: &ContextGraph,
+    ) -> PruningDecision {
         // Special handling for dynamic expansion edges
         match edge_kind {
             EdgeKind::SharedStateWrite => {
@@ -43,7 +51,7 @@ impl PruningPolicy for StrictPolicy {
         if target.core().is_external {
             return PruningDecision::Boundary;
         }
-        
+
         match target {
             Node::Type(t) => {
                 // Only abstract types with very high doc score
@@ -57,12 +65,10 @@ impl PruningPolicy for StrictPolicy {
                 // Functions are always transparent in strict mode
                 PruningDecision::Transparent
             }
-            Node::Variable(_) => {
-                PruningDecision::Transparent
-            }
+            Node::Variable(_) => PruningDecision::Transparent,
         }
     }
-    
+
     fn doc_threshold(&self) -> f32 {
         self.doc_threshold
     }

@@ -1,9 +1,15 @@
 use crate::domain::ports::SourceReader;
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use std::path::Path;
 
 /// File system source reader implementation
 pub struct FileSourceReader;
+
+impl Default for FileSourceReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl FileSourceReader {
     pub fn new() -> Self {

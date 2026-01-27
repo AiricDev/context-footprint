@@ -47,6 +47,7 @@ dependencies = [
  "prost-types",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

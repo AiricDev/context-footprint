@@ -1,11 +1,11 @@
-use crate::domain::semantic::{
-    SemanticData, DocumentData, Definition, Reference, SymbolMetadata,
-    SourceRange, ReferenceRole, SymbolKind, Relationship, RelationshipKind,
-};
+use crate::adapters::scip::parser::{find_enclosing_definition, parse_range};
 use crate::domain::ports::SemanticDataSource;
+use crate::domain::semantic::{
+    Definition, DocumentData, Reference, ReferenceRole, Relationship, RelationshipKind,
+    SemanticData, SourceRange, SymbolKind, SymbolMetadata,
+};
 use crate::scip;
-use crate::adapters::scip::parser::{parse_range, find_enclosing_definition};
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 
 /// SCIP data source adapter
 pub struct ScipDataSourceAdapter {
@@ -24,17 +24,21 @@ impl SemanticDataSource for ScipDataSourceAdapter {
     fn load(&self) -> Result<SemanticData> {
         // Load SCIP index
         let index = load_scip_index(&self.scip_path)?;
-        
+
         // Convert external symbols
-        let external_symbols = index.external_symbols.iter()
+        let external_symbols = index
+            .external_symbols
+            .iter()
             .map(|sym| convert_symbol_info(sym, true))
             .collect();
-        
+
         // Process each document
-        let documents = index.documents.iter()
+        let documents = index
+            .documents
+            .iter()
             .map(|doc| {
                 let (definitions, references) = partition_occurrences(doc);
-                
+
                 DocumentData {
                     relative_path: doc.relative_path.clone(),
                     language: doc.language.clone(),
@@ -43,9 +47,11 @@ impl SemanticDataSource for ScipDataSourceAdapter {
                 }
             })
             .collect();
-        
+
         Ok(SemanticData {
-            project_root: index.metadata.as_ref()
+            project_root: index
+                .metadata
+                .as_ref()
                 .map(|m| m.project_root.clone())
                 .unwrap_or_default(),
             documents,
@@ -55,10 +61,10 @@ impl SemanticDataSource for ScipDataSourceAdapter {
 }
 
 fn load_scip_index<P: AsRef<std::path::Path>>(path: P) -> Result<scip::Index> {
-    use std::fs::File;
     use memmap2::Mmap;
     use prost::Message;
-    
+    use std::fs::File;
+
     let file = File::open(path).context("Failed to open SCIP index file")?;
     let mmap = unsafe { Mmap::map(&file).context("Failed to mmap SCIP index file")? };
     let index = scip::Index::decode(&mmap[..]).context("Failed to decode SCIP index")?;
@@ -68,9 +74,11 @@ fn load_scip_index<P: AsRef<std::path::Path>>(path: P) -> Result<scip::Index> {
 fn partition_occurrences(doc: &scip::Document) -> (Vec<Definition>, Vec<Reference>) {
     let mut definitions = Vec::new();
     let mut references = Vec::new();
-    
+
     // First collect all definitions (for finding enclosing_symbol)
-    let defs: Vec<(Vec<i32>, &str)> = doc.occurrences.iter()
+    let defs: Vec<(Vec<i32>, &str)> = doc
+        .occurrences
+        .iter()
         .filter(|occ| (occ.symbol_roles & (scip::SymbolRole::Definition as i32)) != 0)
         .filter(|occ| !occ.symbol.is_empty())
         .map(|occ| {
@@ -82,23 +90,25 @@ fn partition_occurrences(doc: &scip::Document) -> (Vec<Definition>, Vec<Referenc
             (range.clone(), occ.symbol.as_str())
         })
         .collect();
-    
+
     for occ in &doc.occurrences {
         if (occ.symbol_roles & (scip::SymbolRole::Definition as i32)) != 0 {
             // Find corresponding SymbolInformation
-            let metadata = doc.symbols.iter()
+            let metadata = doc
+                .symbols
+                .iter()
                 .find(|s| s.symbol == occ.symbol)
                 .map(|s| convert_symbol_info(s, false))
                 .unwrap_or_else(|| create_default_metadata(&occ.symbol));
-            
+
             let (start_line, start_col, end_line, end_col) = parse_range(&occ.range);
-            let (encl_start_line, encl_start_col, encl_end_line, encl_end_col) = 
+            let (encl_start_line, encl_start_col, encl_end_line, encl_end_col) =
                 if !occ.enclosing_range.is_empty() {
                     parse_range(&occ.enclosing_range)
                 } else {
                     parse_range(&occ.range)
                 };
-            
+
             definitions.push(Definition {
                 symbol: occ.symbol.clone(),
                 range: SourceRange {
@@ -120,9 +130,9 @@ fn partition_occurrences(doc: &scip::Document) -> (Vec<Definition>, Vec<Referenc
             let enclosing_symbol = find_enclosing_definition(&occ.range, &defs)
                 .unwrap_or("")
                 .to_string();
-            
+
             let (start_line, start_col, end_line, end_col) = parse_range(&occ.range);
-            
+
             references.push(Reference {
                 symbol: occ.symbol.clone(),
                 range: SourceRange {
@@ -136,26 +146,27 @@ fn partition_occurrences(doc: &scip::Document) -> (Vec<Definition>, Vec<Referenc
             });
         }
     }
-    
+
     (definitions, references)
 }
 
 fn convert_symbol_info(sym: &scip::SymbolInformation, is_external: bool) -> SymbolMetadata {
     let kind = convert_symbol_kind(sym.kind() as i32);
-    let relationships = sym.relationships.iter()
+    let relationships = sym
+        .relationships
+        .iter()
         .map(|rel| Relationship {
             target_symbol: rel.symbol.clone(),
             kind: convert_relationship_kind(rel),
         })
         .collect();
-    
+
     SymbolMetadata {
         symbol: sym.symbol.clone(),
         kind,
         display_name: sym.display_name.clone(),
         documentation: sym.documentation.clone(),
-        signature: sym.signature_documentation.as_ref()
-            .map(|d| d.text.clone()),
+        signature: sym.signature_documentation.as_ref().map(|d| d.text.clone()),
         relationships,
         enclosing_symbol: if sym.enclosing_symbol.is_empty() {
             None
@@ -183,9 +194,9 @@ fn convert_symbol_kind(kind: i32) -> SymbolKind {
     // SCIP Kind is an enum represented as i32
     // Match against the enum values from scip.proto
     match kind {
-        17 => SymbolKind::Function,      // Function
+        17 => SymbolKind::Function,       // Function
         26 => SymbolKind::Method,         // Method
-        9 => SymbolKind::Constructor,      // Constructor
+        9 => SymbolKind::Constructor,     // Constructor
         80 => SymbolKind::StaticMethod,   // StaticMethod
         66 => SymbolKind::AbstractMethod, // AbstractMethod
         7 => SymbolKind::Class,           // Class
@@ -221,7 +232,7 @@ fn convert_relationship_kind(rel: &scip::Relationship) -> RelationshipKind {
 
 fn convert_role(symbol_roles: i32) -> ReferenceRole {
     use scip::SymbolRole::*;
-    
+
     if (symbol_roles & (WriteAccess as i32)) != 0 {
         ReferenceRole::Write
     } else if (symbol_roles & (ReadAccess as i32)) != 0 {

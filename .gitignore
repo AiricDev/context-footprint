@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# Test fixtures - real projects
+/tests/fixtures/fastapi/
+/tests/fixtures/*/index.scip

@@ -19,12 +19,8 @@ pub fn encloses(outer: &[i32], inner: &[i32]) -> bool {
     let (o_start_line, o_start_char, o_end_line, o_end_char) = parse_range(outer);
     let (i_start_line, i_start_char, i_end_line, i_end_char) = parse_range(inner);
 
-    if o_start_line < i_start_line || (o_start_line == i_start_line && o_start_char <= i_start_char) {
-        if o_end_line > i_end_line || (o_end_line == i_end_line && o_end_char >= i_end_char) {
-            return true;
-        }
-    }
-    false
+    (o_start_line < i_start_line || (o_start_line == i_start_line && o_start_char <= i_start_char))
+        && (o_end_line > i_end_line || (o_end_line == i_end_line && o_end_char >= i_end_char))
 }
 
 /// Find the smallest enclosing definition for a reference range

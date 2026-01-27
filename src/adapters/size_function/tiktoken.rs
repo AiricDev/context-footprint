@@ -4,6 +4,12 @@ use crate::domain::policy::{SizeFunction, SourceSpan};
 /// Uses tiktoken to count tokens in the source code span
 pub struct TiktokenSizeFunction;
 
+impl Default for TiktokenSizeFunction {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TiktokenSizeFunction {
     pub fn new() -> Self {
         Self
@@ -14,16 +20,16 @@ impl SizeFunction for TiktokenSizeFunction {
     fn compute(&self, source: &str, span: &SourceSpan) -> u32 {
         // Extract the code snippet from the span
         let lines: Vec<&str> = source.lines().collect();
-        
+
         if span.start_line as usize >= lines.len() {
             return 0;
         }
-        
+
         let start_line_idx = span.start_line as usize;
         let end_line_idx = (span.end_line as usize).min(lines.len() - 1);
-        
+
         let mut code_snippet = String::new();
-        
+
         if start_line_idx == end_line_idx {
             // Single line
             let line = lines[start_line_idx];
@@ -41,13 +47,13 @@ impl SizeFunction for TiktokenSizeFunction {
                 code_snippet.push_str(&first_line[start_col..]);
             }
             code_snippet.push('\n');
-            
+
             // Middle lines
-            for i in (start_line_idx + 1)..end_line_idx {
-                code_snippet.push_str(lines[i]);
+            for line in lines.iter().take(end_line_idx).skip(start_line_idx + 1) {
+                code_snippet.push_str(line);
                 code_snippet.push('\n');
             }
-            
+
             // Last line
             if end_line_idx < lines.len() {
                 let last_line = lines[end_line_idx];
@@ -55,7 +61,7 @@ impl SizeFunction for TiktokenSizeFunction {
                 code_snippet.push_str(&last_line[..end_col]);
             }
         }
-        
+
         // Use a simple token counting approach (approximate)
         // In a real implementation, you would use the tiktoken crate
         // For now, we'll use a simple word-based approximation
@@ -73,4 +79,79 @@ fn count_tokens_approx(text: &str) -> u32 {
             (1 + punct_count / 2).max(1)
         })
         .sum::<usize>() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::policy::SourceSpan;
+
+    #[test]
+    fn test_single_line_span() {
+        let f = TiktokenSizeFunction::new();
+        let source = "def foo(): return 42";
+        let span = SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 0,
+            end_column: 18,
+        };
+        let n = f.compute(source, &span);
+        assert!(n >= 1);
+    }
+
+    #[test]
+    fn test_multi_line_span() {
+        let f = TiktokenSizeFunction::new();
+        let source = "line0\nline1\nline2";
+        let span = SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 2,
+            end_column: 5,
+        };
+        let n = f.compute(source, &span);
+        assert!(n >= 1);
+    }
+
+    #[test]
+    fn test_boundary_handling() {
+        let f = TiktokenSizeFunction::new();
+        let source = "ab";
+        let span = SourceSpan {
+            start_line: 0,
+            start_column: 1,
+            end_line: 0,
+            end_column: 2,
+        };
+        let n = f.compute(source, &span);
+        assert!(n <= source.len() as u32); // sanity: not larger than char count
+    }
+
+    #[test]
+    fn test_empty_span_returns_zero() {
+        let f = TiktokenSizeFunction::new();
+        let source = "x";
+        let span = SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 0,
+            end_column: 0,
+        };
+        let n = f.compute(source, &span);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_out_of_range_line_returns_zero() {
+        let f = TiktokenSizeFunction::new();
+        let source = "one line";
+        let span = SourceSpan {
+            start_line: 10,
+            start_column: 0,
+            end_line: 10,
+            end_column: 5,
+        };
+        assert_eq!(f.compute(source, &span), 0);
+    }
 }

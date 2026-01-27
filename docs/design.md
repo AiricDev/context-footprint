@@ -19,21 +19,23 @@ Let a codebase be represented as a directed graph $G = (V, E)$, where:
     - **Annotations**: `Annotates`
     - **Exceptions**: `Throws`
 
-Each node $u \in V$ has an intrinsic physical property:
+Each node $u \in V$ has intrinsic physical and semantic properties:
 
-- $S(u)$: The context size of unit $u$. (Using token size to represent context size, by using a standard tokenizer like cl100k_base or similar).
+- $S(u)$: The **context size** of unit $u$. This is an abstract measure of information volume, typically implemented as a token count using a standard tokenizer (e.g., `cl100k_base`) or a word-based approximation.
+- $D(u)$: The **documentation score** of unit $u$, a value in range $[0.0, 1.0]$ representing documentation quality.
+- $E(u)$: A boolean flag indicating if the node is **external** (3rd-party library).
 
 ### 1.2 Context as a Subgraph
 
 We define the **Context** of a unit $u$, denoted as $R(u)$, as a **specific subset of nodes** $R(u) \subseteq V$ that must be loaded to satisfy Information Completeness. This set is computed via conditional traversal from $u$ (see Section 2).
 
-The **Context Footprint (CF)** is simply the total token volume of this subgraph:
+The **Context Footprint (CF)** is the total volume of all reached nodes:
 
 $$
 CF(u) = \sum_{v \in R(u)} size(v)
 $$
 
-where $size(v)$ is a non-negative measure of the information content of unit $v$ (e.g., token count). By definition, $R(u)$ includes $u$ itself—the footprint for sound reasoning includes the focal code, not merely its external dependencies.
+where $size(v)$ is the context size of unit $v$. By definition, $R(u)$ includes $u$ itself, and significantly, it **includes the boundary nodes** themselves (representing the interface being consumed) but not their implementation details.
 
 This definition removes subjective "cognitive weights." The metric is purely **volumetric**: it measures the exact volume of tokens that is **contextually reachable** from $u$.
 
@@ -84,15 +86,17 @@ Traversal decision depends on the *source* $u$:
 
 | **Node Type** | **Condition** | $B(u,v,k)$ **(Is Boundary?)** |
 | --- | --- | --- |
-| **Any** | `is_external = true` | **TRUE** (3rd-party always stops) |
-| **Type** | `is_abstract && has_doc` | **TRUE** |
-| **Type** | `!is_abstract || !has_doc` | **FALSE** (leaky abstraction) |
-| **Function** | `sig_complete && has_doc` | **TRUE** |
-| **Function** | `!sig_complete || !has_doc` | **FALSE** |
+| **Any** | `is_external == true` | **TRUE** (3rd-party always stops) |
+| **Type** | `is_abstract && doc_score >= threshold` | **TRUE** |
+| **Type** | `!is_abstract || doc_score < threshold` | **FALSE** (leaky abstraction) |
+| **Function** | `is_abstract_factory` | **TRUE*** |
+| **Function** | `sig_complete && doc_score >= threshold` | **TRUE** |
+| **Function** | `!sig_complete || doc_score < threshold` | **FALSE** |
 | **Variable** | (any) | **FALSE** (always traverse to type) |
 
 > *Where `sig_complete` = `typed_param_count == param_count && has_return_type`*
 > 
+> ***Abstract Factory Rule**: A function that returns an abstract type (Interface/Protocol) with sufficient documentation is considered a boundary, regardless of its own documentation quality. This identifies patterns where the caller only interacts with the returned interface.
 
 > *Key Insight*: An undocumented interface is not a valid abstraction. It fails to compress context because the reader must still inspect the implementation to understand the behavior. In our graph, this "leaky abstraction" is treated as a transparent node.
 > 
@@ -120,7 +124,7 @@ If $u$ has incomplete specification (missing type annotations, loosely typed par
 - We cannot determine the contract of $u$ locally.
 - **Reverse Edge Construction**: We must check call sites to understand actual usage.
 - For all callers `v` of function $u$, add edge `u → v` to the graph.
-- **Traversal Rule**: Call-in edges traverse only when source $u$ lacks complete specification. If $u$ has full type annotations and documentation, call-in edges are boundaries.
+- **Traversal Rule**: Call-in edges traverse only when source $u$ (the callee) lacks complete specification. If $u$ has full type annotations and documentation, call-in edges are boundaries.
     - *Result*: For under-specified functions, context expands to all callers.
 
 ## 5. Codebase-Level Characterization
@@ -172,25 +176,20 @@ This phase consumes the SCIP stream to build the in-memory `ContextGraph` and `S
 
 1. **Pass 1: Node Allocation (Definitions)**
     - Iterate over SCIP `Documents` and `Symbols`.
-    - **NodeType**: Extract node type from symbol string. Three primary types:
-        - **Function**: Methods, functions, lambdas (module/class stored in `scope`)
-        - **Variable**: Global variables, class fields (excludes local vars and parameters)
-        - **Type**: Class, Interface, Protocol, Struct, Enum, TypeAlias, FunctionType, Union, Intersection
-    - **Metrics**: Read source file ranges to calculate `token_count` (using `tiktoken` or similar).
-    - **Metadata**: Extract type-specific facts:
-        - Function: `param_count`, `typed_param_count`, `has_return_type`, `is_async`, `visibility`
-        - Variable: `has_type_annotation`, `mutability`, `variable_kind`
-        - Type: `type_kind`, `is_abstract`, `type_param_count`
+    - **Node Selection**: Only definitions that represent "independent" code units are converted to nodes. 
+        - Functions, Classes, and Types are always nodes.
+        - Variables and Fields are only nodes if they are not local to a function (e.g., global variables or class fields).
+        - Parameters and Local variables are resolved to their nearest node ancestor.
+    - **Metrics**: Read source file ranges to calculate `context_size`.
+    - **Metadata**: Extract facts and compute `doc_score` using a `DocumentationScorer`.
 2. **Pass 2: Edge Wiring (Occurrences)**
     - Iterate over `Occurrences` to identify relationships.
-    - **Edges**: Map SCIP occurrences to granular `EdgeKind`:
-        - Control flow: `Call`
-        - Type usage: `ParamType`, `ReturnType`, `FieldType`, `VariableType`, `GenericBound`, `TypeArgument`
-        - Type hierarchy: `Inherits`, `Implements`
-        - Data flow: `Read`, `Write`
-        - Annotations: `Annotates` (with `is_behavioral` flag)
-        - Exceptions: `Throws`
-    - **Indices**: Populate `StateIndex` (for global writes) and `CallerIndex` (for untyped calls).
+    - **Static Edges**: Map SCIP occurrences to granular `EdgeKind` (`Call`, `Read`, `Write`, etc.).
+    - **Relationship Resolution**: Symbols that are not nodes (like a local variable reference) are resolved to their nearest enclosing node symbol to maintain graph connectivity.
+3. **Pass 3: Dynamic Expansion (Reverse Edges)**
+    - Automatically inject reverse dependency edges:
+        - **SharedStateWrite**: From readers of mutable state to all known writers of that state.
+        - **CallIn**: From callees to all known callers.
 
 **Phase 2: Context Analysis (The Solver)**
 
@@ -219,10 +218,11 @@ struct NodeCore {
     id: NodeId,
     name: String,               // Symbol name (e.g., "calculate_total")
     scope: Option<ScopeId>,     // Module/Namespace (organizational, not an entity)
-    token_count: u32,           // Physical volume (CF calculation basis)
+    context_size: u32,          // Physical volume (CF calculation basis)
     span: SourceSpan,           // Source location (for debugging/visualization)
-    has_doc: bool,              // Universal: documentation presence
+    doc_score: f32,             // Documentation quality score [0.0, 1.0]
     is_external: bool,          // 3rd-party library (always a Boundary)
+    file_path: String,          // Source file path
 }
 
 /// Sum type for polymorphic nodes
@@ -247,7 +247,7 @@ struct FunctionNode {
     // === Behavioral Signals ===
     is_async: bool,
     is_generator: bool,
-    visibility: Visibility,     // Public, Private, Protected
+    visibility: Visibility,     // Public, Private, Protected, Internal
 }
 
 // Derived: Signature Completeness =
@@ -343,6 +343,10 @@ enum EdgeKind {
     Read,               // Function → Variable
     Write,              // Function → Variable
 
+    // ============ Dynamic Expansion (Reverse Dependencies) ============
+    SharedStateWrite,   // Reader → Writer (of shared mutable state)
+    CallIn,             // Callee → Caller (for underspecified functions)
+
     // ============ Annotations & Decorators ============
     /// Decorated → Decorator direction (understanding decorated requires decorator)
     Annotates {
@@ -378,7 +382,13 @@ The core novelty—**Pruning Predicate** $P(v)$—is implemented as a configurab
 ```rust
 pub trait PruningPolicy {
     /// Evaluate if a node acts as a valid Context Boundary
-    fn evaluate(&self, node: &Node, graph: &ContextGraph) -> PruningDecision;
+    fn evaluate(
+        &self,
+        source: &Node,
+        target: &Node,
+        edge_kind: &EdgeKind,
+        graph: &ContextGraph,
+    ) -> PruningDecision;
 }
 
 enum PruningDecision {
@@ -391,26 +401,52 @@ enum PruningDecision {
 
 ```rust
 impl PruningPolicy for AcademicBaseline {
-    fn evaluate(&self, node: &Node, graph: &ContextGraph) -> PruningDecision {
+    fn evaluate(
+        &self,
+        source: &Node,
+        target: &Node,
+        edge_kind: &EdgeKind,
+        graph: &ContextGraph,
+    ) -> PruningDecision {
+        // Special handling for dynamic expansion edges
+        match edge_kind {
+            EdgeKind::SharedStateWrite => return PruningDecision::Transparent,
+            EdgeKind::CallIn => {
+                if let Node::Function(f) = source {
+                    let sig_complete = f.typed_param_count == f.param_count && f.has_return_type;
+                    if sig_complete && f.core.doc_score >= self.doc_threshold() {
+                        return PruningDecision::Boundary;
+                    }
+                }
+                return PruningDecision::Transparent;
+            }
+            _ => {}
+        }
+
         // External nodes (3rd-party libs) are always boundaries
-        if node.core().is_external {
+        if target.core().is_external {
             return PruningDecision::Boundary;
         }
         
-        match node {
+        match target {
             Node::Type(t) => {
                 // Type boundary: must be abstract (interface/protocol) + documented
-                if t.is_abstract && t.core.has_doc {
+                if t.is_abstract && t.core.doc_score >= self.doc_threshold() {
                     PruningDecision::Boundary
                 } else {
                     PruningDecision::Transparent
                 }
             }
             Node::Function(f) => {
+                // Abstract Factory check: returns an abstract type
+                if is_abstract_factory(target, graph) {
+                    return PruningDecision::Boundary;
+                }
+                
                 // Function boundary: signature complete + documented
                 let sig_complete = f.typed_param_count == f.param_count 
                                 && f.has_return_type;
-                if sig_complete && f.core.has_doc {
+                if sig_complete && f.core.doc_score >= self.doc_threshold() {
                     PruningDecision::Boundary
                 } else {
                     PruningDecision::Transparent
@@ -439,4 +475,5 @@ impl PruningPolicy for AcademicBaseline {
 1. **Phase 1**: SCIP Ingestion & Graph Builder (Rust).
 2. **Phase 2**: Baseline Policy (Type Hint + Doc presence check).
 3. **Phase 3**: Dynamic Expansion Logic (State Index for Mutability).
-4. **Phase 4**: Experiment Runner (Batch processing BugsInPy).
+4. **Phase 4**: CLI Tools for Visualization & Statistics.
+5. **Phase 5**: Experiment Runner (Batch processing BugsInPy).

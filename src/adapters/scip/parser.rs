@@ -47,3 +47,50 @@ pub fn find_enclosing_definition<'a>(
     }
     best_def
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_range() {
+        assert_eq!(parse_range(&[1, 2, 3]), (1, 2, 1, 3));
+        assert_eq!(parse_range(&[1, 2, 3, 4]), (1, 2, 3, 4));
+        assert_eq!(parse_range(&[1]), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_encloses() {
+        let outer = vec![1, 0, 10, 0];
+        let inner = vec![2, 0, 5, 0];
+        let outside = vec![0, 0, 5, 0];
+
+        assert!(encloses(&outer, &inner));
+        assert!(!encloses(&inner, &outer));
+        assert!(!encloses(&outer, &outside));
+
+        // Same range
+        assert!(encloses(&outer, &outer));
+    }
+
+    #[test]
+    fn test_find_enclosing_definition() {
+        let defs = vec![
+            (vec![0, 0, 100, 0], "global"),
+            (vec![10, 0, 50, 0], "func"),
+            (vec![20, 0, 30, 0], "inner"),
+        ];
+
+        let ref_range = vec![25, 0, 26, 0];
+        assert_eq!(find_enclosing_definition(&ref_range, &defs), Some("inner"));
+
+        let ref_range_func = vec![15, 0, 16, 0];
+        assert_eq!(
+            find_enclosing_definition(&ref_range_func, &defs),
+            Some("func")
+        );
+
+        let ref_range_none = vec![101, 0, 102, 0];
+        assert_eq!(find_enclosing_definition(&ref_range_none, &defs), None);
+    }
+}

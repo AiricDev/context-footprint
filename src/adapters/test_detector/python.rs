@@ -22,10 +22,12 @@ impl TestDetector for PythonTestDetector {
         }
 
         // Check file name patterns
-        if let Some(filename) = file_path.split('/').last() {
-            if filename.starts_with("test_") || filename.ends_with("_test.py") {
-                return true;
-            }
+        if file_path
+            .split('/')
+            .next_back()
+            .is_some_and(|filename| filename.starts_with("test_") || filename.ends_with("_test.py"))
+        {
+            return true;
         }
 
         // Check symbol patterns
@@ -39,14 +41,19 @@ impl TestDetector for PythonTestDetector {
             // More precise: check if it's a class definition
             if symbol.contains("#") {
                 // This is a method, check if class name starts with Test
-                if let Some(class_part) = symbol.split('#').next() {
-                    if let Some(class_name) = class_part.split('/').last() {
-                        if class_name.starts_with("Test") {
-                            return true;
-                        }
-                    }
+                if symbol.split('#').next().is_some_and(|class_part| {
+                    class_part
+                        .split('/')
+                        .next_back()
+                        .is_some_and(|class_name| class_name.starts_with("Test"))
+                }) {
+                    return true;
                 }
-            } else if symbol.split('/').last().map_or(false, |s| s.starts_with("Test")) {
+            } else if symbol
+                .split('/')
+                .next_back()
+                .is_some_and(|s| s.starts_with("Test"))
+            {
                 return true;
             }
         }

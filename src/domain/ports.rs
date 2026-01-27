@@ -10,7 +10,7 @@ pub trait SemanticDataSource {
 /// Source code reader port
 pub trait SourceReader: Send + Sync {
     fn read(&self, path: &Path) -> Result<String>;
-    
+
     /// Read specific lines from a file (1-indexed, inclusive)
     fn read_lines(&self, path: &str, start_line: usize, end_line: usize) -> Result<Vec<String>>;
 }

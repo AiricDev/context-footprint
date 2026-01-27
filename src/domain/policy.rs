@@ -57,3 +57,23 @@ pub struct NodeInfo {
     pub name: String,
     pub signature: Option<String>, // Function signature
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::edge::EdgeKind;
+    use crate::domain::graph::ContextGraph;
+    use crate::domain::node::Node;
+
+    struct UseDefaultDocThreshold;
+    impl PruningPolicy for UseDefaultDocThreshold {
+        fn evaluate(&self, _: &Node, _: &Node, _: &EdgeKind, _: &ContextGraph) -> PruningDecision {
+            PruningDecision::Transparent
+        }
+    }
+
+    #[test]
+    fn test_default_doc_threshold() {
+        assert!((UseDefaultDocThreshold.doc_threshold() - 0.5).abs() < 1e-5);
+    }
+}

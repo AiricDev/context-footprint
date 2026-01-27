@@ -28,26 +28,25 @@ impl AcademicBaseline {
         // Find the NodeIndex for this function node by comparing node IDs
         let func_node_id = function_node.core().id;
         let mut func_idx = None;
-        for (_symbol, &idx) in &graph.symbol_to_node {
+        for &idx in graph.symbol_to_node.values() {
             if graph.node(idx).core().id == func_node_id {
                 func_idx = Some(idx);
                 break;
             }
         }
-        
+
         if let Some(idx) = func_idx {
             // Check all outgoing edges from this function
             for edge_ref in graph.graph.edges(idx) {
                 if matches!(edge_ref.weight(), EdgeKind::ReturnType) {
                     let target_idx = edge_ref.target();
                     let target_node = graph.node(target_idx);
-                    
+
                     // If return type is an abstract type (Protocol/Interface/Trait)
                     // with sufficient documentation, this is an abstract factory
-                    if let Node::Type(t) = target_node {
-                        if t.is_abstract && t.core.doc_score >= self.doc_threshold {
-                            return true;
-                        }
+                    if matches!(target_node, Node::Type(t) if t.is_abstract && t.core.doc_score >= self.doc_threshold)
+                    {
+                        return true;
                     }
                 }
             }
@@ -101,7 +100,7 @@ impl PruningPolicy for AcademicBaseline {
                 }
             }
             Node::Function(f) => {
-                // Check if this function is an "abstract factory" 
+                // Check if this function is an "abstract factory"
                 // (returns an abstract type, following the Abstract Factory pattern)
                 if self.is_abstract_factory(target, graph) {
                     // Abstract factories are boundaries - we care about the interface they return,
@@ -334,7 +333,7 @@ mod tests {
     #[test]
     fn test_abstract_factory_is_boundary() {
         let policy = AcademicBaseline::default();
-        
+
         // Create a factory function that returns an abstract type
         let factory_core = make_core(0, "get_service", 0.8, false);
         let factory = Node::Function(FunctionNode {
@@ -346,7 +345,7 @@ mod tests {
             is_generator: false,
             visibility: Visibility::Public,
         });
-        
+
         // Create an abstract protocol it returns
         let protocol_core = make_core(1, "ServicePort", 0.9, false);
         let protocol = Node::Type(TypeNode {
@@ -355,13 +354,13 @@ mod tests {
             is_abstract: true,
             type_param_count: 0,
         });
-        
+
         // Build graph with ReturnType edge from factory to protocol
         let mut graph = ContextGraph::new();
         let factory_idx = graph.add_node("get_service".to_string(), factory.clone());
         let protocol_idx = graph.add_node("ServicePort".to_string(), protocol.clone());
         graph.add_edge(factory_idx, protocol_idx, EdgeKind::ReturnType);
-        
+
         // Test: factory function should be recognized as boundary (abstract factory pattern)
         let caller = poorly_documented_function();
         let d = policy.evaluate(&caller, &factory, &EdgeKind::Call, &graph);
@@ -371,20 +370,20 @@ mod tests {
     #[test]
     fn test_poorly_documented_factory_returning_abstract_becomes_boundary() {
         let policy = AcademicBaseline::default();
-        
+
         // Create a factory function with incomplete docs that returns abstract type
         // Normally this would be Transparent, but abstract factory rule makes it Boundary
         let factory_core = make_core(0, "get_service", 0.3, false); // Low doc score
         let factory = Node::Function(FunctionNode {
             core: factory_core,
             param_count: 1,
-            typed_param_count: 0,  // Incomplete signature
+            typed_param_count: 0, // Incomplete signature
             has_return_type: true,
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
         });
-        
+
         // Create an abstract protocol it returns
         let protocol_core = make_core(1, "ServicePort", 0.9, false);
         let protocol = Node::Type(TypeNode {
@@ -393,13 +392,13 @@ mod tests {
             is_abstract: true,
             type_param_count: 0,
         });
-        
+
         // Build graph with ReturnType edge
         let mut graph = ContextGraph::new();
         let factory_idx = graph.add_node("get_service".to_string(), factory.clone());
         let protocol_idx = graph.add_node("ServicePort".to_string(), protocol.clone());
         graph.add_edge(factory_idx, protocol_idx, EdgeKind::ReturnType);
-        
+
         // Test: Even though factory has poor docs and incomplete signature,
         // it becomes Boundary because it returns an abstract type (abstract factory pattern)
         let caller = well_documented_function();

@@ -56,7 +56,7 @@ impl GraphBuilder {
 
             for definition in &document.definitions {
                 let kind = &definition.metadata.kind;
-                
+
                 // Determine if this symbol should be an independent node
                 let should_be_node = match kind {
                     // Always nodes
@@ -74,24 +74,21 @@ impl GraphBuilder {
                     | SymbolKind::Protocol => true,
 
                     // Variable-like nodes: only if they are not parameters or local-like
-                    SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant => {
-                        if let Some(parent_sym) = &definition.metadata.enclosing_symbol {
-                            if let Some(parent_kind) = symbol_to_kind.get(parent_sym) {
-                                match parent_kind {
-                                    SymbolKind::Function
+                    SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant => definition
+                        .metadata
+                        .enclosing_symbol
+                        .as_ref()
+                        .and_then(|parent_sym| symbol_to_kind.get(parent_sym))
+                        .is_none_or(|parent_kind| {
+                            !matches!(
+                                parent_kind,
+                                SymbolKind::Function
                                     | SymbolKind::Method
                                     | SymbolKind::Constructor
                                     | SymbolKind::StaticMethod
-                                    | SymbolKind::AbstractMethod => false, // Local variable or parameter
-                                    _ => true, // Global or class field
-                                }
-                            } else {
-                                true // Parent not in this index -> Assume Global
-                            }
-                        } else {
-                            true // No parent -> Global
-                        }
-                    }
+                                    | SymbolKind::AbstractMethod
+                            )
+                        }),
                     _ => false, // Parameters, Modules, etc. are not independent nodes
                 };
 
@@ -142,7 +139,10 @@ impl GraphBuilder {
         }
 
         // Helper to resolve a symbol to the nearest ancestor that IS a node
-        let resolve_to_node_symbol = |mut sym: String, graph: &ContextGraph, symbol_to_parent: &HashMap<String, String>| -> Option<String> {
+        let resolve_to_node_symbol = |mut sym: String,
+                                      graph: &ContextGraph,
+                                      symbol_to_parent: &HashMap<String, String>|
+         -> Option<String> {
             while !graph.symbol_to_node.contains_key(&sym) {
                 if let Some(parent) = symbol_to_parent.get(&sym) {
                     sym = parent.clone();
@@ -160,10 +160,17 @@ impl GraphBuilder {
 
         for document in &semantic_data.documents {
             for reference in &document.references {
-                let resolved_source_sym = resolve_to_node_symbol(reference.enclosing_symbol.clone(), &graph, &symbol_to_parent);
-                let resolved_target_sym = resolve_to_node_symbol(reference.symbol.clone(), &graph, &symbol_to_parent);
+                let resolved_source_sym = resolve_to_node_symbol(
+                    reference.enclosing_symbol.clone(),
+                    &graph,
+                    &symbol_to_parent,
+                );
+                let resolved_target_sym =
+                    resolve_to_node_symbol(reference.symbol.clone(), &graph, &symbol_to_parent);
 
-                if let (Some(source_sym), Some(target_sym)) = (resolved_source_sym, resolved_target_sym) {
+                if let (Some(source_sym), Some(target_sym)) =
+                    (resolved_source_sym, resolved_target_sym)
+                {
                     let source_idx = *graph.symbol_to_node.get(&source_sym).unwrap();
                     let target_idx = *graph.symbol_to_node.get(&target_sym).unwrap();
 
@@ -174,13 +181,19 @@ impl GraphBuilder {
                     let edge_kind = infer_edge_kind(&reference.role, source_idx, target_idx);
 
                     if matches!(edge_kind, EdgeKind::Write) {
-                        state_writers.entry(target_sym.clone()).or_default().push(source_idx);
+                        state_writers
+                            .entry(target_sym.clone())
+                            .or_default()
+                            .push(source_idx);
                     }
                     if matches!(edge_kind, EdgeKind::Read) {
                         readers.push((source_idx, target_sym.clone()));
                     }
                     if matches!(edge_kind, EdgeKind::Call) {
-                        callers.entry(target_sym.clone()).or_default().push(source_idx);
+                        callers
+                            .entry(target_sym.clone())
+                            .or_default()
+                            .push(source_idx);
                     }
 
                     graph.add_edge(source_idx, target_idx, edge_kind);
@@ -194,47 +207,46 @@ impl GraphBuilder {
                 if let Some(&source_idx) = graph.symbol_to_node.get(&definition.symbol) {
                     for relationship in &definition.metadata.relationships {
                         // Resolve target symbol to a node symbol
-                        if let Some(resolved_target) = resolve_to_node_symbol(
+                        if let Some(target_idx) = resolve_to_node_symbol(
                             relationship.target_symbol.clone(),
                             &graph,
                             &symbol_to_parent,
-                        ) {
-                            if let Some(&target_idx) = graph.symbol_to_node.get(&resolved_target) {
-                                if source_idx == target_idx {
+                        )
+                        .and_then(|resolved_target| {
+                            graph.symbol_to_node.get(&resolved_target).copied()
+                        }) {
+                            if source_idx == target_idx {
+                                continue;
+                            }
+
+                            // Convert relationship kind to edge kind based on source node type
+                            let edge_kind = match relationship.kind {
+                                crate::domain::semantic::RelationshipKind::TypeDefinition => {
+                                    // TypeDefinition means "source uses target as a type"
+                                    // The specific edge depends on what the source is
+                                    match graph.node(source_idx) {
+                                        crate::domain::node::Node::Function(_) => {
+                                            EdgeKind::ReturnType
+                                        }
+                                        crate::domain::node::Node::Variable(_) => {
+                                            EdgeKind::VariableType
+                                        }
+                                        crate::domain::node::Node::Type(_) => EdgeKind::FieldType,
+                                    }
+                                }
+                                crate::domain::semantic::RelationshipKind::Implements => {
+                                    EdgeKind::Implements
+                                }
+                                crate::domain::semantic::RelationshipKind::Inherits => {
+                                    EdgeKind::Inherits
+                                }
+                                crate::domain::semantic::RelationshipKind::References => {
+                                    // Generic references - skip, handled by occurrences
                                     continue;
                                 }
+                            };
 
-                                // Convert relationship kind to edge kind based on source node type
-                                let edge_kind = match relationship.kind {
-                                    crate::domain::semantic::RelationshipKind::TypeDefinition => {
-                                        // TypeDefinition means "source uses target as a type"
-                                        // The specific edge depends on what the source is
-                                        match graph.node(source_idx) {
-                                            crate::domain::node::Node::Function(_) => {
-                                                EdgeKind::ReturnType
-                                            }
-                                            crate::domain::node::Node::Variable(_) => {
-                                                EdgeKind::VariableType
-                                            }
-                                            crate::domain::node::Node::Type(_) => {
-                                                EdgeKind::FieldType
-                                            }
-                                        }
-                                    }
-                                    crate::domain::semantic::RelationshipKind::Implements => {
-                                        EdgeKind::Implements
-                                    }
-                                    crate::domain::semantic::RelationshipKind::Inherits => {
-                                        EdgeKind::Inherits
-                                    }
-                                    crate::domain::semantic::RelationshipKind::References => {
-                                        // Generic references - skip, handled by occurrences
-                                        continue;
-                                    }
-                                };
-
-                                graph.add_edge(source_idx, target_idx, edge_kind);
-                            }
+                            graph.add_edge(source_idx, target_idx, edge_kind);
                         }
                     }
                 }
@@ -312,29 +324,29 @@ fn create_node_from_definition(core: NodeCore, metadata: &SymbolMetadata) -> Res
                 visibility: Visibility::Public, // TODO: extract from metadata
             }))
         }
-        NodeType::Variable => {
-            Ok(Node::Variable(VariableNode {
-                core,
-                has_type_annotation: metadata.signature.is_some(),
-                mutability: Mutability::Mutable, // TODO: infer from context
-                variable_kind: VariableKind::Global, // TODO: infer from context
-            }))
-        }
+        NodeType::Variable => Ok(Node::Variable(VariableNode {
+            core,
+            has_type_annotation: metadata.signature.is_some(),
+            mutability: Mutability::Mutable, // TODO: infer from context
+            variable_kind: VariableKind::Global, // TODO: infer from context
+        })),
         NodeType::Type => {
             // Check if it's abstract based on kind
             let mut is_abstract = matches!(
                 metadata.kind,
                 SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Protocol
             );
-            
+
             // Python Protocol detection: SCIP-python marks Protocols as Class but with Implements relationship to typing.Protocol
             if matches!(metadata.kind, SymbolKind::Class) {
                 is_abstract = metadata.relationships.iter().any(|r| {
-                    matches!(r.kind, crate::domain::semantic::RelationshipKind::Implements)
-                        && r.target_symbol.contains("typing/Protocol#")
+                    matches!(
+                        r.kind,
+                        crate::domain::semantic::RelationshipKind::Implements
+                    ) && r.target_symbol.contains("typing/Protocol#")
                 });
             }
-            
+
             Ok(Node::Type(TypeNode {
                 core,
                 type_kind: match metadata.kind {
@@ -367,5 +379,83 @@ fn infer_edge_kind(
         ReferenceRole::TypeUsage => EdgeKind::ParamType, // Simplified
         ReferenceRole::Import => EdgeKind::Call,         // Simplified
         ReferenceRole::Unknown => EdgeKind::Call,        // Default
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::semantic::SymbolMetadata;
+
+    #[test]
+    fn test_infer_node_type_from_kind() {
+        assert_eq!(
+            infer_node_type_from_kind(&SymbolKind::Function),
+            NodeType::Function
+        );
+        assert_eq!(
+            infer_node_type_from_kind(&SymbolKind::Class),
+            NodeType::Type
+        );
+        assert_eq!(
+            infer_node_type_from_kind(&SymbolKind::Variable),
+            NodeType::Variable
+        );
+        assert_eq!(
+            infer_node_type_from_kind(&SymbolKind::Unknown),
+            NodeType::Variable
+        );
+    }
+
+    #[test]
+    fn test_create_node_from_definition_class_vs_protocol() {
+        let core = NodeCore::new(
+            0,
+            "MyClass".into(),
+            None,
+            10,
+            SourceSpan {
+                start_line: 0,
+                start_column: 0,
+                end_line: 1,
+                end_column: 0,
+            },
+            1.0,
+            false,
+            "file.py".into(),
+        );
+
+        let mut metadata = SymbolMetadata {
+            symbol: "MyClass#".into(),
+            kind: SymbolKind::Class,
+            display_name: "MyClass".into(),
+            documentation: vec![],
+            signature: None,
+            relationships: vec![],
+            enclosing_symbol: None,
+            is_external: false,
+        };
+
+        let node = create_node_from_definition(core.clone(), &metadata).unwrap();
+        if let Node::Type(t) = node {
+            assert_eq!(t.type_kind, TypeKind::Class);
+        } else {
+            panic!("Expected Type node");
+        }
+
+        // Add Protocol relationship
+        metadata
+            .relationships
+            .push(crate::domain::semantic::Relationship {
+                target_symbol: "typing/Protocol#".into(),
+                kind: crate::domain::semantic::RelationshipKind::Implements,
+            });
+
+        let node = create_node_from_definition(core.clone(), &metadata).unwrap();
+        if let Node::Type(t) = node {
+            assert_eq!(t.type_kind, TypeKind::Protocol);
+        } else {
+            panic!("Expected Protocol node");
+        }
     }
 }

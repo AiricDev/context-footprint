@@ -27,6 +27,7 @@ pub struct NodeCore {
 }
 
 impl NodeCore {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: NodeId,
         name: String,

@@ -16,3 +16,23 @@ impl TestDetector for GoTestDetector {
         "go"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detects_go_test_file() {
+        let detector = GoTestDetector;
+        assert!(detector.is_test_code("", "pkg/foo_test.go"));
+        assert!(detector.is_test_code("", "foo_test.go"));
+        assert!(!detector.is_test_code("", "pkg/foo.go"));
+        assert!(!detector.is_test_code("", "main.go"));
+    }
+
+    #[test]
+    fn test_language_returns_go() {
+        let detector = GoTestDetector;
+        assert_eq!(detector.language(), "go");
+    }
+}

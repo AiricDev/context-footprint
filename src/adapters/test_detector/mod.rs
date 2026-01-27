@@ -3,23 +3,23 @@
 //! Different languages have different conventions for test code.
 //! This module provides language-specific test detection strategies.
 
+mod go;
+mod java;
+mod javascript;
 mod python;
 mod rust;
-mod javascript;
-mod java;
-mod go;
 
+pub use go::GoTestDetector;
+pub use java::JavaTestDetector;
+pub use javascript::JavaScriptTestDetector;
 pub use python::PythonTestDetector;
 pub use rust::RustTestDetector;
-pub use javascript::JavaScriptTestDetector;
-pub use java::JavaTestDetector;
-pub use go::GoTestDetector;
 
 /// Trait for detecting test code based on language conventions
 pub trait TestDetector: Send + Sync {
     /// Check if a symbol or file path indicates test code
     fn is_test_code(&self, symbol: &str, file_path: &str) -> bool;
-    
+
     /// Get the language this detector is for
     fn language(&self) -> &str;
 }
@@ -60,7 +60,11 @@ impl UniversalTestDetector {
             return Some(&PythonTestDetector as &dyn TestDetector);
         } else if file_path.ends_with(".rs") {
             return Some(&RustTestDetector as &dyn TestDetector);
-        } else if file_path.ends_with(".js") || file_path.ends_with(".ts") || file_path.ends_with(".jsx") || file_path.ends_with(".tsx") {
+        } else if file_path.ends_with(".js")
+            || file_path.ends_with(".ts")
+            || file_path.ends_with(".jsx")
+            || file_path.ends_with(".tsx")
+        {
             return Some(&JavaScriptTestDetector as &dyn TestDetector);
         } else if file_path.ends_with(".java") {
             return Some(&JavaTestDetector as &dyn TestDetector);
@@ -74,5 +78,42 @@ impl UniversalTestDetector {
 impl Default for UniversalTestDetector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_universal_routes_by_extension() {
+        let d = UniversalTestDetector::new();
+        // Python
+        assert!(d.is_test_code("", "tests/foo.py"));
+        assert!(d.is_test_code("module/test_foo().", "src/module.py"));
+        // Rust
+        assert!(d.is_test_code("", "tests/bar.rs"));
+        assert!(d.is_test_code("", "crate/bar_test.rs"));
+        // JavaScript
+        assert!(d.is_test_code("", "src/__tests__/api.test.js"));
+        assert!(d.is_test_code("", "thing.spec.ts"));
+        // Java
+        assert!(d.is_test_code("", "src/test/java/ExampleTest.java"));
+        // Go
+        assert!(d.is_test_code("", "pkg/foo_test.go"));
+    }
+
+    #[test]
+    fn test_universal_fallback_when_no_extension() {
+        let d = UniversalTestDetector::new();
+        // Unknown extension: fallback to "any detector matches"
+        assert!(d.is_test_code("", "some/path/tests/script"));
+        assert!(d.is_test_code("scip-python ... `m`/test_foo().", "noext"));
+    }
+
+    #[test]
+    fn test_universal_default_constructs() {
+        let d = UniversalTestDetector::default();
+        assert!(!d.is_test_code("", "src/main.go"));
     }
 }

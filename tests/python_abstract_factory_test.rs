@@ -1,11 +1,10 @@
 /// Test Python abstract factory pattern recognition
-/// 
+///
 /// This test uses the real LLMRelay SCIP index to verify:
 /// 1. AuthPort is correctly identified as abstract (Protocol)
 /// 2. get_auth_port has ReturnType edge to AuthPort
 /// 3. is_abstract_factory correctly identifies get_auth_port
 /// 4. get_auth_port's CF doesn't include JuhellmAuthAdapter
-
 use context_footprint::adapters::policy::academic::AcademicBaseline;
 use context_footprint::adapters::scip::adapter::ScipDataSourceAdapter;
 use context_footprint::domain::builder::GraphBuilder;
@@ -14,7 +13,7 @@ use context_footprint::domain::node::Node;
 use context_footprint::domain::policy::{DocumentationScorer, PruningPolicy, SizeFunction};
 use context_footprint::domain::ports::{SemanticDataSource, SourceReader};
 use context_footprint::domain::solver::CfSolver;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 struct MockSourceReader;
 
@@ -27,12 +26,11 @@ impl SourceReader for MockSourceReader {
         } else {
             path
         };
-        
-        std::fs::read_to_string(actual_path).map_err(|e| {
-            anyhow::anyhow!("Failed to read file {:?}: {}", actual_path, e)
-        })
+
+        std::fs::read_to_string(actual_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read file {:?}: {}", actual_path, e))
     }
-    
+
     fn read_lines(
         &self,
         path: &str,
@@ -49,11 +47,7 @@ impl SourceReader for MockSourceReader {
 
 struct MockSizeFunction;
 impl SizeFunction for MockSizeFunction {
-    fn compute(
-        &self,
-        source: &str,
-        span: &context_footprint::domain::node::SourceSpan,
-    ) -> u32 {
+    fn compute(&self, source: &str, span: &context_footprint::domain::node::SourceSpan) -> u32 {
         let lines: Vec<&str> = source.lines().collect();
         let start = span.start_line as usize;
         let end = span.end_line as usize;
@@ -67,17 +61,9 @@ impl SizeFunction for MockSizeFunction {
 
 struct MockDocScorer;
 impl DocumentationScorer for MockDocScorer {
-    fn score(
-        &self,
-        _node: &context_footprint::domain::policy::NodeInfo,
-        doc: Option<&str>,
-    ) -> f32 {
+    fn score(&self, _node: &context_footprint::domain::policy::NodeInfo, doc: Option<&str>) -> f32 {
         if let Some(d) = doc {
-            if !d.is_empty() {
-                1.0
-            } else {
-                0.0
-            }
+            if !d.is_empty() { 1.0 } else { 0.0 }
         } else {
             0.0
         }
@@ -115,13 +101,13 @@ fn test_llmrelay_auth_port_is_abstract() {
             println!("✓ AuthPort is a Type node");
             println!("  is_abstract: {}", t.is_abstract);
             println!("  doc_score: {}", t.core.doc_score);
-            
+
             // Test 2: AuthPort should be abstract (Protocol)
             assert!(
                 t.is_abstract,
                 "AuthPort should be abstract (it's a Protocol), but is_abstract = false"
             );
-            
+
             // Test 3: AuthPort should have good documentation
             assert!(
                 t.core.doc_score >= 0.5,
@@ -264,10 +250,9 @@ fn test_llmrelay_caller_of_get_auth_port_cf_excludes_implementation() {
 
     // Find a function that CALLS get_auth_port
     // For example, find create_response which uses auth
-    let caller_symbols = vec![
-        "scip-python python llmrelay 0.1.0 `app.api.openai.responses`/create_response().",
-    ];
-    
+    let caller_symbols =
+        vec!["scip-python python llmrelay 0.1.0 `app.api.openai.responses`/create_response()."];
+
     let mut found_caller = None;
     for symbol in caller_symbols {
         if let Some(idx) = graph.get_node_by_symbol(symbol) {
@@ -275,7 +260,7 @@ fn test_llmrelay_caller_of_get_auth_port_cf_excludes_implementation() {
             break;
         }
     }
-    
+
     let (caller_symbol, caller_idx) = found_caller.expect("No caller function found");
     println!("Testing caller: {}", caller_symbol);
 
@@ -288,13 +273,12 @@ fn test_llmrelay_caller_of_get_auth_port_cf_excludes_implementation() {
     println!("Reachable nodes: {}", result.reachable_set.len());
 
     // Check if JuhellmAuthAdapter is in the context
-    let juhellm_adapter_symbol =
-        "scip-python python llmrelay 0.1.0 `app.adapters.auth.juhellm_auth_adapter`/JuhellmAuthAdapter#";
-    
+    let juhellm_adapter_symbol = "scip-python python llmrelay 0.1.0 `app.adapters.auth.juhellm_auth_adapter`/JuhellmAuthAdapter#";
+
     let juhellm_node_id = graph
         .get_node_by_symbol(juhellm_adapter_symbol)
         .map(|idx| graph.node(idx).core().id);
-    
+
     let juhellm_in_context = if let Some(juhellm_id) = juhellm_node_id {
         result.reachable_set.contains(&juhellm_id)
     } else {

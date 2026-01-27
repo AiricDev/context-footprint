@@ -17,10 +17,12 @@ impl TestDetector for RustTestDetector {
         }
 
         // Check test file suffix
-        if let Some(filename) = file_path.split('/').last() {
-            if filename.ends_with("_test.rs") {
-                return true;
-            }
+        if file_path
+            .split('/')
+            .next_back()
+            .is_some_and(|filename| filename.ends_with("_test.rs"))
+        {
+            return true;
         }
 
         // Note: #[test] annotations are not visible in SCIP symbols
@@ -31,5 +33,34 @@ impl TestDetector for RustTestDetector {
 
     fn language(&self) -> &str {
         "rust"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detects_rust_tests_directory() {
+        let detector = RustTestDetector;
+        assert!(detector.is_test_code("", "tests/integration_test.rs"));
+        assert!(detector.is_test_code("", "crate/tests/foo.rs"));
+        assert!(detector.is_test_code("", "tests/helpers/mod.rs"));
+        assert!(!detector.is_test_code("", "src/lib.rs"));
+    }
+
+    #[test]
+    fn test_detects_rust_test_file_suffix() {
+        let detector = RustTestDetector;
+        assert!(detector.is_test_code("", "src/foo_test.rs"));
+        assert!(detector.is_test_code("", "crate/bar_test.rs"));
+        assert!(!detector.is_test_code("", "src/foo.rs"));
+        assert!(!detector.is_test_code("", "src/lib.rs"));
+    }
+
+    #[test]
+    fn test_language_returns_rust() {
+        let detector = RustTestDetector;
+        assert_eq!(detector.language(), "rust");
     }
 }

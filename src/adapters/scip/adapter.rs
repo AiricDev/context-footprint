@@ -354,89 +354,86 @@ fn enrich_semantic_data(data: &mut SemanticData) -> Result<()> {
         } else {
             ""
         };
-        
-        match language {
-            "python" => enrich_python_return_types(document, &data.project_root)?,
-            // Other languages can be added here as needed
-            _ => {}
+
+        if language == "python" {
+            enrich_python_return_types(document, &data.project_root)?;
         }
     }
     Ok(())
 }
 
 /// Enrich Python function definitions with return type relationships
-/// 
+///
 /// SCIP-python doesn't always generate TypeDefinition relationships for return types.
 /// This function infers return types by analyzing occurrences and source code patterns.
 fn enrich_python_return_types(doc: &mut DocumentData, project_root: &str) -> Result<()> {
     use std::path::Path;
-    
+
     // Handle file:// URI format in project_root
-    let root_path = if project_root.starts_with("file://") {
-        &project_root[7..] // Strip "file://" prefix
-    } else {
-        project_root
-    };
-    
+    let root_path = project_root.strip_prefix("file://").unwrap_or(project_root);
+
     // Read source file
     let source_path = Path::new(root_path).join(&doc.relative_path);
     let source_code = std::fs::read_to_string(&source_path)
         .context(format!("Failed to read source file: {:?}", source_path))?;
     let lines: Vec<&str> = source_code.lines().collect();
-    
+
     // Process each function definition
     for definition in &mut doc.definitions {
         // Only process functions
         if !matches!(
             definition.metadata.kind,
-            SymbolKind::Function 
-                | SymbolKind::Method 
-                | SymbolKind::Constructor 
+            SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Constructor
                 | SymbolKind::StaticMethod
                 | SymbolKind::AbstractMethod
         ) {
             continue;
         }
-        
+
         // Find return type candidates from references in this document
         for reference in &doc.references {
             // Must be enclosed by this function
             if reference.enclosing_symbol != definition.symbol {
                 continue;
             }
-            
+
             // Must be a type usage (or Read, which scip-python uses for type annotations)
-            if !matches!(reference.role, ReferenceRole::TypeUsage | ReferenceRole::Call | ReferenceRole::Read) {
+            if !matches!(
+                reference.role,
+                ReferenceRole::TypeUsage | ReferenceRole::Call | ReferenceRole::Read
+            ) {
                 continue;
             }
-            
+
             // Check if this is a return type annotation using Python syntax patterns
             // This will filter out non-return-type references by checking for -> and : pattern
             if is_python_return_type_annotation(reference, definition, &lines) {
                 // Check if we already have this relationship
                 let already_exists = definition.metadata.relationships.iter().any(|r| {
-                    r.target_symbol == reference.symbol 
+                    r.target_symbol == reference.symbol
                         && matches!(r.kind, RelationshipKind::TypeDefinition)
                 });
-                
+
                 if !already_exists {
                     definition.metadata.relationships.push(Relationship {
                         target_symbol: reference.symbol.clone(),
                         kind: RelationshipKind::TypeDefinition,
                     });
                 }
-                
+
                 // Only one return type per function
                 break;
             }
         }
     }
-    
+
     Ok(())
 }
 
 /// Check if a type reference is a Python return type annotation
-/// 
+///
 /// Python return type syntax: `def func(...) -> ReturnType:`
 /// We verify this by checking for the presence of `->` and `:` on the same line
 fn is_python_return_type_annotation(
@@ -447,18 +444,18 @@ fn is_python_return_type_annotation(
     // Must be in the signature area (within a few lines of function definition)
     let line_num = type_ref.range.start_line as usize;
     let func_line = function_def.range.start_line as usize;
-    
+
     if line_num < func_line || line_num > func_line + 5 {
         return false;
     }
-    
+
     // Get the line containing the type reference
     if line_num >= lines.len() {
         return false;
     }
-    
+
     let line = lines[line_num];
-    
+
     // Python return type pattern: must contain both "->" and end with ":"
     // Examples:
     //   def func() -> Type:
@@ -522,5 +519,114 @@ mod tests {
         assert!(result.documents.is_empty());
         assert!(result.external_symbols.is_empty());
         assert!(result.project_root.is_empty());
+    }
+
+    #[test]
+    fn test_infer_kind_from_symbol() {
+        assert_eq!(infer_kind_from_symbol("abc/"), SymbolKind::Namespace);
+        assert_eq!(infer_kind_from_symbol("abc#"), SymbolKind::Class);
+        assert_eq!(infer_kind_from_symbol("abc()."), SymbolKind::Function);
+        assert_eq!(
+            infer_kind_from_symbol("Class#method()."),
+            SymbolKind::Method
+        );
+        assert_eq!(
+            infer_kind_from_symbol("func().(param)"),
+            SymbolKind::Parameter
+        );
+        assert_eq!(infer_kind_from_symbol("func().[T]"), SymbolKind::Parameter);
+        assert_eq!(infer_kind_from_symbol("module:"), SymbolKind::Module);
+        assert_eq!(infer_kind_from_symbol("macro!"), SymbolKind::Macro);
+        assert_eq!(infer_kind_from_symbol("var."), SymbolKind::Variable);
+        assert_eq!(infer_kind_from_symbol("Class#field."), SymbolKind::Field);
+        assert_eq!(infer_kind_from_symbol("unknown"), SymbolKind::Unknown);
+    }
+
+    #[test]
+    fn test_convert_symbol_kind() {
+        assert_eq!(convert_symbol_kind(17), SymbolKind::Function);
+        assert_eq!(convert_symbol_kind(26), SymbolKind::Method);
+        assert_eq!(convert_symbol_kind(7), SymbolKind::Class);
+        assert_eq!(convert_symbol_kind(61), SymbolKind::Variable);
+        assert_eq!(convert_symbol_kind(15), SymbolKind::Field);
+        assert_eq!(convert_symbol_kind(37), SymbolKind::Parameter);
+        assert_eq!(convert_symbol_kind(30), SymbolKind::Namespace);
+        assert_eq!(convert_symbol_kind(29), SymbolKind::Module);
+        assert_eq!(convert_symbol_kind(25), SymbolKind::Macro);
+        assert_eq!(convert_symbol_kind(999), SymbolKind::Unknown);
+    }
+
+    #[test]
+    fn test_convert_role() {
+        use scip::SymbolRole::*;
+        assert_eq!(convert_role(WriteAccess as i32), ReferenceRole::Write);
+        assert_eq!(convert_role(ReadAccess as i32), ReferenceRole::Read);
+        assert_eq!(convert_role(Import as i32), ReferenceRole::Import);
+        assert_eq!(convert_role(0), ReferenceRole::Call);
+    }
+
+    #[test]
+    fn test_is_python_return_type_annotation() {
+        use crate::domain::semantic::{Reference, SourceRange};
+
+        let func_def = Definition {
+            symbol: "func".into(),
+            range: SourceRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 0,
+            },
+            enclosing_range: SourceRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 1,
+                end_column: 0,
+            },
+            metadata: create_default_metadata("func"),
+        };
+
+        let type_ref = Reference {
+            symbol: "MyType".into(),
+            range: SourceRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 0,
+            },
+            enclosing_symbol: "func".into(),
+            role: ReferenceRole::Read,
+        };
+
+        let lines = vec!["def func() -> MyType:"];
+        assert!(is_python_return_type_annotation(
+            &type_ref, &func_def, &lines
+        ));
+
+        let lines_no_arrow = vec!["def func(x: MyType):"];
+        assert!(!is_python_return_type_annotation(
+            &type_ref,
+            &func_def,
+            &lines_no_arrow
+        ));
+
+        let lines_wrong_line = vec!["def func():", "    return MyType()"];
+        let type_ref_wrong = Reference {
+            symbol: "MyType".into(),
+            range: SourceRange {
+                start_line: 1,
+                start_column: 0,
+                end_line: 1,
+                end_column: 0,
+            },
+            enclosing_symbol: "func".into(),
+            role: ReferenceRole::Read,
+        };
+        // It's on line 1, which is within func_line + 5, but doesn't have -> and :
+        assert!(!is_python_return_type_annotation(
+            &type_ref_wrong,
+            &func_def,
+            &lines_wrong_line
+        ));
     }
 }

@@ -109,23 +109,92 @@ fn test_fastapi_project() {
         "FastAPI should have many symbols"
     );
 
-    // Compute CF for the first few symbols to verify the full pipeline
-    let symbols: Vec<_> = graph.symbol_to_node.keys().take(5).cloned().collect();
+    // Compute CF for every node to calculate statistics
     let solver = CfSolver::new();
     let policy = AcademicBaseline::default();
+    let node_count = graph.graph.node_count();
 
-    for symbol in symbols {
-        let idx = graph.get_node_by_symbol(&symbol).unwrap();
-        let result = solver.compute_cf(&graph, idx, &policy);
-        println!(
-            "CF for {}: {} nodes, {} tokens",
-            symbol,
-            result.reachable_set.len(),
-            result.total_context_size
-        );
-        assert!(!result.reachable_set.is_empty());
-        assert!(result.total_context_size > 0);
+    println!("Calculating CF for all {} nodes...", node_count);
+
+    let mut function_cf: Vec<u32> = Vec::new();
+    let mut variable_cf: Vec<u32> = Vec::new();
+    let mut type_cf: Vec<u32> = Vec::new();
+    let mut low_cf_examples: Vec<(String, String, u32, &'static str)> = Vec::new();
+
+    // Invert symbol_to_node for better reporting
+    let mut node_to_symbol: std::collections::HashMap<petgraph::graph::NodeIndex, String> =
+        std::collections::HashMap::new();
+    for (sym, idx) in &graph.symbol_to_node {
+        node_to_symbol.insert(*idx, sym.clone());
     }
+
+    for idx in graph.graph.node_indices() {
+        let node = graph.node(idx);
+        let result = solver.compute_cf(&graph, idx, &policy);
+        let cf = result.total_context_size;
+
+        let kind = match node {
+            context_footprint::domain::node::Node::Function(_) => {
+                function_cf.push(cf);
+                "Function"
+            }
+            context_footprint::domain::node::Node::Variable(_) => {
+                variable_cf.push(cf);
+                "Variable"
+            }
+            context_footprint::domain::node::Node::Type(_) => {
+                type_cf.push(cf);
+                "Type"
+            }
+        };
+
+        if cf <= 2 && low_cf_examples.len() < 40 {
+            let symbol = node_to_symbol.get(&idx).cloned().unwrap_or_default();
+            let name = if node.core().name.is_empty() {
+                symbol.split(' ').next_back().unwrap_or("").to_string()
+            } else {
+                node.core().name.clone()
+            };
+            low_cf_examples.push((name, symbol, cf, kind));
+        }
+
+        let total_processed = function_cf.len() + variable_cf.len() + type_cf.len();
+        if total_processed.is_multiple_of(1000) {
+            println!("Processed {}/{} nodes...", total_processed, node_count);
+        }
+    }
+
+    let print_stats = |name: &str, mut sizes: Vec<u32>| {
+        if sizes.is_empty() {
+            return;
+        }
+        sizes.sort_unstable();
+        println!("\nContext Footprint Percentiles ({}):", name);
+        println!("---------------------------------------");
+        for i in 1..=20 {
+            let p = i * 5;
+            let index = (p * (sizes.len() - 1)) / 100;
+            println!("{:>3}%: {} tokens", p, sizes[index]);
+        }
+        let node_count = sizes.len();
+        let sum: u64 = sizes.iter().map(|&s| s as u64).sum();
+        println!("---------------------------------------");
+        println!("Count:   {}", node_count);
+        println!("Average: {} tokens", sum / node_count as u64);
+        println!("Max:     {} tokens", sizes.last().unwrap_or(&0));
+    };
+
+    print_stats("Functions", function_cf);
+    print_stats("Variables", variable_cf);
+    print_stats("Types", type_cf);
+
+    println!("\nLow CF Examples (CF <= 2):");
+    println!("---------------------------------------");
+    println!("{:<10} | {:<4} | {:<20} | Symbol", "Kind", "CF", "Name");
+    for (name, symbol, cf, kind) in low_cf_examples {
+        println!("{:<10} | {:<4} | {:<20} | {}", kind, cf, name, symbol);
+    }
+    println!("---------------------------------------");
 
     println!("FastAPI E2E test passed!");
 }

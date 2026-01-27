@@ -23,6 +23,7 @@ pub struct NodeCore {
     pub span: SourceSpan,
     pub doc_score: f32, // Documentation quality score [0.0, 1.0]
     pub is_external: bool,
+    pub file_path: String, // Path to source file (relative to project root)
 }
 
 impl NodeCore {
@@ -34,6 +35,7 @@ impl NodeCore {
         span: SourceSpan,
         doc_score: f32,
         is_external: bool,
+        file_path: String,
     ) -> Self {
         Self {
             id,
@@ -43,6 +45,7 @@ impl NodeCore {
             span,
             doc_score,
             is_external,
+            file_path,
         }
     }
 }

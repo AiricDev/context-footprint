@@ -110,6 +110,7 @@ mod tests {
             },
             doc_score,
             is_external,
+            "test.py".to_string(),
         )
     }
 

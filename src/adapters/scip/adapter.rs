@@ -32,12 +32,23 @@ impl SemanticDataSource for ScipDataSourceAdapter {
             .map(|sym| convert_symbol_info(sym, true))
             .collect();
 
+        // Create a global symbol lookup map
+        let mut symbol_map = std::collections::HashMap::new();
+        for sym in &index.external_symbols {
+            symbol_map.insert(sym.symbol.clone(), convert_symbol_info(sym, true));
+        }
+        for doc in &index.documents {
+            for sym in &doc.symbols {
+                symbol_map.insert(sym.symbol.clone(), convert_symbol_info(sym, false));
+            }
+        }
+
         // Process each document
         let documents = index
             .documents
             .iter()
             .map(|doc| {
-                let (definitions, references) = partition_occurrences(doc);
+                let (definitions, references) = partition_occurrences_with_map(doc, &symbol_map);
 
                 DocumentData {
                     relative_path: doc.relative_path.clone(),
@@ -71,7 +82,10 @@ fn load_scip_index<P: AsRef<std::path::Path>>(path: P) -> Result<scip::Index> {
     Ok(index)
 }
 
-fn partition_occurrences(doc: &scip::Document) -> (Vec<Definition>, Vec<Reference>) {
+fn partition_occurrences_with_map(
+    doc: &scip::Document,
+    symbol_map: &std::collections::HashMap<String, SymbolMetadata>,
+) -> (Vec<Definition>, Vec<Reference>) {
     let mut definitions = Vec::new();
     let mut references = Vec::new();
 
@@ -93,12 +107,10 @@ fn partition_occurrences(doc: &scip::Document) -> (Vec<Definition>, Vec<Referenc
 
     for occ in &doc.occurrences {
         if (occ.symbol_roles & (scip::SymbolRole::Definition as i32)) != 0 {
-            // Find corresponding SymbolInformation
-            let metadata = doc
-                .symbols
-                .iter()
-                .find(|s| s.symbol == occ.symbol)
-                .map(|s| convert_symbol_info(s, false))
+            // Find corresponding SymbolInformation in global map
+            let metadata = symbol_map
+                .get(&occ.symbol)
+                .cloned()
                 .unwrap_or_else(|| create_default_metadata(&occ.symbol));
 
             let (start_line, start_col, end_line, end_col) = parse_range(&occ.range);
@@ -151,7 +163,13 @@ fn partition_occurrences(doc: &scip::Document) -> (Vec<Definition>, Vec<Referenc
 }
 
 fn convert_symbol_info(sym: &scip::SymbolInformation, is_external: bool) -> SymbolMetadata {
-    let kind = convert_symbol_kind(sym.kind() as i32);
+    let mut kind = convert_symbol_kind(sym.kind() as i32);
+
+    // If kind is Unknown, try to infer from symbol string
+    if matches!(kind, SymbolKind::Unknown) {
+        kind = infer_kind_from_symbol(&sym.symbol);
+    }
+
     let relationships = sym
         .relationships
         .iter()
@@ -178,9 +196,12 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, is_external: bool) -> Symb
 }
 
 fn create_default_metadata(symbol: &str) -> SymbolMetadata {
+    // Infer kind from SCIP symbol format
+    let kind = infer_kind_from_symbol(symbol);
+
     SymbolMetadata {
         symbol: symbol.to_string(),
-        kind: SymbolKind::Unknown,
+        kind,
         display_name: symbol.to_string(),
         documentation: Vec::new(),
         signature: None,
@@ -188,6 +209,77 @@ fn create_default_metadata(symbol: &str) -> SymbolMetadata {
         enclosing_symbol: None,
         is_external: false,
     }
+}
+
+/// Infer SymbolKind from SCIP symbol string format
+/// Based on SCIP specification (scip.proto):
+/// - <namespace>      ::= <name> '/'
+/// - <type>           ::= <name> '#'
+/// - <term>           ::= <name> '.'
+/// - <meta>           ::= <name> ':'
+/// - <macro>          ::= <name> '!'
+/// - <method>         ::= <name> '(' (<disambiguator>)? ').'
+/// - <type-parameter> ::= '[' <name> ']'
+/// - <parameter>      ::= '(' <name> ')'
+fn infer_kind_from_symbol(symbol: &str) -> SymbolKind {
+    // Check the last descriptor pattern by examining the end of the symbol
+
+    // Method: ends with `).` (not just `.`)
+    if symbol.ends_with(").") {
+        // Check if it's in a class context (has `#` before the method name)
+        if symbol.contains('#') {
+            return SymbolKind::Method;
+        } else {
+            return SymbolKind::Function;
+        }
+    }
+
+    // Parameter: ends with `)` but not `).`
+    // Pattern: `function().(param_name)` or just `(param_name)`
+    if symbol.ends_with(')') && !symbol.ends_with(").") {
+        return SymbolKind::Parameter;
+    }
+
+    // Type parameter: ends with `]`
+    if symbol.ends_with(']') {
+        return SymbolKind::Parameter; // Treat type parameters as parameters
+    }
+
+    // Type: ends with `#`
+    if symbol.ends_with('#') {
+        return SymbolKind::Class;
+    }
+
+    // Meta: ends with `:` (e.g., module __init__)
+    if symbol.ends_with(':') {
+        return SymbolKind::Module;
+    }
+
+    // Macro: ends with `!`
+    if symbol.ends_with('!') {
+        return SymbolKind::Macro;
+    }
+
+    // Namespace: ends with `/`
+    if symbol.ends_with('/') {
+        return SymbolKind::Namespace;
+    }
+
+    // Term: ends with `.` (variable, constant, or field)
+    // Need to distinguish between field and variable based on context
+    if symbol.ends_with('.') {
+        // If there's a `#` before the term, it's likely a field
+        // Pattern: `Class#field.`
+        if symbol.contains('#') {
+            return SymbolKind::Field;
+        } else {
+            // Module-level variable or constant
+            return SymbolKind::Variable;
+        }
+    }
+
+    // Default: Unknown
+    SymbolKind::Unknown
 }
 
 fn convert_symbol_kind(kind: i32) -> SymbolKind {

@@ -42,6 +42,17 @@ impl GraphBuilder {
             let source_code = source_reader.read(&source_path)?;
 
             for definition in &document.definitions {
+                // Skip scope-only symbols (they're preserved as enclosing_symbol in other nodes)
+                if matches!(
+                    definition.metadata.kind,
+                    SymbolKind::Module
+                        | SymbolKind::Namespace
+                        | SymbolKind::Package
+                        | SymbolKind::Macro
+                ) {
+                    continue;
+                }
+
                 let node_id = graph.graph.node_count() as u32;
 
                 // Compute context_size
@@ -80,6 +91,7 @@ impl GraphBuilder {
                     },
                     doc_score,
                     definition.metadata.is_external,
+                    document.relative_path.clone(),
                 );
 
                 // Create specific node type
@@ -165,9 +177,14 @@ fn infer_node_type_from_kind(kind: &SymbolKind) -> NodeType {
         | SymbolKind::Constructor
         | SymbolKind::StaticMethod
         | SymbolKind::AbstractMethod => NodeType::Function,
-        SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant | SymbolKind::Parameter => {
-            NodeType::Variable
-        }
+        SymbolKind::Variable
+        | SymbolKind::Field
+        | SymbolKind::Constant
+        | SymbolKind::Parameter
+        | SymbolKind::Module // Module __init__ treated as variable-like
+        | SymbolKind::Namespace // Namespace/package treated as variable-like
+        | SymbolKind::Package
+        | SymbolKind::Macro => NodeType::Variable, // Macro definitions are declaration-like
         SymbolKind::Class
         | SymbolKind::Interface
         | SymbolKind::Struct
@@ -175,7 +192,7 @@ fn infer_node_type_from_kind(kind: &SymbolKind) -> NodeType {
         | SymbolKind::TypeAlias
         | SymbolKind::Trait
         | SymbolKind::Protocol => NodeType::Type,
-        _ => NodeType::Function, // Default
+        _ => NodeType::Variable, // Default: treat unknown as variable (safer than function)
     }
 }
 

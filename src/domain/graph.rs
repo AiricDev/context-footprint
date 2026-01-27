@@ -70,7 +70,16 @@ mod tests {
             end_line: 1,
             end_column: 10,
         };
-        let core = NodeCore::new(id, name.to_string(), None, context_size, span, 0.5, false);
+        let core = NodeCore::new(
+            id,
+            name.to_string(),
+            None,
+            context_size,
+            span,
+            0.5,
+            false,
+            "test.py".to_string(),
+        );
         Node::Function(FunctionNode {
             core,
             param_count: 0,

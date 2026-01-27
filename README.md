@@ -49,23 +49,130 @@ cargo build --release
 cd your-python-project
 scip-python index . --output index.scip
 
-# 2. Run context-footprint analysis
-cd path/to/context-footprint
-cargo run --release -- analyze \
-  --scip your-python-project/index.scip \
-  --symbol "my_module.MyClass.my_method"
+# 2. Analyze CF distribution across your project
+./target/release/context-footprint index.scip stats
+
+# 3. Find top 10 functions with highest CF
+./target/release/context-footprint index.scip top --limit 10
+
+# 4. Search for symbols by keyword
+./target/release/context-footprint index.scip search "MyClass"
+
+# 5. Compute CF for a specific symbol
+./target/release/context-footprint index.scip compute \
+  "scip-python python myproject abc123 \`mymodule\`/MyClass#my_method()."
 ```
 
-**Output Example**:
+**Example Output (--stats)**:
 ```
-Symbol: my_module.MyClass.my_method
-Context Footprint: 2,847 tokens
-Reachable Units: 23
-  - Functions: 15
-  - Types: 6
-  - Variables: 2
-Traversal stopped at 8 boundaries
+Loading SCIP index from: index.scip
+Building context graph...
+Graph Summary:
+  Nodes: 1,245
+  Edges: 2,318
+
+Computing CF distribution for all nodes...
+  Processed 1000/1245 nodes...
+
+============================================================
+
+Functions - Context Footprint Distribution:
+  Total count: 856
+
+  Percentiles:
+      5%:        0 tokens
+     10%:        1 tokens
+     15%:        2 tokens
+     20%:        5 tokens
+     25%:       12 tokens
+     30%:       25 tokens
+     35%:       38 tokens
+     40%:       67 tokens
+     45%:      112 tokens
+     50%:      245 tokens
+     55%:      478 tokens
+     60%:      892 tokens
+     65%:    1,234 tokens
+     70%:    2,156 tokens
+     75%:    3,890 tokens
+     80%:    6,745 tokens
+     85%:   12,034 tokens
+     90%:   20,567 tokens
+     95%:   38,912 tokens
+    100%:   85,423 tokens
+
+  Summary:
+    Average:    8,234 tokens
+    Median:       245 tokens
+    Min:            0 tokens
+    Max:       85,423 tokens
+
+============================================================
+
+Types - Context Footprint Distribution:
+  Total count: 342
+
+  Percentiles:
+     ... (similar format)
+
+============================================================
 ```
+
+## 🎮 CLI Commands
+
+Run `./target/release/context-footprint --help` to see all available commands.
+
+### `stats` - Project Health Overview
+
+Analyze CF distribution across your entire codebase:
+
+```bash
+./target/release/context-footprint <scip_path> stats
+```
+
+**Use cases:** Project health assessment, track coupling over time, identify refactoring targets
+
+### `top` - Find High CF Nodes
+
+List functions/types with highest context footprint:
+
+```bash
+./target/release/context-footprint <scip_path> top --limit 10 --node-type function
+```
+
+**Use cases:** Prioritize refactoring, identify God functions/classes
+
+### `search` - Find Symbols by Keyword
+
+Search for symbols matching a pattern:
+
+```bash
+./target/release/context-footprint <scip_path> search "MyClass" --with-cf
+```
+
+**Use cases:** Symbol lookup, dependency analysis, debugging
+
+### `compute` - Analyze Single Symbol
+
+Compute CF for a specific function/class:
+
+```bash
+./target/release/context-footprint <scip_path> compute \
+  "scip-python python myproject ... /MyClass#my_method()."
+```
+
+**Use cases:** Deep dive into specific coupling, pre-commit checks, track refactoring progress
+
+### `context` - View Full Context Code
+
+Print all code included in a symbol's context:
+
+```bash
+./target/release/context-footprint <scip_path> context \
+  "scip-python python myproject ... /my_function()."
+```
+
+**Use cases:** Understand what contributes to CF, verify calculations, visualize dependencies
 
 ## 📐 How It Works
 

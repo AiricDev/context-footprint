@@ -114,4 +114,23 @@ impl SourceReader for MockSourceReader {
             .cloned()
             .ok_or_else(|| anyhow!("File not found: {}", path.display()))
     }
+
+    fn read_lines(&self, path: &str, start_line: usize, end_line: usize) -> Result<Vec<String>> {
+        let path_buf = PathBuf::from(path);
+        let content = self.files
+            .get(&path_buf)
+            .ok_or_else(|| anyhow!("File not found: {}", path))?;
+        
+        let lines: Vec<String> = content.lines().map(String::from).collect();
+        
+        // Convert 1-indexed to 0-indexed and ensure valid range
+        let start_idx = start_line.saturating_sub(1);
+        let end_idx = end_line.min(lines.len());
+        
+        if start_idx >= lines.len() {
+            return Ok(Vec::new());
+        }
+        
+        Ok(lines[start_idx..end_idx].to_vec())
+    }
 }

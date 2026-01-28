@@ -98,6 +98,9 @@ impl GraphBuilder {
 
                 let node_id = graph.graph.node_count() as u32;
 
+                // Extract documentation strings
+                let doc_texts: Vec<String> = definition.metadata.documentation.clone();
+
                 // Compute context_size
                 let span = SourceSpan {
                     start_line: definition.enclosing_range.start_line,
@@ -105,14 +108,10 @@ impl GraphBuilder {
                     end_line: definition.enclosing_range.end_line,
                     end_column: definition.enclosing_range.end_column,
                 };
-                let context_size = self.size_function.compute(&source_code, &span);
+                let context_size = self.size_function.compute(&source_code, &span, &doc_texts);
 
                 // Compute doc_score
-                let doc_text = definition
-                    .metadata
-                    .documentation
-                    .first()
-                    .map(|s| s.as_str());
+                let doc_text = doc_texts.first().map(|s| s.as_str());
                 let language = document
                     .relative_path
                     .split('.')

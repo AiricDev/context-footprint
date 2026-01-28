@@ -47,7 +47,12 @@ impl SourceReader for MockSourceReader {
 
 struct MockSizeFunction;
 impl SizeFunction for MockSizeFunction {
-    fn compute(&self, source: &str, span: &context_footprint::domain::node::SourceSpan) -> u32 {
+    fn compute(
+        &self,
+        source: &str,
+        span: &context_footprint::domain::node::SourceSpan,
+        _doc_texts: &[String],
+    ) -> u32 {
         let lines: Vec<&str> = source.lines().collect();
         let start = span.start_line as usize;
         let end = span.end_line as usize;

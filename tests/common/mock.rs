@@ -30,7 +30,7 @@ impl Default for MockSizeFunction {
 }
 
 impl SizeFunction for MockSizeFunction {
-    fn compute(&self, _source: &str, _span: &SourceSpan) -> u32 {
+    fn compute(&self, _source: &str, _span: &SourceSpan, _doc_texts: &[String]) -> u32 {
         self.fixed_size
     }
 }

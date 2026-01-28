@@ -17,7 +17,7 @@ impl TiktokenSizeFunction {
 }
 
 impl SizeFunction for TiktokenSizeFunction {
-    fn compute(&self, source: &str, span: &SourceSpan) -> u32 {
+    fn compute(&self, source: &str, span: &SourceSpan, doc_texts: &[String]) -> u32 {
         // Extract the code snippet from the span
         let lines: Vec<&str> = source.lines().collect();
 
@@ -62,16 +62,46 @@ impl SizeFunction for TiktokenSizeFunction {
             }
         }
 
+        // --- Comment Stripping Logic ---
+
+        // 1. Remove recognized doc_texts contents
+        let mut pure_logic = code_snippet;
+        for doc in doc_texts {
+            pure_logic = pure_logic.replace(doc, "");
+        }
+
+        // 2. Strip common comment markers and empty comment lines
+        // This covers ///, //, #, and block comment markers like /*, */, *
+        let lines: Vec<String> = pure_logic
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                // If the line consists only of comment markers or is empty after markers removed
+                if trimmed.starts_with("///")
+                    || trimmed.starts_with("//")
+                    || trimmed.starts_with('#')
+                    || trimmed.starts_with("/*")
+                    || trimmed.starts_with("*/")
+                    || trimmed == "*"
+                {
+                    "" // Effectively remove the line
+                } else {
+                    line // Keep the line as is (minus the doc content removed earlier)
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        let final_text = lines.join("\n");
+
         // Use a simple token counting approach (approximate)
-        // In a real implementation, you would use the tiktoken crate
-        // For now, we'll use a simple word-based approximation
-        count_tokens_approx(&code_snippet)
+        count_tokens_approx(&final_text)
     }
 }
 
 fn count_tokens_approx(text: &str) -> u32 {
     // Simple approximation: count words and punctuation
-    // In production, use tiktoken-rs crate
     text.split_whitespace()
         .map(|word| {
             // Rough approximation: 1 token per word, plus punctuation
@@ -96,7 +126,7 @@ mod tests {
             end_line: 0,
             end_column: 18,
         };
-        let n = f.compute(source, &span);
+        let n = f.compute(source, &span, &[]);
         assert!(n >= 1);
     }
 
@@ -110,7 +140,7 @@ mod tests {
             end_line: 2,
             end_column: 5,
         };
-        let n = f.compute(source, &span);
+        let n = f.compute(source, &span, &[]);
         assert!(n >= 1);
     }
 
@@ -124,7 +154,7 @@ mod tests {
             end_line: 0,
             end_column: 2,
         };
-        let n = f.compute(source, &span);
+        let n = f.compute(source, &span, &[]);
         assert!(n <= source.len() as u32); // sanity: not larger than char count
     }
 
@@ -138,7 +168,7 @@ mod tests {
             end_line: 0,
             end_column: 0,
         };
-        let n = f.compute(source, &span);
+        let n = f.compute(source, &span, &[]);
         assert_eq!(n, 0);
     }
 
@@ -152,6 +182,26 @@ mod tests {
             end_line: 10,
             end_column: 5,
         };
-        assert_eq!(f.compute(source, &span), 0);
+        assert_eq!(f.compute(source, &span, &[]), 0);
+    }
+
+    #[test]
+    fn test_exclude_comments() {
+        let f = TiktokenSizeFunction::new();
+        // 10 lines of comments + 1 line of code
+        let source = "/// doc\n/// doc\n/// doc\n/// doc\n/// doc\n/// doc\n/// doc\n/// doc\n/// doc\n/// doc\nfn main() {}";
+        let span = SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 10,
+            end_column: 12,
+        };
+
+        let doc_texts = vec!["doc".to_string()];
+        let size = f.compute(source, &span, &doc_texts);
+
+        // "fn main() {}" should be very few tokens (around 3-5)
+        println!("Size with comments stripped: {}", size);
+        assert!(size < 10);
     }
 }

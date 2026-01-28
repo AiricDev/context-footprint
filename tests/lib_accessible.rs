@@ -23,7 +23,7 @@ fn test_mock_size_function() {
         end_line: 1,
         end_column: 5,
     };
-    assert_eq!(f.compute("hello", &span), 42);
+    assert_eq!(f.compute("hello", &span, &[]), 42);
 }
 
 #[test]

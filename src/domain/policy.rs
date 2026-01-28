@@ -36,8 +36,9 @@ pub trait PruningPolicy: Send + Sync {
 
 /// Size function trait - computes context size
 pub trait SizeFunction: Send + Sync {
-    /// Compute the context size for a given source code span
-    fn compute(&self, source: &str, span: &SourceSpan) -> u32;
+    /// Compute the context size for a given source code span,
+    /// potentially excluding documentation to avoid "punishing" well-documented code.
+    fn compute(&self, source: &str, span: &SourceSpan, doc_texts: &[String]) -> u32;
 }
 
 // SourceSpan is defined in node.rs

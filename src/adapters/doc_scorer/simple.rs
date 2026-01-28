@@ -36,6 +36,7 @@ mod tests {
             node_type: NodeType::Function,
             name: "test".into(),
             signature: None,
+            language: None,
         }
     }
 

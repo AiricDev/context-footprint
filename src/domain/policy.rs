@@ -56,6 +56,7 @@ pub struct NodeInfo {
     pub node_type: NodeType,
     pub name: String,
     pub signature: Option<String>, // Function signature
+    pub language: Option<String>,  // Programming language
 }
 
 #[cfg(test)]

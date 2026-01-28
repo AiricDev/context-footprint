@@ -113,10 +113,16 @@ impl GraphBuilder {
                     .documentation
                     .first()
                     .map(|s| s.as_str());
+                let language = document
+                    .relative_path
+                    .split('.')
+                    .last()
+                    .map(|ext| ext.to_lowercase());
                 let node_info = NodeInfo {
                     node_type: infer_node_type_from_kind(kind),
                     name: definition.metadata.display_name.clone(),
                     signature: definition.metadata.signature.clone(),
+                    language,
                 };
                 let doc_score = self.doc_scorer.score(&node_info, doc_text);
 

@@ -36,6 +36,7 @@ fn test_mock_doc_scorer() {
         node_type: NodeType::Function,
         name: "foo".into(),
         signature: None,
+        language: None,
     };
     assert_eq!(s.score(&info, Some("doc")), 0.8);
     assert_eq!(s.score(&info, None), 0.0);

@@ -16,7 +16,7 @@ pub fn compute_cf_for_symbol(graph: &ContextGraph, symbol: &str) -> Result<()> {
 
     let policy = AcademicBaseline::default();
     let solver = CfSolver::new();
-    let result = solver.compute_cf(graph, node_idx, &policy);
+    let result = solver.compute_cf(graph, node_idx, &policy, None);
 
     println!("CF Result:");
     println!("  Total context size: {} tokens", result.total_context_size);
@@ -57,7 +57,7 @@ pub fn display_top_cf_nodes(
             continue;
         }
 
-        let result = solver.compute_cf(graph, node_idx, &policy);
+        let result = solver.compute_cf(graph, node_idx, &policy, None);
         cf_results.push((symbol.clone(), result.total_context_size, type_str));
     }
 
@@ -115,7 +115,7 @@ pub fn search_symbols(
             }
 
             // Always compute CF for sorting, even if not displaying
-            let result = solver.compute_cf(graph, node_idx, &policy);
+            let result = solver.compute_cf(graph, node_idx, &policy, None);
             matches.push((symbol.clone(), type_str, result.total_context_size));
         }
     }
@@ -176,6 +176,7 @@ pub fn display_context_code(
     _show_boundaries: bool,
     source_reader: &dyn SourceReader,
     project_root: &str,
+    max_tokens: Option<u32>,
 ) -> Result<()> {
     println!("Computing context for symbol: {}", symbol);
 
@@ -185,105 +186,126 @@ pub fn display_context_code(
 
     let policy = AcademicBaseline::default();
     let solver = CfSolver::new();
-    let result = solver.compute_cf(graph, node_idx, &policy);
+    let result = solver.compute_cf(graph, node_idx, &policy, max_tokens);
 
     println!("\nContext Summary:");
     println!("  Total size: {} tokens", result.total_context_size);
     println!("  Reachable nodes: {}", result.reachable_set.len());
+    if let Some(limit) = max_tokens {
+        println!("  Max tokens: {}", limit);
+    }
     println!("{}", "=".repeat(80));
 
-    // Group nodes by file for better organization
-    let mut files_map: std::collections::HashMap<String, Vec<NodeIndex>> =
-        std::collections::HashMap::new();
-
-    for &node_id in &result.reachable_set {
-        // Find the NodeIndex for this node_id
-        let idx = graph
-            .graph
-            .node_indices()
-            .find(|&idx| graph.node(idx).core().id == node_id)
-            .unwrap();
-
-        let node = graph.node(idx);
-        let file_path = &node.core().file_path;
-
-        files_map
-            .entry(file_path.clone())
-            .or_insert_with(Vec::new)
-            .push(idx);
-    }
-
-    // Sort files for consistent output
-    let mut file_list: Vec<_> = files_map.iter().collect();
-    file_list.sort_by_key(|(path, _)| *path);
-
-    for (file_path, nodes) in file_list {
-        let full_path = std::path::Path::new(project_root).join(file_path);
-        let full_path_str = full_path.to_string_lossy();
-
-        println!("\n\u{1F4C4} File: {}", file_path);
-        println!("{}", "-".repeat(80));
-
-        // Sort nodes by start line
-        let mut sorted_nodes = nodes.clone();
-        sorted_nodes.sort_by_key(|&idx| graph.node(idx).core().span.start_line);
-
-        // Filter out nodes that are contained within another node
-        let mut top_level_nodes = Vec::new();
-        for &idx in &sorted_nodes {
-            let core = graph.node(idx).core();
-
-            let is_sub_node = symbol_is_parameter(graph, idx);
-
-            let is_contained = top_level_nodes.iter().any(|&prev_idx| {
-                let prev_core = graph.node(prev_idx).core();
-                core.span.start_line >= prev_core.span.start_line
-                    && core.span.end_line <= prev_core.span.end_line
-                    && idx != prev_idx
-            });
-
-            if !is_contained && !is_sub_node {
-                top_level_nodes.push(idx);
-            }
+    for (depth, layer) in result.reachable_nodes_by_layer.iter().enumerate() {
+        if layer.is_empty() {
+            continue;
         }
 
-        for node_idx in top_level_nodes {
-            let node = graph.node(node_idx);
-            let core = node.core();
+        println!(
+            "\n\u{1F310} Layer {}: {}",
+            depth,
+            if depth == 0 {
+                "Observed Symbol"
+            } else {
+                "Direct Dependencies"
+            }
+        );
+        println!("{}", "=".repeat(40));
 
-            // Get the symbol for this node
-            let symbol = graph
-                .symbol_to_node
-                .iter()
-                .find(|&(_, &idx)| idx == node_idx)
-                .map(|(s, _)| s.as_str())
-                .unwrap_or(&core.name);
+        // Group nodes by file within this layer
+        let mut files_map: std::collections::HashMap<String, Vec<NodeIndex>> =
+            std::collections::HashMap::new();
 
-            println!(
-                "\n  Symbol: {}",
-                symbol.split('/').next_back().unwrap_or(symbol)
-            );
-            println!(
-                "  Lines: {}-{}",
-                core.span.start_line + 1,
-                core.span.end_line + 1
-            );
+        for &node_id in layer {
+            // Find the NodeIndex for this node_id
+            let idx = graph
+                .graph
+                .node_indices()
+                .find(|&idx| graph.node(idx).core().id == node_id)
+                .unwrap();
 
-            // Read and display the code
-            match source_reader.read_lines(
-                &full_path_str,
-                core.span.start_line as usize,
-                core.span.end_line as usize,
-            ) {
-                Ok(lines) => {
-                    println!("  Code:");
-                    for (i, line) in lines.iter().enumerate() {
-                        let line_num = core.span.start_line as usize + i + 1;
-                        println!("    {:4} | {}", line_num, line);
-                    }
+            let node = graph.node(idx);
+            let file_path = &node.core().file_path;
+
+            files_map
+                .entry(file_path.clone())
+                .or_insert_with(Vec::new)
+                .push(idx);
+        }
+
+        // Sort files for consistent output within layer
+        let mut file_list: Vec<_> = files_map.iter().collect();
+        file_list.sort_by_key(|(path, _)| *path);
+
+        for (file_path, nodes) in file_list {
+            let full_path = std::path::Path::new(project_root).join(file_path);
+            let full_path_str = full_path.to_string_lossy();
+
+            println!("\n  \u{1F4C4} File: {}", file_path);
+
+            // Sort nodes by start line within file
+            let mut sorted_nodes = nodes.clone();
+            sorted_nodes.sort_by_key(|&idx| graph.node(idx).core().span.start_line);
+
+            // Filter out nodes that are contained within another node (e.g. nested functions)
+            // unless we want to see everything.
+            let mut top_level_nodes = Vec::new();
+            for &idx in &sorted_nodes {
+                let core = graph.node(idx).core();
+
+                let is_sub_node = symbol_is_parameter(graph, idx);
+
+                let is_contained = top_level_nodes.iter().any(|&prev_idx| {
+                    let prev_core = graph.node(prev_idx).core();
+                    core.span.start_line >= prev_core.span.start_line
+                        && core.span.end_line <= prev_core.span.end_line
+                        && idx != prev_idx
+                });
+
+                if !is_contained && !is_sub_node {
+                    top_level_nodes.push(idx);
                 }
-                Err(e) => {
-                    println!("  [Error reading code: {}]", e);
+            }
+
+            for node_idx in top_level_nodes {
+                let node = graph.node(node_idx);
+                let core = node.core();
+
+                // Get the symbol for this node
+                let node_symbol = graph
+                    .symbol_to_node
+                    .iter()
+                    .find(|&(_, &idx)| idx == node_idx)
+                    .map(|(s, _)| s.as_str())
+                    .unwrap_or(&core.name);
+
+                println!(
+                    "    Symbol: {} ({} tokens)",
+                    node_symbol.split('/').next_back().unwrap_or(node_symbol),
+                    core.context_size
+                );
+                println!(
+                    "    Lines: {}-{}",
+                    core.span.start_line + 1,
+                    core.span.end_line + 1
+                );
+
+                // Read and display the code
+                match source_reader.read_lines(
+                    &full_path_str,
+                    core.span.start_line as usize,
+                    core.span.end_line as usize,
+                ) {
+                    Ok(lines) => {
+                        println!("    Code:");
+                        for (i, line) in lines.iter().enumerate() {
+                            let line_num = core.span.start_line as usize + i + 1;
+                            println!("      {:4} | {}", line_num, line);
+                        }
+                    }
+                    Err(e) => {
+                        println!("      [Error reading code: {}]", e);
+                    }
                 }
             }
         }
@@ -324,7 +346,7 @@ pub fn compute_and_display_cf_stats(graph: &ContextGraph, include_tests: bool) -
             }
         }
 
-        let result = solver.compute_cf(graph, node_idx, &policy);
+        let result = solver.compute_cf(graph, node_idx, &policy, None);
         let cf = result.total_context_size;
 
         match node {
@@ -526,8 +548,12 @@ mod tests {
         let graph = create_test_graph();
         let reader = MockReader;
 
-        assert!(display_context_code(&graph, "sym/func1().", false, &reader, "/root").is_ok());
-        assert!(display_context_code(&graph, "nonexistent", false, &reader, "/root").is_err());
+        assert!(
+            display_context_code(&graph, "sym/func1().", false, &reader, "/root", None).is_ok()
+        );
+        assert!(
+            display_context_code(&graph, "nonexistent", false, &reader, "/root", None).is_err()
+        );
     }
 
     #[test]

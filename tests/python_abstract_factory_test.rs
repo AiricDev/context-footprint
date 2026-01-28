@@ -272,7 +272,7 @@ fn test_llmrelay_caller_of_get_auth_port_cf_excludes_implementation() {
     // Compute CF with AcademicBaseline policy
     let policy = Box::new(AcademicBaseline::default());
     let solver = CfSolver::new();
-    let result = solver.compute_cf(&graph, caller_idx, policy.as_ref());
+    let result = solver.compute_cf(&graph, caller_idx, policy.as_ref(), None);
 
     println!("Caller CF: {} tokens", result.total_context_size);
     println!("Reachable nodes: {}", result.reachable_set.len());

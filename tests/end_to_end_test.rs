@@ -56,7 +56,7 @@ fn test_simple_python_project_when_scip_present() {
     let start = graph.get_node_by_symbol(&first_symbol).unwrap();
     let solver = CfSolver::new();
     let policy = AcademicBaseline::default();
-    let result = solver.compute_cf(&graph, start, &policy);
+    let result = solver.compute_cf(&graph, start, &policy, None);
 
     assert!(!result.reachable_set.is_empty());
     assert!(result.total_context_size >= graph.node(start).core().context_size);
@@ -130,7 +130,7 @@ fn test_fastapi_project() {
 
     for idx in graph.graph.node_indices() {
         let node = graph.node(idx);
-        let result = solver.compute_cf(&graph, idx, &policy);
+        let result = solver.compute_cf(&graph, idx, &policy, None);
         let cf = result.total_context_size;
 
         let kind = match node {

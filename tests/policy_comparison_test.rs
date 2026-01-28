@@ -52,8 +52,8 @@ fn test_academic_vs_strict_different_cf() {
     let academic = AcademicBaseline::default();
     let strict = StrictPolicy::default();
 
-    let cf_academic = solver.compute_cf(&graph, start_idx, &academic);
-    let cf_strict = solver.compute_cf(&graph, start_idx, &strict);
+    let cf_academic = solver.compute_cf(&graph, start_idx, &academic, None);
+    let cf_strict = solver.compute_cf(&graph, start_idx, &strict, None);
 
     // Academic: B is well-doc + complete sig -> boundary, so we don't traverse to C.
     // Strict: functions always transparent, so we traverse to C.
@@ -104,7 +104,7 @@ fn test_strict_policy_smaller_context_footprint() {
 
     let start_idx = graph.get_node_by_symbol("sym::func_a").unwrap();
     let solver = CfSolver::new();
-    let cf_strict = solver.compute_cf(&graph, start_idx, &StrictPolicy::default());
+    let cf_strict = solver.compute_cf(&graph, start_idx, &StrictPolicy::default(), None);
 
     assert!(cf_strict.total_context_size >= 10);
     assert!(!cf_strict.reachable_set.is_empty());

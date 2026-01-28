@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone)]
 pub struct CfResult {
     pub reachable_set: HashSet<NodeId>,
+    pub reachable_nodes_ordered: Vec<NodeId>,
+    pub reachable_nodes_by_layer: Vec<Vec<NodeId>>,
     pub total_context_size: u32,
 }
 
@@ -32,42 +34,114 @@ impl CfSolver {
         graph: &ContextGraph,
         start: NodeIndex,
         policy: &dyn PruningPolicy,
+        max_tokens: Option<u32>,
     ) -> CfResult {
         let mut visited = HashSet::new();
+        let mut ordered = Vec::new();
+        let mut layers: Vec<Vec<NodeId>> = Vec::new();
         let mut queue = VecDeque::new();
         let mut total_size = 0;
 
-        queue.push_back(start);
+        // queue stores (node_index, depth)
+        queue.push_back((start, 0));
 
-        while let Some(current) = queue.pop_front() {
-            let current_id = graph.node(current).core().id;
+        while let Some((current, depth)) = queue.pop_front() {
+            let current_node = graph.node(current);
+            let current_id = current_node.core().id;
+
             if !visited.insert(current_id) {
                 continue;
             }
-            total_size += graph.node(current).core().context_size;
 
-            for (neighbor, edge_kind) in graph.neighbors(current) {
-                let source_node = graph.node(current);
+            let node_size = current_node.core().context_size;
+            total_size += node_size;
+            ordered.push(current_id);
+
+            // Add to layers
+            while layers.len() <= depth {
+                layers.push(Vec::new());
+            }
+            layers[depth].push(current_id);
+
+            // Check if we exceeded max_tokens
+            if let Some(limit) = max_tokens {
+                if total_size >= limit {
+                    break;
+                }
+            }
+
+            // Get neighbors and sort them by symbol for deterministic traversal
+            let mut neighbors: Vec<_> = graph.neighbors(current).collect();
+            neighbors.sort_by(|(a_idx, _), (b_idx, _)| {
+                let a_sym = graph
+                    .symbol_to_node
+                    .iter()
+                    .find(|&(_, &idx)| idx == *a_idx)
+                    .map(|(s, _)| s.as_str())
+                    .unwrap_or("");
+                let b_sym = graph
+                    .symbol_to_node
+                    .iter()
+                    .find(|&(_, &idx)| idx == *b_idx)
+                    .map(|(s, _)| s.as_str())
+                    .unwrap_or("");
+                a_sym.cmp(b_sym)
+            });
+
+            for (neighbor, edge_kind) in neighbors {
                 let neighbor_node = graph.node(neighbor);
                 let neighbor_id = neighbor_node.core().id;
-                let decision = policy.evaluate(source_node, neighbor_node, edge_kind, graph);
+                let decision = policy.evaluate(current_node, neighbor_node, edge_kind, graph);
 
                 if matches!(
                     decision,
                     crate::domain::policy::PruningDecision::Transparent
                 ) {
-                    queue.push_back(neighbor);
+                    queue.push_back((neighbor, depth + 1));
                 } else {
                     // Boundary: count as reached and include its size, but do not traverse
-                    if visited.insert(neighbor_id) {
-                        total_size += neighbor_node.core().context_size;
+                    if !visited.contains(&neighbor_id) {
+                        let b_size = neighbor_node.core().context_size;
+
+                        // Check if adding boundary node exceeds limit
+                        if let Some(limit) = max_tokens {
+                            if total_size + b_size > limit {
+                                continue;
+                            }
+                        }
+
+                        if visited.insert(neighbor_id) {
+                            total_size += b_size;
+                            ordered.push(neighbor_id);
+
+                            let b_depth = depth + 1;
+                            while layers.len() <= b_depth {
+                                layers.push(Vec::new());
+                            }
+                            layers[b_depth].push(neighbor_id);
+                        }
                     }
+                }
+
+                // Sub-early check after adding boundary
+                if let Some(limit) = max_tokens {
+                    if total_size >= limit {
+                        break;
+                    }
+                }
+            }
+
+            if let Some(limit) = max_tokens {
+                if total_size >= limit {
+                    break;
                 }
             }
         }
 
         CfResult {
             reachable_set: visited,
+            reachable_nodes_ordered: ordered,
+            reachable_nodes_by_layer: layers,
             total_context_size: total_size,
         }
     }
@@ -144,7 +218,7 @@ mod tests {
         let mut graph = ContextGraph::new();
         let idx = graph.add_node("sym::a".into(), test_node(0, "a", 100));
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, idx, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, idx, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 1);
         assert!(result.reachable_set.contains(&0));
         assert_eq!(result.total_context_size, 100);
@@ -159,7 +233,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
     }
@@ -176,7 +250,7 @@ mod tests {
         graph.add_edge(b, d, EdgeKind::Call);
         graph.add_edge(c, d, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 4);
         assert_eq!(result.total_context_size, 10 + 20 + 30 + 40);
     }
@@ -191,7 +265,7 @@ mod tests {
         graph.add_edge(b, c, EdgeKind::Call);
         graph.add_edge(c, a, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
     }
@@ -205,7 +279,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysBoundary);
+        let result = solver.compute_cf(&graph, a, &AlwaysBoundary, None);
         assert_eq!(result.reachable_set.len(), 2); // a and b; c is not traversed
         assert_eq!(result.total_context_size, 10 + 20); // a and b both count
     }
@@ -219,7 +293,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 60);
     }
@@ -233,7 +307,7 @@ mod tests {
         graph.add_edge(r, w1, EdgeKind::SharedStateWrite);
         graph.add_edge(r, w2, EdgeKind::SharedStateWrite);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, r, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, r, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
     }
@@ -245,7 +319,7 @@ mod tests {
         let caller = graph.add_node("sym::caller".into(), test_node(1, "caller", 25));
         graph.add_edge(callee, caller, EdgeKind::CallIn);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, callee, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, callee, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 2);
         assert_eq!(result.total_context_size, 10 + 25);
     }
@@ -259,8 +333,8 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let res_trans = solver.compute_cf(&graph, a, &AlwaysTransparent);
-        let res_bound = solver.compute_cf(&graph, a, &AlwaysBoundary);
+        let res_trans = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
+        let res_bound = solver.compute_cf(&graph, a, &AlwaysBoundary, None);
         assert_eq!(res_trans.total_context_size, 60);
         assert_eq!(res_bound.total_context_size, 30); // a and b, c not traversed
         assert_eq!(res_trans.reachable_set.len(), 3);
@@ -274,7 +348,7 @@ mod tests {
         let _b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
         graph.add_edge(a, a, EdgeKind::Call); // self-loop only, b is disconnected
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 1);
         assert_eq!(result.total_context_size, 10);
     }
@@ -288,7 +362,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(a, c, EdgeKind::ParamType);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 60);
     }
@@ -302,7 +376,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, b, &AlwaysTransparent);
+        let result = solver.compute_cf(&graph, b, &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 2);
         assert_eq!(result.total_context_size, 20 + 30);
     }
@@ -314,7 +388,7 @@ mod tests {
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 99));
         graph.add_edge(a, b, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysBoundary);
+        let result = solver.compute_cf(&graph, a, &AlwaysBoundary, None);
         assert!(result.reachable_set.contains(&0));
         assert!(result.reachable_set.contains(&1));
         assert_eq!(result.total_context_size, 10 + 99);

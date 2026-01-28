@@ -66,6 +66,9 @@ enum Commands {
         /// Also show which nodes are boundaries (stop traversal)
         #[arg(short, long)]
         show_boundaries: bool,
+        /// Max tokens to include in output
+        #[arg(short, long)]
+        max_tokens: Option<u32>,
     },
 }
 
@@ -123,6 +126,7 @@ fn main() -> Result<()> {
         Commands::Context {
             symbol,
             show_boundaries,
+            max_tokens,
         } => {
             cli::display_context_code(
                 &graph,
@@ -130,6 +134,7 @@ fn main() -> Result<()> {
                 *show_boundaries,
                 &source_reader,
                 &semantic_data.project_root,
+                *max_tokens,
             )?;
         }
     }

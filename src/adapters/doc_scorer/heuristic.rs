@@ -37,18 +37,18 @@ struct RustExtractor;
 impl LanguageDocExtractor for RustExtractor {
     fn extract_params(&self, signature: &str) -> Vec<String> {
         // Simple regex-less extraction for Rust fn signature: fn name(a: T, b: T) -> R
-        if let Some(start) = signature.find('(') {
-            if let Some(end) = signature.find(')') {
-                let params_str = &signature[start + 1..end];
-                return params_str
-                    .split(',')
-                    .filter_map(|p| {
-                        let parts: Vec<&str> = p.split(':').collect();
-                        parts.first().map(|s| s.trim().to_string())
-                    })
-                    .filter(|s| !s.is_empty() && s != "self" && s != "&self" && s != "&mut self")
-                    .collect();
-            }
+        if let Some(start) = signature.find('(')
+            && let Some(end) = signature.find(')')
+        {
+            let params_str = &signature[start + 1..end];
+            return params_str
+                .split(',')
+                .filter_map(|p| {
+                    let parts: Vec<&str> = p.split(':').collect();
+                    parts.first().map(|s| s.trim().to_string())
+                })
+                .filter(|s| !s.is_empty() && s != "self" && s != "&self" && s != "&mut self")
+                .collect();
         }
         vec![]
     }
@@ -62,21 +62,21 @@ struct PythonExtractor;
 impl LanguageDocExtractor for PythonExtractor {
     fn extract_params(&self, signature: &str) -> Vec<String> {
         // def name(a: T, b=V) -> R
-        if let Some(start) = signature.find('(') {
-            if let Some(end) = signature.rfind(')') {
-                let params_str = &signature[start + 1..end];
-                return params_str
-                    .split(',')
-                    .filter_map(|p| {
-                        // Split by : (type hint), = (default value), or just take the name
-                        let name_part = p.split(':').next()?.split('=').next()?.trim();
-                        // Remove leading * or ** for star-args
-                        let clean_name = name_part.trim_start_matches('*');
-                        Some(clean_name.to_string())
-                    })
-                    .filter(|s| !s.is_empty() && s != "self" && s != "cls")
-                    .collect();
-            }
+        if let Some(start) = signature.find('(')
+            && let Some(end) = signature.rfind(')')
+        {
+            let params_str = &signature[start + 1..end];
+            return params_str
+                .split(',')
+                .filter_map(|p| {
+                    // Split by : (type hint), = (default value), or just take the name
+                    let name_part = p.split(':').next()?.split('=').next()?.trim();
+                    // Remove leading * or ** for star-args
+                    let clean_name = name_part.trim_start_matches('*');
+                    Some(clean_name.to_string())
+                })
+                .filter(|s| !s.is_empty() && s != "self" && s != "cls")
+                .collect();
         }
         vec![]
     }

@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+**/*.rs.bk
+*.tar.gz
+*.zip
+coverage/
+tarpaulin-report.html

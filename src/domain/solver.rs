@@ -64,10 +64,10 @@ impl CfSolver {
             layers[depth].push(current_id);
 
             // Check if we exceeded max_tokens
-            if let Some(limit) = max_tokens {
-                if total_size >= limit {
-                    break;
-                }
+            if let Some(limit) = max_tokens
+                && total_size >= limit
+            {
+                break;
             }
 
             // Get neighbors and sort them by symbol for deterministic traversal
@@ -104,10 +104,10 @@ impl CfSolver {
                         let b_size = neighbor_node.core().context_size;
 
                         // Check if adding boundary node exceeds limit
-                        if let Some(limit) = max_tokens {
-                            if total_size + b_size > limit {
-                                continue;
-                            }
+                        if let Some(limit) = max_tokens
+                            && total_size + b_size > limit
+                        {
+                            continue;
                         }
 
                         if visited.insert(neighbor_id) {
@@ -124,17 +124,17 @@ impl CfSolver {
                 }
 
                 // Sub-early check after adding boundary
-                if let Some(limit) = max_tokens {
-                    if total_size >= limit {
-                        break;
-                    }
+                if let Some(limit) = max_tokens
+                    && total_size >= limit
+                {
+                    break;
                 }
             }
 
-            if let Some(limit) = max_tokens {
-                if total_size >= limit {
-                    break;
-                }
+            if let Some(limit) = max_tokens
+                && total_size >= limit
+            {
+                break;
             }
         }
 

@@ -115,7 +115,7 @@ impl GraphBuilder {
                 let language = document
                     .relative_path
                     .split('.')
-                    .last()
+                    .next_back()
                     .map(|ext| ext.to_lowercase());
                 let node_info = NodeInfo {
                     node_type: infer_node_type_from_kind(kind),

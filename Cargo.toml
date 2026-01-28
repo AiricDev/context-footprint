@@ -2,6 +2,16 @@
 name = "context-footprint"
 version = "0.1.0"
 edition = "2024"
+description = "A static analysis tool for measuring architectural context exposure in codebases."
+license = "Apache-2.0"
+repository = "https://github.com/AiricDev/context-footprint"
+readme = "README.md"
+keywords = ["static-analysis", "metrics", "context", "scip", "code-architect"]
+categories = ["development-tools"]
+
+[[bin]]
+name = "cftool"
+path = "src/main.rs"
 
 [dependencies]
 prost = "0.13"

@@ -22,10 +22,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compute CF for a specific symbol
+    /// Compute CF for specific symbols (union)
     Compute {
-        /// Symbol to analyze (e.g., "scip-python python myapp abc123 `module`/Class#method().")
-        symbol: String,
+        /// Symbols to analyze
+        #[arg(required = true)]
+        symbols: Vec<String>,
     },
     /// Show CF distribution statistics across all nodes
     Stats {
@@ -102,8 +103,8 @@ fn main() -> Result<()> {
     println!();
 
     match &cli.command {
-        Commands::Compute { symbol } => {
-            cli::compute_cf_for_symbol(&graph, symbol)?;
+        Commands::Compute { symbols } => {
+            cli::compute_cf_for_symbols(&graph, symbols)?;
         }
         Commands::Stats { include_tests } => {
             cli::compute_and_display_cf_stats(&graph, *include_tests)?;

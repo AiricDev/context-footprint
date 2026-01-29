@@ -159,3 +159,38 @@ fn test_cli_context_when_fixture_present() {
     // Symbol not found is acceptable; we still exercised the context branch
     let _ = (stdout, out2);
 }
+
+#[test]
+fn test_cli_compute_multi_symbols() {
+    let Some(bin) = bin() else {
+        eprintln!("Skipping CLI test: CARGO_BIN_EXE not set");
+        return;
+    };
+    if !Path::new(SIMPLE_PYTHON_SCIP).exists() {
+        eprintln!("Skipping: {} not found", SIMPLE_PYTHON_SCIP);
+        return;
+    }
+    // Just run compute with two arbitrary symbols (even if they don't exist, we test the CLI parsing)
+    // But better to use something that might exist or just verify it doesn't crash.
+    let out = Command::new(&bin)
+        .args([
+            SIMPLE_PYTHON_SCIP,
+            "compute",
+            "scip-python python simple_python 0.1.0 `main`/main().",
+            "scip-python python simple_python 0.1.0 `utils`/add().",
+        ])
+        .output()
+        .expect("run compute multi");
+
+    // We don't strictly require success because the symbols might change,
+    // but the command should at least parse the multiple arguments.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    if !out.status.success() {
+        assert!(stderr.contains("Symbol not found") || stderr.contains("not found"));
+    } else {
+        assert!(stdout.contains("Starting symbols: 2"));
+        assert!(stdout.contains("Total context size:"));
+    }
+}

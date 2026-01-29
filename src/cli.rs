@@ -7,18 +7,23 @@ use crate::domain::solver::CfSolver;
 use anyhow::Result;
 use petgraph::graph::NodeIndex;
 
-pub fn compute_cf_for_symbol(graph: &ContextGraph, symbol: &str) -> Result<()> {
-    println!("Computing CF for symbol: {}", symbol);
+pub fn compute_cf_for_symbols(graph: &ContextGraph, symbols: &[String]) -> Result<()> {
+    println!("Computing CF for symbols: {:?}", symbols);
 
-    let node_idx = graph
-        .get_node_by_symbol(symbol)
-        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", symbol))?;
+    let mut start_indices = Vec::new();
+    for symbol in symbols {
+        let node_idx = graph
+            .get_node_by_symbol(symbol)
+            .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", symbol))?;
+        start_indices.push(node_idx);
+    }
 
     let policy = AcademicBaseline::default();
     let solver = CfSolver::new();
-    let result = solver.compute_cf(graph, node_idx, &policy, None);
+    let result = solver.compute_cf(graph, &start_indices, &policy, None);
 
     println!("CF Result:");
+    println!("  Starting symbols: {}", symbols.len());
     println!("  Total context size: {} tokens", result.total_context_size);
     println!("  Reachable nodes: {}", result.reachable_set.len());
 
@@ -57,7 +62,7 @@ pub fn display_top_cf_nodes(
             continue;
         }
 
-        let result = solver.compute_cf(graph, node_idx, &policy, None);
+        let result = solver.compute_cf(graph, &[node_idx], &policy, None);
         cf_results.push((symbol.clone(), result.total_context_size, type_str));
     }
 
@@ -115,7 +120,7 @@ pub fn search_symbols(
             }
 
             // Always compute CF for sorting, even if not displaying
-            let result = solver.compute_cf(graph, node_idx, &policy, None);
+            let result = solver.compute_cf(graph, &[node_idx], &policy, None);
             matches.push((symbol.clone(), type_str, result.total_context_size));
         }
     }
@@ -186,7 +191,7 @@ pub fn display_context_code(
 
     let policy = AcademicBaseline::default();
     let solver = CfSolver::new();
-    let result = solver.compute_cf(graph, node_idx, &policy, max_tokens);
+    let result = solver.compute_cf(graph, &[node_idx], &policy, max_tokens);
 
     println!("\nContext Summary:");
     println!("  Total size: {} tokens", result.total_context_size);
@@ -346,7 +351,7 @@ pub fn compute_and_display_cf_stats(graph: &ContextGraph, include_tests: bool) -
             }
         }
 
-        let result = solver.compute_cf(graph, node_idx, &policy, None);
+        let result = solver.compute_cf(graph, &[node_idx], &policy, None);
         let cf = result.total_context_size;
 
         match node {
@@ -505,8 +510,8 @@ mod tests {
     #[test]
     fn test_compute_cf_for_symbol_basic() {
         let graph = create_test_graph();
-        assert!(compute_cf_for_symbol(&graph, "sym/func1().").is_ok());
-        assert!(compute_cf_for_symbol(&graph, "nonexistent").is_err());
+        assert!(compute_cf_for_symbols(&graph, &["sym/func1().".to_string()]).is_ok());
+        assert!(compute_cf_for_symbols(&graph, &["nonexistent".to_string()]).is_err());
     }
 
     #[test]

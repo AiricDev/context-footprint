@@ -28,11 +28,11 @@ impl CfSolver {
         Self
     }
 
-    /// Compute CF for a given starting node
+    /// Compute CF for a given set of starting nodes
     pub fn compute_cf(
         &self,
         graph: &ContextGraph,
-        start: NodeIndex,
+        starts: &[NodeIndex],
         policy: &dyn PruningPolicy,
         max_tokens: Option<u32>,
     ) -> CfResult {
@@ -43,7 +43,9 @@ impl CfSolver {
         let mut total_size = 0;
 
         // queue stores (node_index, depth)
-        queue.push_back((start, 0));
+        for &start in starts {
+            queue.push_back((start, 0));
+        }
 
         while let Some((current, depth)) = queue.pop_front() {
             let current_node = graph.node(current);
@@ -218,7 +220,7 @@ mod tests {
         let mut graph = ContextGraph::new();
         let idx = graph.add_node("sym::a".into(), test_node(0, "a", 100));
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, idx, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[idx], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 1);
         assert!(result.reachable_set.contains(&0));
         assert_eq!(result.total_context_size, 100);
@@ -233,7 +235,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
     }
@@ -250,7 +252,7 @@ mod tests {
         graph.add_edge(b, d, EdgeKind::Call);
         graph.add_edge(c, d, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 4);
         assert_eq!(result.total_context_size, 10 + 20 + 30 + 40);
     }
@@ -265,7 +267,7 @@ mod tests {
         graph.add_edge(b, c, EdgeKind::Call);
         graph.add_edge(c, a, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
     }
@@ -279,7 +281,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysBoundary, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysBoundary, None);
         assert_eq!(result.reachable_set.len(), 2); // a and b; c is not traversed
         assert_eq!(result.total_context_size, 10 + 20); // a and b both count
     }
@@ -293,7 +295,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 60);
     }
@@ -307,7 +309,7 @@ mod tests {
         graph.add_edge(r, w1, EdgeKind::SharedStateWrite);
         graph.add_edge(r, w2, EdgeKind::SharedStateWrite);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, r, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[r], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
     }
@@ -319,7 +321,7 @@ mod tests {
         let caller = graph.add_node("sym::caller".into(), test_node(1, "caller", 25));
         graph.add_edge(callee, caller, EdgeKind::CallIn);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, callee, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[callee], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 2);
         assert_eq!(result.total_context_size, 10 + 25);
     }
@@ -333,8 +335,8 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let res_trans = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
-        let res_bound = solver.compute_cf(&graph, a, &AlwaysBoundary, None);
+        let res_trans = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
+        let res_bound = solver.compute_cf(&graph, &[a], &AlwaysBoundary, None);
         assert_eq!(res_trans.total_context_size, 60);
         assert_eq!(res_bound.total_context_size, 30); // a and b, c not traversed
         assert_eq!(res_trans.reachable_set.len(), 3);
@@ -348,7 +350,7 @@ mod tests {
         let _b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
         graph.add_edge(a, a, EdgeKind::Call); // self-loop only, b is disconnected
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 1);
         assert_eq!(result.total_context_size, 10);
     }
@@ -362,7 +364,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(a, c, EdgeKind::ParamType);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 60);
     }
@@ -376,7 +378,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, b, &AlwaysTransparent, None);
+        let result = solver.compute_cf(&graph, &[b], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 2);
         assert_eq!(result.total_context_size, 20 + 30);
     }
@@ -388,9 +390,49 @@ mod tests {
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 99));
         graph.add_edge(a, b, EdgeKind::Call);
         let solver = CfSolver::new();
-        let result = solver.compute_cf(&graph, a, &AlwaysBoundary, None);
+        let result = solver.compute_cf(&graph, &[a], &AlwaysBoundary, None);
         assert!(result.reachable_set.contains(&0));
         assert!(result.reachable_set.contains(&1));
         assert_eq!(result.total_context_size, 10 + 99);
+    }
+
+    #[test]
+    fn test_multi_node_union_cf() {
+        let mut graph = ContextGraph::new();
+        // A -> C, B -> C, C -> D. E is independent.
+        let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
+        let b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
+        let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
+        let d = graph.add_node("sym::d".into(), test_node(3, "d", 40));
+        let _e = graph.add_node("sym::e".into(), test_node(4, "e", 50));
+
+        graph.add_edge(a, c, EdgeKind::Call);
+        graph.add_edge(b, c, EdgeKind::Call);
+        graph.add_edge(c, d, EdgeKind::Call);
+
+        let solver = CfSolver::new();
+        let policy = AlwaysTransparent;
+
+        // CF(A) = {A, C, D} = 10 + 30 + 40 = 80
+        // CF(B) = {B, C, D} = 20 + 30 + 40 = 90
+        // CF({A, B}) = {A, B, C, D} = 10 + 20 + 30 + 40 = 100
+        let result = solver.compute_cf(&graph, &[a, b], &policy, None);
+
+        assert_eq!(result.reachable_set.len(), 4);
+        assert!(result.reachable_set.contains(&0)); // A
+        assert!(result.reachable_set.contains(&1)); // B
+        assert!(result.reachable_set.contains(&2)); // C
+        assert!(result.reachable_set.contains(&3)); // D
+        assert!(!result.reachable_set.contains(&4)); // E (not reachable)
+        assert_eq!(result.total_context_size, 100);
+
+        // Verify layers
+        assert_eq!(result.reachable_nodes_by_layer[0].len(), 2); // {A, B}
+        assert!(result.reachable_nodes_by_layer[0].contains(&0));
+        assert!(result.reachable_nodes_by_layer[0].contains(&1));
+        assert_eq!(result.reachable_nodes_by_layer[1].len(), 1); // {C}
+        assert_eq!(result.reachable_nodes_by_layer[1][0], 2);
+        assert_eq!(result.reachable_nodes_by_layer[2].len(), 1); // {D}
+        assert_eq!(result.reachable_nodes_by_layer[2][0], 3);
     }
 }

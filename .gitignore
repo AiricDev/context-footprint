@@ -26,3 +26,7 @@ target
 tarpaulin-report.html
 tarpaulin-report.xml
 coverage/
+
+
+.env
+

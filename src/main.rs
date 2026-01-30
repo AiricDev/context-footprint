@@ -1,12 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use context_footprint::adapters::doc_scorer::simple::SimpleDocScorer;
-use context_footprint::adapters::fs::reader::FileSourceReader;
-use context_footprint::adapters::scip::adapter::ScipDataSourceAdapter;
-use context_footprint::adapters::size_function::tiktoken::TiktokenSizeFunction;
+use context_footprint::app::engine::ContextEngine;
 use context_footprint::cli;
-use context_footprint::domain::builder::GraphBuilder;
-use context_footprint::domain::ports::SemanticDataSource;
+use context_footprint::server;
+use std::net::SocketAddr;
 
 #[derive(Parser)]
 #[command(name = "context-footprint")]
@@ -79,60 +76,55 @@ enum Commands {
         #[arg(short, long)]
         max_tokens: Option<u32>,
     },
+    /// Start an HTTP server for repeated queries
+    Serve {
+        /// Host to bind (e.g. 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to bind (e.g. 8080)
+        #[arg(long, default_value = "8080")]
+        port: u16,
+    },
+    /// Start an MCP server over stdio
+    Mcp {},
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
     let cli = Cli::parse();
 
     println!("Loading SCIP index from: {}", cli.scip_path);
 
-    let data_source = ScipDataSourceAdapter::new(&cli.scip_path);
-    let source_reader = FileSourceReader::new();
-    let size_function = Box::new(TiktokenSizeFunction::new());
-    let doc_scorer = Box::new(SimpleDocScorer::new());
-
     println!("Building context graph...");
-    let mut semantic_data = data_source.load()?;
-
-    // Resolve project_root for reading source files:
-    // - Default: trust `Index.metadata.project_root` from the SCIP index.
-    // - Override: user may pass `--project-root`.
-    // - Fallback: if the index lacks metadata.project_root, use the `.scip` file's parent dir.
-    if let Some(project_root) = cli.project_root.as_deref() {
-        semantic_data.project_root = project_root
-            .strip_prefix("file://")
-            .unwrap_or(project_root)
-            .to_string();
-    } else if semantic_data.project_root.is_empty() {
-        if let Some(scip_parent) = std::path::Path::new(&cli.scip_path).parent() {
-            let fallback_root = scip_parent.to_string_lossy().to_string();
-            if !fallback_root.is_empty() {
-                semantic_data.project_root = fallback_root;
-            }
-        }
-    }
-
-    let builder = GraphBuilder::new(size_function, doc_scorer);
-    let graph = builder.build(semantic_data.clone(), &source_reader)?;
+    let engine =
+        ContextEngine::load_from_scip_with_project_root(&cli.scip_path, cli.project_root.as_deref())?;
+    let health = engine.health();
 
     println!("Graph Summary:");
-    println!("  Nodes: {}", graph.graph.node_count());
-    println!("  Edges: {}", graph.graph.edge_count());
+    println!("  Nodes: {}", health.node_count);
+    println!("  Edges: {}", health.edge_count);
     println!();
 
     match &cli.command {
         Commands::Compute { symbols } => {
-            cli::compute_cf_for_symbols(&graph, symbols)?;
+            cli::compute_cf_for_symbols(&engine, symbols)?;
         }
         Commands::Stats { include_tests } => {
-            cli::compute_and_display_cf_stats(&graph, *include_tests)?;
+            cli::compute_and_display_cf_stats(&engine, *include_tests)?;
         }
         Commands::Top {
             limit,
             node_type,
             include_tests,
         } => {
-            cli::display_top_cf_nodes(&graph, *limit, node_type, *include_tests)?;
+            cli::display_top_cf_nodes(&engine, *limit, node_type, *include_tests)?;
         }
         Commands::Search {
             pattern,
@@ -140,21 +132,25 @@ fn main() -> Result<()> {
             limit,
             include_tests,
         } => {
-            cli::search_symbols(&graph, pattern, *with_cf, *limit, *include_tests)?;
+            cli::search_symbols(&engine, pattern, *with_cf, *limit, *include_tests)?;
         }
         Commands::Context {
             symbol,
             show_boundaries,
             max_tokens,
         } => {
-            cli::display_context_code(
-                &graph,
-                symbol,
-                *show_boundaries,
-                &source_reader,
-                &semantic_data.project_root,
-                *max_tokens,
-            )?;
+            cli::display_context_code(&engine, symbol, *show_boundaries, *max_tokens)?;
+        }
+        Commands::Serve { host, port } => {
+            let addr: SocketAddr = format!("{host}:{port}")
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid bind addr {host}:{port}: {e}"))?;
+            println!("Starting HTTP server on http://{addr}");
+            server::http::serve(engine, addr).await?;
+        }
+        Commands::Mcp {} => {
+            println!("Starting MCP stdio server...");
+            server::mcp::CfMcpServer::new(engine).serve_stdio().await?;
         }
     }
 

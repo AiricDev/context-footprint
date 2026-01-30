@@ -16,6 +16,14 @@ struct Cli {
     #[arg(default_value = "index.scip")]
     scip_path: String,
 
+    /// Override the project root used to resolve `Document.relative_path`.
+    ///
+    /// By default, we trust `Index.metadata.project_root` from the SCIP index.
+    /// Use this flag when the index was generated elsewhere or the sources live
+    /// in a different location on disk.
+    #[arg(long)]
+    project_root: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -86,11 +94,21 @@ fn main() -> Result<()> {
     println!("Building context graph...");
     let mut semantic_data = data_source.load()?;
 
-    // Override project_root: use SCIP file's parent directory
-    if let Some(scip_parent) = std::path::Path::new(&cli.scip_path).parent() {
-        let project_root = scip_parent.to_string_lossy().to_string();
-        if !project_root.is_empty() {
-            semantic_data.project_root = project_root;
+    // Resolve project_root for reading source files:
+    // - Default: trust `Index.metadata.project_root` from the SCIP index.
+    // - Override: user may pass `--project-root`.
+    // - Fallback: if the index lacks metadata.project_root, use the `.scip` file's parent dir.
+    if let Some(project_root) = cli.project_root.as_deref() {
+        semantic_data.project_root = project_root
+            .strip_prefix("file://")
+            .unwrap_or(project_root)
+            .to_string();
+    } else if semantic_data.project_root.is_empty() {
+        if let Some(scip_parent) = std::path::Path::new(&cli.scip_path).parent() {
+            let fallback_root = scip_parent.to_string_lossy().to_string();
+            if !fallback_root.is_empty() {
+                semantic_data.project_root = fallback_root;
+            }
         }
     }
 

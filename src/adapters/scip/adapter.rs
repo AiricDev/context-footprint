@@ -59,12 +59,20 @@ impl SemanticDataSource for ScipDataSourceAdapter {
             })
             .collect();
 
+        // `Metadata.project_root` is often a `file://` URI.
+        // Downstream code expects a filesystem path, so normalize here.
+        let raw_project_root = index
+            .metadata
+            .as_ref()
+            .map(|m| m.project_root.clone())
+            .unwrap_or_default();
+        let normalized_project_root = raw_project_root
+            .strip_prefix("file://")
+            .unwrap_or(raw_project_root.as_str())
+            .to_string();
+
         let mut semantic_data = SemanticData {
-            project_root: index
-                .metadata
-                .as_ref()
-                .map(|m| m.project_root.clone())
-                .unwrap_or_default(),
+            project_root: normalized_project_root,
             documents,
             external_symbols,
         };

@@ -34,17 +34,20 @@ impl SizeFunction for TiktokenSizeFunction {
             // Single line
             let line = lines[start_line_idx];
             let start_col = span.start_column as usize;
-            let end_col = (span.end_column as usize).min(line.len());
-            if start_col < line.len() {
-                code_snippet.push_str(&line[start_col..end_col]);
+            let end_col = span.end_column as usize;
+            let start = column_to_byte_idx(line, start_col);
+            let end = column_to_byte_idx(line, end_col);
+            if start < end {
+                code_snippet.push_str(&line[start..end]);
             }
         } else {
             // Multiple lines
             // First line
             let first_line = lines[start_line_idx];
             let start_col = span.start_column as usize;
-            if start_col < first_line.len() {
-                code_snippet.push_str(&first_line[start_col..]);
+            let start = column_to_byte_idx(first_line, start_col);
+            if start < first_line.len() {
+                code_snippet.push_str(&first_line[start..]);
             }
             code_snippet.push('\n');
 
@@ -57,8 +60,11 @@ impl SizeFunction for TiktokenSizeFunction {
             // Last line
             if end_line_idx < lines.len() {
                 let last_line = lines[end_line_idx];
-                let end_col = (span.end_column as usize).min(last_line.len());
-                code_snippet.push_str(&last_line[..end_col]);
+                let end_col = span.end_column as usize;
+                let end = column_to_byte_idx(last_line, end_col);
+                if end > 0 {
+                    code_snippet.push_str(&last_line[..end]);
+                }
             }
         }
 
@@ -109,6 +115,27 @@ fn count_tokens_approx(text: &str) -> u32 {
             (1 + punct_count / 2).max(1)
         })
         .sum::<usize>() as u32
+}
+
+/// Convert a SCIP/LSP-style column offset to a safe UTF-8 byte index.
+///
+/// Different indexers use different `Document.position_encoding` values (UTF-8 bytes,
+/// UTF-16 code units, UTF-32 code points). We currently don't thread that encoding
+/// through to this function, so we make a best-effort conversion that will never
+/// panic on non-ASCII text:
+/// - If the column lands on a UTF-8 char boundary, treat it as a byte offset.
+/// - Otherwise, treat it as a Unicode scalar (Rust `char`) offset.
+fn column_to_byte_idx(line: &str, column: usize) -> usize {
+    let clamped = column.min(line.len());
+    if line.is_char_boundary(clamped) {
+        return clamped;
+    }
+
+    // Fallback: interpret `column` as a character offset.
+    line.char_indices()
+        .nth(column)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| line.len())
 }
 
 #[cfg(test)]
@@ -203,5 +230,22 @@ mod tests {
         // "fn main() {}" should be very few tokens (around 3-5)
         println!("Size with comments stripped: {}", size);
         assert!(size < 10);
+    }
+
+    #[test]
+    fn test_unicode_columns_do_not_panic() {
+        let f = TiktokenSizeFunction::new();
+        // Contains multi-byte UTF-8 chars like 'ü' and '€'
+        let source = "                'üäö €'])";
+        let span = SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 0,
+            // Intentionally use a column that is likely to land inside a multibyte sequence
+            // if interpreted as a raw byte index.
+            end_column: 25,
+        };
+
+        let _ = f.compute(source, &span, &[]);
     }
 }

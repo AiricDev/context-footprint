@@ -9,7 +9,7 @@ use crate::app::dto::*;
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::{Node, NodeId};
 use crate::domain::ports::{SemanticDataSource, SourceReader};
-use crate::domain::solver::CfSolver;
+use crate::domain::solver::{CfMemo, CfSolver};
 use anyhow::{anyhow, Result};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -205,6 +205,7 @@ impl ContextEngine {
         let solver = CfSolver::new();
         let policy = make_policy(policy);
         let test_detector = UniversalTestDetector::new();
+        let mut memo = CfMemo::new();
 
         let mut function_cf: Vec<u32> = Vec::new();
         let mut type_cf: Vec<u32> = Vec::new();
@@ -223,8 +224,12 @@ impl ContextEngine {
                 }
             }
 
-            let result = solver.compute_cf(graph, &[node_idx], policy.as_ref(), None);
-            let cf = result.total_context_size;
+            let cf = solver.compute_cf_total_context_size_cached(
+                graph,
+                node_idx,
+                policy.as_ref(),
+                &mut memo,
+            );
 
             match node {
                 Node::Function(_) => function_cf.push(cf),
@@ -251,6 +256,7 @@ impl ContextEngine {
         let solver = CfSolver::new();
         let policy = make_policy(policy);
         let test_detector = UniversalTestDetector::new();
+        let mut memo = CfMemo::new();
 
         let mut results: Vec<TopItem> = Vec::new();
         for (symbol, &node_idx) in &graph.symbol_to_node {
@@ -265,7 +271,12 @@ impl ContextEngine {
                 continue;
             }
 
-            let cf = solver.compute_cf(graph, &[node_idx], policy.as_ref(), None).total_context_size;
+            let cf = solver.compute_cf_total_context_size_cached(
+                graph,
+                node_idx,
+                policy.as_ref(),
+                &mut memo,
+            );
             results.push(TopItem {
                 symbol: symbol.clone(),
                 node_type: type_str.to_string(),
@@ -291,6 +302,7 @@ impl ContextEngine {
         let solver = CfSolver::new();
         let policy = make_policy(policy);
         let test_detector = UniversalTestDetector::new();
+        let mut memo = CfMemo::new();
 
         let pattern_lower = pattern.to_lowercase();
         let mut matches: Vec<(String, String, u32)> = Vec::new();
@@ -308,7 +320,12 @@ impl ContextEngine {
             }
 
             // Always compute CF for sorting (same as current CLI behavior).
-            let cf = solver.compute_cf(graph, &[node_idx], policy.as_ref(), None).total_context_size;
+            let cf = solver.compute_cf_total_context_size_cached(
+                graph,
+                node_idx,
+                policy.as_ref(),
+                &mut memo,
+            );
             matches.push((symbol.clone(), type_str, cf));
         }
 

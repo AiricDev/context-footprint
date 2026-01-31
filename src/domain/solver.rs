@@ -2,6 +2,7 @@ use crate::domain::graph::ContextGraph;
 use crate::domain::node::NodeId;
 use crate::domain::policy::PruningPolicy;
 use petgraph::graph::NodeIndex;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 
@@ -16,6 +17,27 @@ pub struct CfResult {
 
 /// CF Solver - computes Context-Footprint for a given node
 pub struct CfSolver;
+
+/// Memoization cache for CF totals (and reachable sets) per start node.
+///
+/// This is intended for batch-style use cases like computing CF for every node (stats / ranking),
+/// where repeatedly traversing overlapping subgraphs is expensive.
+///
+/// Notes:
+/// - The cache is **policy-dependent**. Do not reuse a `CfMemo` across different policies.
+/// - The cached reachable sets follow the same semantics as `compute_cf` when `max_tokens=None`:
+///   boundary nodes are included but not expanded.
+#[derive(Debug, Default)]
+pub struct CfMemo {
+    reachable: HashMap<NodeIndex, Vec<NodeIndex>>,
+    total_context_size: HashMap<NodeIndex, u32>,
+}
+
+impl CfMemo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 impl Default for CfSolver {
     fn default() -> Self {
@@ -36,6 +58,12 @@ impl CfSolver {
         policy: &dyn PruningPolicy,
         max_tokens: Option<u32>,
     ) -> CfResult {
+        // Build a reverse mapping once so neighbor ordering isn't O(|V|) per comparison.
+        let mut idx_to_symbol: HashMap<NodeIndex, &str> = HashMap::with_capacity(graph.symbol_to_node.len());
+        for (sym, &idx) in &graph.symbol_to_node {
+            idx_to_symbol.insert(idx, sym.as_str());
+        }
+
         let mut visited = HashSet::new();
         let mut ordered = Vec::new();
         let mut layers: Vec<Vec<NodeId>> = Vec::new();
@@ -75,18 +103,8 @@ impl CfSolver {
             // Get neighbors and sort them by symbol for deterministic traversal
             let mut neighbors: Vec<_> = graph.neighbors(current).collect();
             neighbors.sort_by(|(a_idx, _), (b_idx, _)| {
-                let a_sym = graph
-                    .symbol_to_node
-                    .iter()
-                    .find(|&(_, &idx)| idx == *a_idx)
-                    .map(|(s, _)| s.as_str())
-                    .unwrap_or("");
-                let b_sym = graph
-                    .symbol_to_node
-                    .iter()
-                    .find(|&(_, &idx)| idx == *b_idx)
-                    .map(|(s, _)| s.as_str())
-                    .unwrap_or("");
+                let a_sym = idx_to_symbol.get(a_idx).copied().unwrap_or("");
+                let b_sym = idx_to_symbol.get(b_idx).copied().unwrap_or("");
                 a_sym.cmp(b_sym)
             });
 
@@ -146,6 +164,89 @@ impl CfSolver {
             reachable_nodes_by_layer: layers,
             total_context_size: total_size,
         }
+    }
+
+    /// Compute CF total context size for a single start node, using memoization.
+    ///
+    /// This method is optimized for computing CF for many nodes under the same policy.
+    /// It intentionally does **not** return traversal order / layers, and it ignores `max_tokens`.
+    pub fn compute_cf_total_context_size_cached(
+        &self,
+        graph: &ContextGraph,
+        start: NodeIndex,
+        policy: &dyn PruningPolicy,
+        memo: &mut CfMemo,
+    ) -> u32 {
+        if let Some(&cached) = memo.total_context_size.get(&start) {
+            return cached;
+        }
+
+        // Per-call visited set, keyed by NodeIndex::index().
+        // We keep an incrementally-updated total and a reachable list so we never have to scan
+        // the whole bitset at the end.
+        let node_count = graph.graph.node_count();
+        let mut visited = vec![false; node_count];
+        let mut reachable: Vec<NodeIndex> = Vec::new();
+        let mut total_size: u32 = 0;
+
+        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+
+        // Helper to add a node exactly once (and keep totals in sync).
+        let add_node = |idx: NodeIndex,
+                            visited: &mut [bool],
+                            reachable: &mut Vec<NodeIndex>,
+                            total_size: &mut u32| {
+            let pos = idx.index();
+            if pos >= visited.len() {
+                return;
+            }
+            if !visited[pos] {
+                visited[pos] = true;
+                *total_size = total_size.saturating_add(graph.node(idx).core().context_size);
+                reachable.push(idx);
+            }
+        };
+
+        add_node(start, &mut visited, &mut reachable, &mut total_size);
+        queue.push_back(start);
+
+        while let Some(current) = queue.pop_front() {
+            let current_node = graph.node(current);
+
+            // For totals we don't need deterministic ordering; skip neighbor sorting to save time.
+            for (neighbor, edge_kind) in graph.neighbors(current) {
+                let neighbor_pos = neighbor.index();
+                if neighbor_pos < visited.len() && visited[neighbor_pos] {
+                    continue;
+                }
+
+                let neighbor_node = graph.node(neighbor);
+                let decision = policy.evaluate(current_node, neighbor_node, edge_kind, graph);
+
+                if matches!(
+                    decision,
+                    crate::domain::policy::PruningDecision::Transparent
+                ) {
+                    if let Some(cached_set) = memo.reachable.get(&neighbor) {
+                        // Reuse cached reachable set when we are allowed to expand `neighbor`.
+                        for &idx in cached_set {
+                            add_node(idx, &mut visited, &mut reachable, &mut total_size);
+                        }
+                    } else {
+                        // Expand normally (BFS) and cache later.
+                        add_node(neighbor, &mut visited, &mut reachable, &mut total_size);
+                        queue.push_back(neighbor);
+                    }
+                } else {
+                    // Boundary: include its size, but do not traverse through it.
+                    add_node(neighbor, &mut visited, &mut reachable, &mut total_size);
+                }
+            }
+        }
+
+        memo.reachable.insert(start, reachable);
+        memo.total_context_size.insert(start, total_size);
+        total_size
     }
 }
 
@@ -434,5 +535,54 @@ mod tests {
         assert_eq!(result.reachable_nodes_by_layer[1][0], 2);
         assert_eq!(result.reachable_nodes_by_layer[2].len(), 1); // {D}
         assert_eq!(result.reachable_nodes_by_layer[2][0], 3);
+    }
+
+    #[test]
+    fn test_cached_total_matches_compute_cf_for_each_node() {
+        let mut graph = ContextGraph::new();
+        // A -> B -> C, and A -> D (diamond-ish), plus a cycle E <-> F.
+        let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
+        let b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
+        let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
+        let d = graph.add_node("sym::d".into(), test_node(3, "d", 40));
+        let e = graph.add_node("sym::e".into(), test_node(4, "e", 5));
+        let f = graph.add_node("sym::f".into(), test_node(5, "f", 6));
+
+        graph.add_edge(a, b, EdgeKind::Call);
+        graph.add_edge(b, c, EdgeKind::Call);
+        graph.add_edge(a, d, EdgeKind::Call);
+        graph.add_edge(c, d, EdgeKind::Call);
+        graph.add_edge(e, f, EdgeKind::Call);
+        graph.add_edge(f, e, EdgeKind::Call);
+
+        let solver = CfSolver::new();
+        let policy = AlwaysTransparent;
+        let mut memo = CfMemo::new();
+
+        for idx in graph.graph.node_indices() {
+            let expected = solver.compute_cf(&graph, &[idx], &policy, None).total_context_size;
+            let got = solver.compute_cf_total_context_size_cached(&graph, idx, &policy, &mut memo);
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn test_cached_total_respects_boundary_semantics() {
+        let mut graph = ContextGraph::new();
+        // A -> B -> C, but policy makes everything boundary, so only A and B count from A.
+        let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
+        let b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
+        let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
+        graph.add_edge(a, b, EdgeKind::Call);
+        graph.add_edge(b, c, EdgeKind::Call);
+
+        let solver = CfSolver::new();
+        let policy = AlwaysBoundary;
+        let mut memo = CfMemo::new();
+
+        let expected = solver.compute_cf(&graph, &[a], &policy, None).total_context_size;
+        let got = solver.compute_cf_total_context_size_cached(&graph, a, &policy, &mut memo);
+        assert_eq!(got, expected);
+        assert_eq!(got, 10 + 20);
     }
 }

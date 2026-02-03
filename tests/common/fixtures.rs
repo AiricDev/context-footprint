@@ -3,7 +3,7 @@
 
 use context_footprint::domain::semantic::{
     Definition, DocumentData, Parameter, Reference, ReferenceRole, SemanticData, SourceRange,
-    SymbolKind, SymbolMetadata,
+    SymbolIndex, SymbolKind, SymbolMetadata,
 };
 
 fn default_range() -> SourceRange {
@@ -36,6 +36,7 @@ fn metadata(
         relationships: Vec::new(),
         enclosing_symbol: None,
         is_external,
+        throws: vec![],
     }
 }
 
@@ -44,9 +45,7 @@ pub fn create_semantic_data_simple() -> SemanticData {
     let sym_a = "sym::func_a";
     let sym_b = "sym::func_b";
 
-    SemanticData {
-        project_root: "/test".into(),
-        documents: vec![DocumentData {
+    let documents = vec![DocumentData {
             relative_path: "main.py".into(),
             language: "python".into(),
             definitions: vec![
@@ -100,8 +99,13 @@ pub fn create_semantic_data_simple() -> SemanticData {
                 enclosing_symbol: sym_a.to_string(),
                 role: ReferenceRole::Call,
             }],
-        }],
+        }];
+    let symbol_index = SymbolIndex::from_definitions(&documents);
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
         external_symbols: vec![],
+        symbol_index,
     }
 }
 
@@ -110,9 +114,7 @@ pub fn create_semantic_data_two_files() -> SemanticData {
     let sym_main = "sym::main::func_main";
     let sym_util = "sym::utils::func_util";
 
-    SemanticData {
-        project_root: "/test".into(),
-        documents: vec![
+    let documents = vec![
             DocumentData {
                 relative_path: "main.py".into(),
                 language: "python".into(),
@@ -158,8 +160,13 @@ pub fn create_semantic_data_two_files() -> SemanticData {
                 }],
                 references: vec![],
             },
-        ],
+        ];
+    let symbol_index = SymbolIndex::from_definitions(&documents);
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
         external_symbols: vec![],
+        symbol_index,
     }
 }
 
@@ -169,9 +176,7 @@ pub fn create_semantic_data_with_cycle() -> SemanticData {
     let sym_b = "sym::b";
     let sym_c = "sym::c";
 
-    SemanticData {
-        project_root: "/test".into(),
-        documents: vec![DocumentData {
+    let documents = vec![DocumentData {
             relative_path: "cycle.py".into(),
             language: "python".into(),
             definitions: vec![
@@ -241,8 +246,13 @@ pub fn create_semantic_data_with_cycle() -> SemanticData {
                     role: ReferenceRole::Call,
                 },
             ],
-        }],
+        }];
+    let symbol_index = SymbolIndex::from_definitions(&documents);
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
         external_symbols: vec![],
+        symbol_index,
     }
 }
 
@@ -254,9 +264,7 @@ pub fn create_semantic_data_with_shared_state() -> SemanticData {
     let sym_w2 = "sym::writer2";
     let sym_v = "sym::global_var";
 
-    SemanticData {
-        project_root: "/test".into(),
-        documents: vec![DocumentData {
+    let documents = vec![DocumentData {
             relative_path: "state.py".into(),
             language: "python".into(),
             definitions: vec![
@@ -341,8 +349,13 @@ pub fn create_semantic_data_with_shared_state() -> SemanticData {
                     role: ReferenceRole::Write,
                 },
             ],
-        }],
+        }];
+    let symbol_index = SymbolIndex::from_definitions(&documents);
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
         external_symbols: vec![],
+        symbol_index,
     }
 }
 
@@ -352,9 +365,7 @@ pub fn create_semantic_data_chain_well_documented_middle() -> SemanticData {
     let sym_b = "sym::chain_b";
     let sym_c = "sym::chain_c";
 
-    SemanticData {
-        project_root: "/test".into(),
-        documents: vec![DocumentData {
+    let documents = vec![DocumentData {
             relative_path: "chain.py".into(),
             language: "python".into(),
             definitions: vec![
@@ -418,22 +429,30 @@ pub fn create_semantic_data_chain_well_documented_middle() -> SemanticData {
                     role: ReferenceRole::Call,
                 },
             ],
-        }],
+        }];
+    let symbol_index = SymbolIndex::from_definitions(&documents);
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
         external_symbols: vec![],
+        symbol_index,
     }
 }
 
 /// One document with no definitions and no references. Builder should produce 0 nodes.
 pub fn create_semantic_data_empty_document() -> SemanticData {
+    let documents = vec![DocumentData {
+        relative_path: "empty.py".into(),
+        language: "python".into(),
+        definitions: vec![],
+        references: vec![],
+    }];
+    let symbol_index = SymbolIndex::from_definitions(&documents);
     SemanticData {
         project_root: "/test".into(),
-        documents: vec![DocumentData {
-            relative_path: "empty.py".into(),
-            language: "python".into(),
-            definitions: vec![],
-            references: vec![],
-        }],
+        documents,
         external_symbols: vec![],
+        symbol_index,
     }
 }
 
@@ -443,9 +462,7 @@ pub fn create_semantic_data_multiple_callers() -> SemanticData {
     let sym_b = "sym::caller_b";
     let sym_c = "sym::callee";
 
-    SemanticData {
-        project_root: "/test".into(),
-        documents: vec![DocumentData {
+    let documents = vec![DocumentData {
             relative_path: "multi_call.py".into(),
             language: "python".into(),
             definitions: vec![
@@ -509,8 +526,13 @@ pub fn create_semantic_data_multiple_callers() -> SemanticData {
                     role: ReferenceRole::Call,
                 },
             ],
-        }],
+        }];
+    let symbol_index = SymbolIndex::from_definitions(&documents);
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
         external_symbols: vec![],
+        symbol_index,
     }
 }
 

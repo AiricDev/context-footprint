@@ -1,8 +1,11 @@
-use crate::adapters::scip::parser::{find_enclosing_definition, parse_range};
+use crate::adapters::scip::parser::{
+    find_enclosing_definition, parameter_name_from_symbol, parent_function_from_parameter_symbol,
+    parse_range,
+};
 use crate::domain::ports::SemanticDataSource;
 use crate::domain::semantic::{
     Definition, DocumentData, Parameter, Reference, ReferenceRole, Relationship, RelationshipKind,
-    SemanticData, SourceRange, SymbolKind, SymbolMetadata,
+    SemanticData, SourceRange, SymbolIndex, SymbolKind, SymbolMetadata,
 };
 use crate::scip;
 use anyhow::{Context, Result};
@@ -44,16 +47,33 @@ impl SemanticDataSource for ScipDataSourceAdapter {
         }
 
         // Process each document
-        let documents = index
+        let documents: Vec<DocumentData> = index
             .documents
             .iter()
             .map(|doc| {
-                let (mut definitions, references) =
+                let (definitions, references) =
                     partition_occurrences_with_map(doc, &symbol_map);
+
+                // Collect parameters by parent: Parameter definitions are merged into function metadata, not kept as separate definitions
+                let parameter_by_parent =
+                    build_parameter_by_parent(&definitions);
+
+                // Exclude Parameter from document.definitions; they are attached to function metadata.parameters
+                let mut definitions: Vec<Definition> = definitions
+                    .into_iter()
+                    .filter(|d| d.metadata.kind != SymbolKind::Parameter)
+                    .collect();
 
                 // Enrich function-like definitions with parsed parameters and return type (language-specific)
                 for def in &mut definitions {
                     enrich_function_signature(&mut def.metadata, &doc.language);
+                }
+
+                // Attach parameters from SCIP Parameter definitions to function metadata (overrides signature when present)
+                for def in &mut definitions {
+                    if let Some(params) = parameter_by_parent.get(&def.symbol) {
+                        def.metadata.parameters = params.clone();
+                    }
                 }
 
                 DocumentData {
@@ -77,10 +97,13 @@ impl SemanticDataSource for ScipDataSourceAdapter {
             .unwrap_or(raw_project_root.as_str())
             .to_string();
 
+        let symbol_index = SymbolIndex::from_definitions(&documents);
+
         let mut semantic_data = SemanticData {
             project_root: normalized_project_root,
             documents,
             external_symbols,
+            symbol_index,
         };
 
         // Enrich semantic data with language-specific inferences
@@ -99,6 +122,41 @@ fn load_scip_index<P: AsRef<std::path::Path>>(path: P) -> Result<scip::Index> {
     let mmap = unsafe { Mmap::map(&file).context("Failed to mmap SCIP index file")? };
     let index = scip::Index::decode(&mmap[..]).context("Failed to decode SCIP index")?;
     Ok(index)
+}
+
+/// Build a map from parent function symbol to ordered parameters from Parameter definitions.
+/// Used to merge Parameter definitions into function metadata.parameters so they are not
+/// exposed as separate entries in document.definitions.
+fn build_parameter_by_parent(definitions: &[Definition]) -> std::collections::HashMap<String, Vec<Parameter>> {
+    let mut parameter_by_parent: std::collections::HashMap<String, Vec<Parameter>> =
+        std::collections::HashMap::new();
+    for def in definitions {
+        if def.metadata.kind != SymbolKind::Parameter {
+            continue;
+        }
+        let Some(ref parent) = def.metadata.enclosing_symbol else {
+            continue;
+        };
+        let mut param_type = None;
+        for rel in &def.metadata.relationships {
+            if matches!(rel.kind, RelationshipKind::TypeDefinition) {
+                param_type = Some(rel.target_symbol.clone());
+                break;
+            }
+        }
+        // Name: SCIP often leaves display_name empty for parameters; parse from symbol (e.g. ...#emit_usage().(event) → "event")
+        let name = parameter_name_from_symbol(&def.symbol)
+            .unwrap_or_else(|| def.metadata.display_name.clone());
+        let param = Parameter {
+            name,
+            param_type,
+        };
+        parameter_by_parent
+            .entry(parent.clone())
+            .or_default()
+            .push(param);
+    }
+    parameter_by_parent
 }
 
 fn partition_occurrences_with_map(
@@ -126,11 +184,30 @@ fn partition_occurrences_with_map(
 
     for occ in &doc.occurrences {
         if (occ.symbol_roles & (scip::SymbolRole::Definition as i32)) != 0 {
+            // Skip local symbols: they are document-local and not meaningful for CF
+            if occ.symbol.starts_with("local ") {
+                continue;
+            }
             // Find corresponding SymbolInformation in global map
-            let metadata = symbol_map
+            let mut metadata = symbol_map
                 .get(&occ.symbol)
                 .cloned()
                 .unwrap_or_else(|| create_default_metadata(&occ.symbol));
+
+            // In SCIP, Function and Parameter are independent symbols; the relationship is encoded
+            // in the parameter symbol string (e.g. `pkg . foo().(x)` → parent `pkg . foo().`).
+            if metadata.kind == SymbolKind::Parameter {
+                if metadata.enclosing_symbol.is_none() {
+                    if let Some(parent) = parent_function_from_parameter_symbol(&occ.symbol) {
+                        metadata.enclosing_symbol = Some(parent);
+                    }
+                }
+                if metadata.display_name == occ.symbol {
+                    if let Some(name) = parameter_name_from_symbol(&occ.symbol) {
+                        metadata.display_name = name;
+                    }
+                }
+            }
 
             let (start_line, start_col, end_line, end_col) = parse_range(&occ.range);
             let (encl_start_line, encl_start_col, encl_end_line, encl_end_col) =
@@ -213,6 +290,7 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, is_external: bool) -> Symb
             Some(sym.enclosing_symbol.clone())
         },
         is_external,
+        throws: vec![],
     }
 }
 
@@ -231,6 +309,7 @@ fn create_default_metadata(symbol: &str) -> SymbolMetadata {
         relationships: Vec::new(),
         enclosing_symbol: None,
         is_external: false,
+        throws: vec![],
     }
 }
 
@@ -471,8 +550,158 @@ fn enrich_semantic_data(data: &mut SemanticData) -> Result<()> {
         if language == "python" {
             enrich_python_return_types(document, &data.project_root)?;
         }
+
+        // Fallback: parse return type from documentation when no ref/signature (e.g. "-> None" with no symbol ref)
+        for def in &mut document.definitions {
+            if !matches!(
+                def.metadata.kind,
+                SymbolKind::Function
+                    | SymbolKind::Method
+                    | SymbolKind::Constructor
+                    | SymbolKind::StaticMethod
+                    | SymbolKind::AbstractMethod
+            ) {
+                continue;
+            }
+            if def.metadata.return_type.is_none() {
+                if let Some(rt) = parse_return_type_from_python_doc(&def.metadata) {
+                    def.metadata.return_type = Some(rt);
+                }
+            }
+        }
+
+        // Assign function's TypeDefinition relationships to parameters (indexer often puts param types on the method)
+        for def in &mut document.definitions {
+            assign_param_types_from_relationships(def);
+        }
+
+        // Fallback: parse param types from documentation when relationships didn't provide them
+        enrich_param_types_from_documentation(document);
     }
     Ok(())
+}
+
+/// Parse return type from Python documentation (e.g. "-> None" or "-> SomeType" in doc/signature).
+/// Used when no TypeDefinition ref or signature_documentation is available (e.g. "-> None" has no symbol).
+fn parse_return_type_from_python_doc(metadata: &SymbolMetadata) -> Option<String> {
+    for doc in &metadata.documentation {
+        if let Some(after_arrow) = doc.split("->").nth(1) {
+            let ret = after_arrow
+                .split(&[':', '\n'][..])
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(r) = ret {
+                return Some(r.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Parse parameter types from Python documentation (e.g. "event: UsageEvent") and resolve
+/// type names to symbols using document references. Used when the indexer doesn't attach
+/// TypeDefinition to the method or to parameter symbols.
+fn enrich_param_types_from_documentation(doc: &mut DocumentData) {
+    use crate::domain::semantic::SymbolKind;
+
+    let type_symbols: std::collections::HashSet<String> = doc
+        .references
+        .iter()
+        .map(|r| r.symbol.clone())
+        .collect();
+
+    for def in &mut doc.definitions {
+        let function_like = matches!(
+            def.metadata.kind,
+            SymbolKind::Function
+                | SymbolKind::Method
+                | SymbolKind::Constructor
+                | SymbolKind::StaticMethod
+                | SymbolKind::AbstractMethod
+        );
+        if !function_like || def.metadata.parameters.is_empty() {
+            continue;
+        }
+        for param in &mut def.metadata.parameters {
+            if param.name == "self" || param.param_type.is_some() {
+                continue;
+            }
+            for doc_str in &def.metadata.documentation {
+                let pattern = format!("{}: ", param.name);
+                if let Some(after_colon) = doc_str.find(&pattern).and_then(|_| {
+                    doc_str.split(&pattern).nth(1).and_then(|s| {
+                        s.split(&[' ', '\n', ',', ')', ']', '}']).next().map(str::trim)
+                    })
+                }) {
+                    let type_name = after_colon;
+                    if type_name.is_empty() {
+                        continue;
+                    }
+                    // Use the type symbol (e.g. .../UsageEvent#), not a member (e.g. .../UsageEvent#user_id.)
+                    let type_suffix = format!("/{}#", type_name);
+                    let symbol = type_symbols
+                        .iter()
+                        .find(|sym| sym.ends_with(&type_suffix))
+                        .cloned()
+                        .or_else(|| {
+                            // Fallback: derive type from a member reference (e.g. .../UsageEvent#user_id. -> .../UsageEvent#)
+                            type_symbols
+                                .iter()
+                                .find(|sym| sym.contains(&type_suffix))
+                                .and_then(|sym| {
+                                    sym.find(&type_suffix).map(|i| sym[..i + type_suffix.len()].to_string())
+                                })
+                        });
+                    if let Some(s) = symbol {
+                        param.param_type = Some(s);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Assign function's TypeDefinition relationships to parameters that lack param_type.
+/// Indexers often attach parameter type (e.g. UsageEvent) to the method symbol; we assign
+/// them to params in order (skip "self", skip params that already have type). Exclude
+/// the relationship that matches return_type so it isn't assigned to a param.
+fn assign_param_types_from_relationships(def: &mut Definition) {
+    use crate::domain::semantic::SymbolKind;
+
+    let function_like = matches!(
+        def.metadata.kind,
+        SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Constructor
+            | SymbolKind::StaticMethod
+            | SymbolKind::AbstractMethod
+    );
+    if !function_like || def.metadata.parameters.is_empty() {
+        return;
+    }
+
+    let return_type = def.metadata.return_type.as_ref();
+    let type_defs: Vec<String> = def
+        .metadata
+        .relationships
+        .iter()
+        .filter(|r| matches!(r.kind, RelationshipKind::TypeDefinition))
+        .map(|r| r.target_symbol.clone())
+        .filter(|sym| Some(sym) != return_type)
+        .collect();
+
+    let mut type_idx = 0;
+    for param in &mut def.metadata.parameters {
+        if param.name == "self" || param.param_type.is_some() {
+            continue;
+        }
+        if type_idx < type_defs.len() {
+            param.param_type = Some(type_defs[type_idx].clone());
+            type_idx += 1;
+        }
+    }
 }
 
 /// Enrich Python function definitions with return type relationships
@@ -536,6 +765,11 @@ fn enrich_python_return_types(doc: &mut DocumentData, project_root: &str) -> Res
                     });
                 }
 
+                // Set return_type in semantic data so debug output and downstream see it
+                if definition.metadata.return_type.is_none() {
+                    definition.metadata.return_type = Some(reference.symbol.clone());
+                }
+
                 // Only one return type per function
                 break;
             }
@@ -548,7 +782,8 @@ fn enrich_python_return_types(doc: &mut DocumentData, project_root: &str) -> Res
 /// Check if a type reference is a Python return type annotation
 ///
 /// Python return type syntax: `def func(...) -> ReturnType:`
-/// We verify this by checking for the presence of `->` and `:` on the same line
+/// We only accept a reference that appears *after* "->" on the line, so parameter
+/// type annotations (e.g. `event: UsageEvent`) are not mistaken for return type.
 fn is_python_return_type_annotation(
     type_ref: &Reference,
     function_def: &Definition,
@@ -569,12 +804,24 @@ fn is_python_return_type_annotation(
 
     let line = lines[line_num];
 
-    // Python return type pattern: must contain both "->" and end with ":"
-    // Examples:
-    //   def func() -> Type:
-    //   def func(x: int) -> Type:
-    //   ) -> Type:  (multiline signature)
-    line.contains("->") && line.trim_end().ends_with(':')
+    // Must contain "->" and end with ":" (signature line)
+    if !line.contains("->") || !line.trim_end().ends_with(':') {
+        return false;
+    }
+
+    // Only accept the type that follows "->" (return type), not parameter types before "->"
+    let arrow_pos = match line.find("->") {
+        Some(p) => p,
+        None => return false,
+    };
+    let after_arrow = line.get(arrow_pos + 2..).unwrap_or("");
+    let return_type_start_col = (arrow_pos + 2) as u32
+        + (after_arrow.len() - after_arrow.trim_start().len()) as u32;
+    if type_ref.range.start_column < return_type_start_col {
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -699,13 +946,14 @@ mod tests {
             metadata: create_default_metadata("func"),
         };
 
-        let type_ref = Reference {
+        // "def func() -> MyType:" — MyType starts at column 16 (0-based, after "-> ")
+        let type_ref_return = Reference {
             symbol: "MyType".into(),
             range: SourceRange {
                 start_line: 0,
-                start_column: 0,
+                start_column: 16,
                 end_line: 0,
-                end_column: 0,
+                end_column: 22,
             },
             enclosing_symbol: "func".into(),
             role: ReferenceRole::Read,
@@ -713,12 +961,29 @@ mod tests {
 
         let lines = vec!["def func() -> MyType:"];
         assert!(is_python_return_type_annotation(
-            &type_ref, &func_def, &lines
+            &type_ref_return, &func_def, &lines
+        ));
+
+        // Parameter type (before "->") must not be treated as return type
+        let lines_param_and_return = vec!["def func(event: UsageEvent) -> None:"];
+        let type_ref_param = Reference {
+            symbol: "UsageEvent".into(),
+            range: SourceRange {
+                start_line: 0,
+                start_column: 15, // "UsageEvent" in "event: UsageEvent"
+                end_line: 0,
+                end_column: 24,
+            },
+            enclosing_symbol: "func".into(),
+            role: ReferenceRole::Read,
+        };
+        assert!(!is_python_return_type_annotation(
+            &type_ref_param, &func_def, &lines_param_and_return
         ));
 
         let lines_no_arrow = vec!["def func(x: MyType):"];
         assert!(!is_python_return_type_annotation(
-            &type_ref,
+            &type_ref_return,
             &func_def,
             &lines_no_arrow
         ));
@@ -741,5 +1006,234 @@ mod tests {
             &func_def,
             &lines_wrong_line
         ));
+    }
+
+    /// When a method has TypeDefinition relationships, param_type for non-self params should be assigned.
+    #[test]
+    fn test_assign_param_types_from_relationships_sets_param_type() {
+        use crate::domain::semantic::{Definition, Parameter, Relationship, RelationshipKind, SourceRange};
+
+        let usage_event_symbol = "scip-python python pkg `app.domain.model.usage`/UsageEvent#";
+        let method_symbol = "scip-python python pkg `app.adapters.billing`/ArqBillingAdapter#emit_usage().";
+
+        let mut def = Definition {
+            symbol: method_symbol.to_string(),
+            range: SourceRange {
+                start_line: 48,
+                start_column: 14,
+                end_line: 48,
+                end_column: 24,
+            },
+            enclosing_range: SourceRange {
+                start_line: 48,
+                start_column: 4,
+                end_line: 71,
+                end_column: 13,
+            },
+            metadata: SymbolMetadata {
+                symbol: method_symbol.to_string(),
+                kind: SymbolKind::Method,
+                display_name: String::new(),
+                documentation: vec![
+                    "```python\nasync def emit_usage(\n  self,\n  event: UsageEvent\n) -> None:\n```".into(),
+                ],
+                signature: None,
+                parameters: vec![
+                    Parameter {
+                        name: "self".into(),
+                        param_type: None,
+                    },
+                    Parameter {
+                        name: "event".into(),
+                        param_type: None,
+                    },
+                ],
+                return_type: Some("None".into()),
+                relationships: vec![
+                    Relationship {
+                        target_symbol: "scip-python python pkg `app.domain.ports.billing`/UsageEventPort#emit_usage().".into(),
+                        kind: RelationshipKind::Implements,
+                    },
+                    Relationship {
+                        target_symbol: usage_event_symbol.to_string(),
+                        kind: RelationshipKind::TypeDefinition,
+                    },
+                ],
+                enclosing_symbol: None,
+                is_external: false,
+                throws: vec![],
+            },
+        };
+
+        assign_param_types_from_relationships(&mut def);
+
+        assert_eq!(def.metadata.parameters.len(), 2);
+        assert_eq!(def.metadata.parameters[0].name, "self");
+        assert!(def.metadata.parameters[0].param_type.is_none(), "self should have no param_type");
+        assert_eq!(def.metadata.parameters[1].name, "event");
+        assert_eq!(
+            def.metadata.parameters[1].param_type.as_deref(),
+            Some(usage_event_symbol),
+            "event should get param_type from method's TypeDefinition relationship"
+        );
+    }
+
+    /// When a method has no TypeDefinition on itself but documentation has "event: UsageEvent",
+    /// param_type should be filled from document references (type name → symbol).
+    #[test]
+    fn test_parameters_param_type_from_documentation_when_no_relationship() {
+        use crate::domain::semantic::{DocumentData, Definition, Parameter, Reference, ReferenceRole, SourceRange};
+
+        let method_symbol = "pkg/Class#method().";
+        let usage_event_symbol = "scip-python python pkg `app.domain.model.usage`/UsageEvent#";
+
+        let mut doc = DocumentData {
+            relative_path: "app/adapters/billing.py".into(),
+            language: "python".into(),
+            definitions: vec![Definition {
+                symbol: method_symbol.to_string(),
+                range: SourceRange {
+                    start_line: 0,
+                    start_column: 0,
+                    end_line: 0,
+                    end_column: 10,
+                },
+                enclosing_range: SourceRange {
+                    start_line: 0,
+                    start_column: 0,
+                    end_line: 5,
+                    end_column: 10,
+                },
+                metadata: SymbolMetadata {
+                    symbol: method_symbol.to_string(),
+                    kind: SymbolKind::Method,
+                    display_name: String::new(),
+                    documentation: vec![
+                        "```python\nasync def emit_usage(\n  self,\n  event: UsageEvent\n) -> None:\n```".into(),
+                    ],
+                    signature: None,
+                    parameters: vec![
+                        Parameter {
+                            name: "self".into(),
+                            param_type: None,
+                        },
+                        Parameter {
+                            name: "event".into(),
+                            param_type: None,
+                        },
+                    ],
+                    return_type: Some("None".into()),
+                    relationships: vec![], // No TypeDefinition on method - indexer didn't attach it
+                    enclosing_symbol: None,
+                    is_external: false,
+                    throws: vec![],
+                },
+            }],
+            references: vec![
+                Reference {
+                    symbol: usage_event_symbol.to_string(),
+                    range: SourceRange {
+                        start_line: 2,
+                        start_column: 10,
+                        end_line: 2,
+                        end_column: 20,
+                    },
+                    enclosing_symbol: method_symbol.to_string(),
+                    role: ReferenceRole::TypeUsage,
+                },
+            ],
+        };
+
+        // Enrich param types from documentation using document references (simulate full pipeline)
+        enrich_param_types_from_documentation(&mut doc);
+
+        let def = doc.definitions.first().unwrap();
+        assert_eq!(def.metadata.parameters.len(), 2);
+        assert_eq!(def.metadata.parameters[0].name, "self");
+        assert!(def.metadata.parameters[0].param_type.is_none());
+        assert_eq!(def.metadata.parameters[1].name, "event");
+        assert_eq!(
+            def.metadata.parameters[1].param_type.as_deref(),
+            Some(usage_event_symbol),
+            "event should get param_type from doc (event: UsageEvent) resolved via document reference"
+        );
+    }
+
+    /// When references include both the type (UsageEvent#) and a member (UsageEvent#user_id.),
+    /// param_type must be the type symbol, not the member.
+    #[test]
+    fn test_param_type_uses_type_symbol_not_member() {
+        use crate::domain::semantic::{DocumentData, Definition, Parameter, Reference, ReferenceRole, SourceRange};
+
+        let method_symbol = "pkg/Class#method().";
+        let type_symbol = "scip-python python airelay 0.1.0 `app.domain.model.usage`/UsageEvent#";
+        let member_symbol = "scip-python python airelay 0.1.0 `app.domain.model.usage`/UsageEvent#user_id.";
+
+        let mut doc = DocumentData {
+            relative_path: "app/adapters/billing.py".into(),
+            language: "python".into(),
+            definitions: vec![Definition {
+                symbol: method_symbol.to_string(),
+                range: SourceRange {
+                    start_line: 0,
+                    start_column: 0,
+                    end_line: 0,
+                    end_column: 10,
+                },
+                enclosing_range: SourceRange {
+                    start_line: 0,
+                    start_column: 0,
+                    end_line: 10,
+                    end_column: 10,
+                },
+                metadata: SymbolMetadata {
+                    symbol: method_symbol.to_string(),
+                    kind: SymbolKind::Method,
+                    display_name: String::new(),
+                    documentation: vec![
+                        "```python\nasync def emit_usage(\n  self,\n  event: UsageEvent\n) -> None:\n```".into(),
+                    ],
+                    signature: None,
+                    parameters: vec![
+                        Parameter {
+                            name: "self".into(),
+                            param_type: None,
+                        },
+                        Parameter {
+                            name: "event".into(),
+                            param_type: None,
+                        },
+                    ],
+                    return_type: Some("None".into()),
+                    relationships: vec![],
+                    enclosing_symbol: None,
+                    is_external: false,
+                    throws: vec![],
+                },
+            }],
+            references: vec![
+                Reference {
+                    symbol: member_symbol.to_string(),
+                    range: SourceRange {
+                        start_line: 5,
+                        start_column: 0,
+                        end_line: 5,
+                        end_column: 10,
+                    },
+                    enclosing_symbol: method_symbol.to_string(),
+                    role: ReferenceRole::Read,
+                },
+            ],
+        };
+
+        enrich_param_types_from_documentation(&mut doc);
+
+        let def = doc.definitions.first().unwrap();
+        assert_eq!(def.metadata.parameters[1].name, "event");
+        assert_eq!(
+            def.metadata.parameters[1].param_type.as_deref(),
+            Some(type_symbol),
+            "param_type must be the type (UsageEvent#), not the member (UsageEvent#user_id.)"
+        );
     }
 }

@@ -87,6 +87,9 @@ enum Commands {
     },
     /// Start an MCP server over stdio
     Mcp {},
+
+    /// Debug: print SemanticData built from SCIP index as JSON (for manual inspection)
+    DebugSemanticData {},
 }
 
 #[tokio::main]
@@ -98,6 +101,13 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    match &cli.command {
+        Commands::DebugSemanticData {} => {
+            return cli::debug_semantic_data(&cli.scip_path);
+        }
+        _ => {}
+    }
 
     println!("Loading SCIP index from: {}", cli.scip_path);
 
@@ -153,6 +163,7 @@ async fn main() -> Result<()> {
             println!("Starting MCP stdio server...");
             server::mcp::CfMcpServer::new(engine).serve_stdio().await?;
         }
+        Commands::DebugSemanticData {} => unreachable!(),
     }
 
     Ok(())

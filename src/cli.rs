@@ -1,6 +1,17 @@
+use crate::adapters::scip::adapter::ScipDataSourceAdapter;
 use crate::app::dto::{ComputeRequest, ContextRequest, PolicyKind};
 use crate::app::engine::ContextEngine;
+use crate::domain::ports::SemanticDataSource;
 use anyhow::Result;
+
+/// Load SemanticData from SCIP index and print as JSON for manual inspection.
+pub fn debug_semantic_data(scip_path: &str) -> Result<()> {
+    let adapter = ScipDataSourceAdapter::new(scip_path);
+    let semantic_data = adapter.load()?;
+    let json = serde_json::to_string_pretty(&semantic_data)?;
+    println!("{}", json);
+    Ok(())
+}
 
 pub fn compute_cf_for_symbols(engine: &ContextEngine, symbols: &[String]) -> Result<()> {
     println!("Computing CF for symbols: {:?}", symbols);

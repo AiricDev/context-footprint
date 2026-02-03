@@ -5,7 +5,9 @@ use crate::domain::node::{
 };
 use crate::domain::policy::{DocumentationScorer, NodeInfo, NodeType, SizeFunction};
 use crate::domain::ports::SourceReader;
-use crate::domain::semantic::{ReferenceRole, SemanticData, SymbolKind, SymbolMetadata};
+use crate::domain::semantic::{
+    definition_role, DefinitionRole, ReferenceRole, SemanticData, SymbolKind, SymbolMetadata,
+};
 use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeKind, TypeRegistry};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -36,60 +38,23 @@ impl GraphBuilder {
     ) -> Result<ContextGraph> {
         let mut graph = ContextGraph::new();
         let mut type_registry = TypeRegistry::new();
+        let symbol_index = &semantic_data.symbol_index;
 
-        // 1. Pre-collect kinds and parentage for all definitions
-        let mut symbol_to_kind: HashMap<String, SymbolKind> = HashMap::new();
-        let mut symbol_to_parent: HashMap<String, String> = HashMap::new();
-        let mut parameter_map: HashMap<String, Vec<crate::domain::node::Parameter>> =
-            HashMap::new();
-
-        for document in &semantic_data.documents {
-            for definition in &document.definitions {
-                symbol_to_kind.insert(definition.symbol.clone(), definition.metadata.kind.clone());
-                if let Some(parent) = &definition.metadata.enclosing_symbol {
-                    symbol_to_parent.insert(definition.symbol.clone(), parent.clone());
-                }
-            }
-        }
-
-        // Pass 1: Node Allocation
+        // Pass 1: Node Allocation (uses definition_role and symbol_index; no pre-collection loop)
         for document in &semantic_data.documents {
             let source_path = Path::new(&semantic_data.project_root).join(&document.relative_path);
             let source_code = source_reader.read(&source_path)?;
 
             for definition in &document.definitions {
-                let kind = &definition.metadata.kind;
+                let role = definition_role(definition, symbol_index);
 
-                if matches!(kind, SymbolKind::Parameter) {
-                    if let Some(parent) = &definition.metadata.enclosing_symbol {
-                        let mut param_type = None;
-                        // Try to find type definition relationship
-                        for rel in &definition.metadata.relationships {
-                            if matches!(
-                                rel.kind,
-                                crate::domain::semantic::RelationshipKind::TypeDefinition
-                            ) {
-                                param_type = Some(rel.target_symbol.clone());
-                                break;
-                            }
-                        }
-
-                        let param = crate::domain::node::Parameter {
-                            name: definition.metadata.display_name.clone(),
-                            param_type,
-                        };
-                        parameter_map.entry(parent.clone()).or_default().push(param);
-                    }
+                if role == DefinitionRole::InlineParameter || role == DefinitionRole::Skip {
                     continue;
                 }
 
-                // First compute metrics (needed for both nodes and types)
+                let kind = &definition.metadata.kind;
                 let node_id = graph.graph.node_count() as u32;
-
-                // Extract documentation strings
                 let doc_texts: Vec<String> = definition.metadata.documentation.clone();
-
-                // Compute context_size
                 let span = SourceSpan {
                     start_line: definition.enclosing_range.start_line,
                     start_column: definition.enclosing_range.start_column,
@@ -97,8 +62,6 @@ impl GraphBuilder {
                     end_column: definition.enclosing_range.end_column,
                 };
                 let context_size = self.size_function.compute(&source_code, &span, &doc_texts);
-
-                // Compute doc_score
                 let doc_text = doc_texts.first().map(|s| s.as_str());
                 let language = document
                     .relative_path
@@ -113,55 +76,14 @@ impl GraphBuilder {
                 };
                 let doc_score = self.doc_scorer.score(&node_info, doc_text);
 
-                // Determine if this symbol should be an independent node
-                // Types are NOT nodes anymore - they go into TypeRegistry
-                let should_be_node = match kind {
-                    // Functions are nodes
-                    SymbolKind::Function
-                    | SymbolKind::Method
-                    | SymbolKind::Constructor
-                    | SymbolKind::StaticMethod
-                    | SymbolKind::AbstractMethod => true,
-
-                    // Types go into TypeRegistry, not the graph
-                    SymbolKind::Class
-                    | SymbolKind::Interface
-                    | SymbolKind::Struct
-                    | SymbolKind::Enum
-                    | SymbolKind::TypeAlias
-                    | SymbolKind::Trait
-                    | SymbolKind::Protocol => {
-                        // Register type in TypeRegistry
-                        let type_info =
-                            create_type_info(kind, &definition.metadata, context_size, doc_score);
-                        type_registry.register(definition.symbol.clone(), type_info);
-                        false // Don't create a graph node for types
-                    }
-
-                    // Variable-like nodes: only if they are not parameters or local-like
-                    SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant => definition
-                        .metadata
-                        .enclosing_symbol
-                        .as_ref()
-                        .and_then(|parent_sym| symbol_to_kind.get(parent_sym))
-                        .is_none_or(|parent_kind| {
-                            !matches!(
-                                parent_kind,
-                                SymbolKind::Function
-                                    | SymbolKind::Method
-                                    | SymbolKind::Constructor
-                                    | SymbolKind::StaticMethod
-                                    | SymbolKind::AbstractMethod
-                            )
-                        }),
-                    _ => false, // Parameters, Modules, etc. are not independent nodes
-                };
-
-                if !should_be_node {
+                if role == DefinitionRole::TypeOnly {
+                    let type_info =
+                        create_type_info(kind, &definition.metadata, context_size, doc_score);
+                    type_registry.register(definition.symbol.clone(), type_info);
                     continue;
                 }
 
-                // Create NodeCore
+                // GraphNode: create node; parameters from symbol_index for functions
                 let core = NodeCore::new(
                     node_id,
                     definition.metadata.display_name.clone(),
@@ -172,30 +94,21 @@ impl GraphBuilder {
                     definition.metadata.is_external,
                     document.relative_path.clone(),
                 );
-
-                // Create specific node type
-                let node = create_node_from_definition(core, &definition.metadata)?;
+                let params = symbol_index
+                    .function_parameters
+                    .get(&definition.symbol)
+                    .cloned()
+                    .unwrap_or_else(|| definition.metadata.parameters.clone());
+                let node =
+                    create_node_from_definition_with_params(core, &definition.metadata, &params)?;
                 graph.add_node(definition.symbol.clone(), node);
             }
         }
 
-        // Post-Pass 1: Attach parameters to functions and create ParamType edges
-        for (func_symbol, params) in parameter_map {
-            if let Some(&func_idx) = graph.symbol_to_node.get(&func_symbol) {
-                // 1. Update FunctionNode
-                if let Node::Function(f) = graph.graph.node_weight_mut(func_idx).unwrap() {
-                    f.parameters = params.clone();
-                }
-            }
-        }
-
         // Helper to resolve a symbol to the nearest ancestor that IS a node
-        let resolve_to_node_symbol = |mut sym: String,
-                                      graph: &ContextGraph,
-                                      symbol_to_parent: &HashMap<String, String>|
-         -> Option<String> {
+        let resolve_to_node_symbol = |mut sym: String, graph: &ContextGraph| -> Option<String> {
             while !graph.symbol_to_node.contains_key(&sym) {
-                if let Some(parent) = symbol_to_parent.get(&sym) {
+                if let Some(parent) = symbol_index.symbol_parent.get(&sym) {
                     sym = parent.clone();
                 } else {
                     return None;
@@ -211,13 +124,10 @@ impl GraphBuilder {
 
         for document in &semantic_data.documents {
             for reference in &document.references {
-                let resolved_source_sym = resolve_to_node_symbol(
-                    reference.enclosing_symbol.clone(),
-                    &graph,
-                    &symbol_to_parent,
-                );
+                let resolved_source_sym =
+                    resolve_to_node_symbol(reference.enclosing_symbol.clone(), &graph);
                 let resolved_target_sym =
-                    resolve_to_node_symbol(reference.symbol.clone(), &graph, &symbol_to_parent);
+                    resolve_to_node_symbol(reference.symbol.clone(), &graph);
 
                 if let (Some(source_sym), Some(target_sym)) =
                     (resolved_source_sym, resolved_target_sym)
@@ -344,14 +254,17 @@ fn infer_node_type_from_kind(kind: &SymbolKind) -> NodeType {
     }
 }
 
-fn create_node_from_definition(core: NodeCore, metadata: &SymbolMetadata) -> Result<Node> {
+/// Creates a graph node from definition metadata and pre-resolved parameters (from SymbolIndex or metadata).
+fn create_node_from_definition_with_params(
+    core: NodeCore,
+    metadata: &SymbolMetadata,
+    params: &[crate::domain::semantic::Parameter],
+) -> Result<Node> {
     use crate::domain::node::Parameter as NodeParameter;
 
     match infer_node_type_from_kind(&metadata.kind) {
         NodeType::Function => {
-            // Parameters and return_type are filled by adapter (language-specific parsing of signature)
-            let parameters: Vec<NodeParameter> = metadata
-                .parameters
+            let parameters: Vec<NodeParameter> = params
                 .iter()
                 .map(|p| NodeParameter {
                     name: p.name.clone(),
@@ -370,7 +283,7 @@ fn create_node_from_definition(core: NodeCore, metadata: &SymbolMetadata) -> Res
         }
         NodeType::Variable => Ok(Node::Variable(VariableNode {
             core,
-            var_type: None, // Will be filled from relationships in Pass 2.5
+            var_type: None, // Filled from relationships in Pass 2.5
             mutability: Mutability::Mutable,
             variable_kind: VariableKind::Global,
         })),
@@ -472,6 +385,7 @@ mod tests {
             relationships: vec![],
             enclosing_symbol: None,
             is_external: false,
+            throws: vec![],
         };
 
         let type_info = create_type_info(&SymbolKind::Class, &metadata, 100, 0.8);
@@ -497,6 +411,7 @@ mod tests {
             }],
             enclosing_symbol: None,
             is_external: false,
+            throws: vec![],
         };
 
         let type_info = create_type_info(&SymbolKind::Class, &metadata, 100, 0.8);

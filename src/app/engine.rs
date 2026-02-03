@@ -480,7 +480,6 @@ mod tests {
         FunctionNode, Mutability, Node, NodeCore, SourceSpan, VariableKind, VariableNode,
         Visibility,
     };
-    use crate::domain::type_registry::{TypeDefAttribute, TypeKind};
 
     struct MockReader;
     impl SourceReader for MockReader {

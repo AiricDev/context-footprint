@@ -250,7 +250,7 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: None,
+            return_type: None,
         });
         let idx = g.add_node("sym/f().".into(), f);
         g.add_edge(idx, idx, EdgeKind::Call); // self-loop, harmless

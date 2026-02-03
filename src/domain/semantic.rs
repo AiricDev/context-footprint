@@ -35,14 +35,26 @@ pub struct Reference {
     pub role: ReferenceRole,      // Type of reference (read/write/call, etc.)
 }
 
+/// Parameter from a function signature (language-agnostic representation)
+#[derive(Debug, Clone)]
+pub struct Parameter {
+    pub name: String,
+    /// Type ID/symbol of the parameter type
+    pub param_type: Option<String>,
+}
+
 /// Symbol metadata (corresponds to SCIP SymbolInformation)
 #[derive(Debug, Clone)]
 pub struct SymbolMetadata {
-    pub symbol: String,                   // SCIP symbol identifier
-    pub kind: SymbolKind,                 // Symbol type (Function/Class/Variable, etc.)
-    pub display_name: String,             // Display name
-    pub documentation: Vec<String>,       // Documentation strings (may have multiple segments)
-    pub signature: Option<String>,        // Signature (e.g., function signature)
+    pub symbol: String,             // SCIP symbol identifier
+    pub kind: SymbolKind,           // Symbol type (Function/Class/Variable, etc.)
+    pub display_name: String,       // Display name
+    pub documentation: Vec<String>, // Documentation strings (may have multiple segments)
+    pub signature: Option<String>,  // Signature (e.g., function signature) — raw from indexer
+    /// Parsed parameters (filled by adapter from signature per language)
+    pub parameters: Vec<Parameter>,
+    /// Return type ID/symbol (filled by adapter from signature or relationships)
+    pub return_type: Option<String>,
     pub relationships: Vec<Relationship>, // Relationships with other symbols
     pub enclosing_symbol: Option<String>, // Enclosing symbol (e.g., method's class)
     pub is_external: bool,                // Whether it's an external dependency

@@ -282,7 +282,7 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: None,
+            return_type: None,
         })
     }
 
@@ -463,7 +463,7 @@ mod tests {
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
         graph.add_edge(a, b, EdgeKind::Call);
-        graph.add_edge(a, c, EdgeKind::ParamType);
+        graph.add_edge(a, c, EdgeKind::Call);
         let solver = CfSolver::new();
         let result = solver.compute_cf(&graph, &[a], &AlwaysTransparent, None);
         assert_eq!(result.reachable_set.len(), 3);

@@ -1,7 +1,7 @@
 use crate::adapters::scip::parser::{find_enclosing_definition, parse_range};
 use crate::domain::ports::SemanticDataSource;
 use crate::domain::semantic::{
-    Definition, DocumentData, Reference, ReferenceRole, Relationship, RelationshipKind,
+    Definition, DocumentData, Parameter, Reference, ReferenceRole, Relationship, RelationshipKind,
     SemanticData, SourceRange, SymbolKind, SymbolMetadata,
 };
 use crate::scip;
@@ -48,7 +48,13 @@ impl SemanticDataSource for ScipDataSourceAdapter {
             .documents
             .iter()
             .map(|doc| {
-                let (definitions, references) = partition_occurrences_with_map(doc, &symbol_map);
+                let (mut definitions, references) =
+                    partition_occurrences_with_map(doc, &symbol_map);
+
+                // Enrich function-like definitions with parsed parameters and return type (language-specific)
+                for def in &mut definitions {
+                    enrich_function_signature(&mut def.metadata, &doc.language);
+                }
 
                 DocumentData {
                     relative_path: doc.relative_path.clone(),
@@ -198,6 +204,8 @@ fn convert_symbol_info(sym: &scip::SymbolInformation, is_external: bool) -> Symb
         display_name: sym.display_name.clone(),
         documentation: sym.documentation.clone(),
         signature: sym.signature_documentation.as_ref().map(|d| d.text.clone()),
+        parameters: Vec::new(), // filled by enrich_function_signature per document
+        return_type: None,
         relationships,
         enclosing_symbol: if sym.enclosing_symbol.is_empty() {
             None
@@ -218,10 +226,107 @@ fn create_default_metadata(symbol: &str) -> SymbolMetadata {
         display_name: symbol.to_string(),
         documentation: Vec::new(),
         signature: None,
+        parameters: Vec::new(),
+        return_type: None,
         relationships: Vec::new(),
         enclosing_symbol: None,
         is_external: false,
     }
+}
+
+/// Enrich function-like definitions with parsed parameters and return type from signature (language-specific).
+fn enrich_function_signature(metadata: &mut SymbolMetadata, language: &str) {
+    use crate::domain::semantic::SymbolKind;
+
+    let function_like = matches!(
+        metadata.kind,
+        SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Constructor
+            | SymbolKind::StaticMethod
+            | SymbolKind::AbstractMethod
+    );
+    if !function_like {
+        return;
+    }
+
+    let (parameters, return_type) =
+        parse_function_signature_for_language(metadata.signature.as_deref(), language);
+    metadata.parameters = parameters;
+    metadata.return_type = return_type;
+}
+
+/// Parse function signature string per language. Returns (parameters, return_type).
+/// Other languages can be added here; domain stays language-agnostic.
+fn parse_function_signature_for_language(
+    signature: Option<&str>,
+    language: &str,
+) -> (Vec<Parameter>, Option<String>) {
+    match language.to_lowercase().as_str() {
+        "python" => parse_function_signature_python(signature),
+        _ => (Vec::new(), None),
+    }
+}
+
+/// Python-style signature: "() -> int", "(x: int) -> int", "(x, y)" (no types).
+fn parse_function_signature_python(signature: Option<&str>) -> (Vec<Parameter>, Option<String>) {
+    let signature = match signature {
+        Some(s) if !s.is_empty() => s,
+        _ => return (Vec::new(), None),
+    };
+
+    let (params_part, return_part) = match signature.split_once("->") {
+        Some((params, ret)) => (params.trim(), Some(ret.trim())),
+        None => (signature.trim(), None),
+    };
+
+    let return_type = return_part.and_then(|ret| {
+        let ret = ret.trim().trim_end_matches(':');
+        if ret.is_empty() {
+            None
+        } else {
+            Some(ret.to_string())
+        }
+    });
+
+    let parameters = if params_part.starts_with('(') && params_part.contains(')') {
+        let params_content = params_part
+            .trim_start_matches('(')
+            .split(')')
+            .next()
+            .unwrap_or("")
+            .trim();
+
+        if params_content.is_empty() {
+            Vec::new()
+        } else {
+            params_content
+                .split(',')
+                .map(|param| {
+                    let param = param.trim();
+                    let (name, param_type) = match param.split_once(':') {
+                        Some((name, type_str)) => {
+                            let type_str = type_str.trim();
+                            (
+                                name.trim().to_string(),
+                                if type_str.is_empty() {
+                                    None
+                                } else {
+                                    Some(type_str.to_string())
+                                },
+                            )
+                        }
+                        None => (param.to_string(), None),
+                    };
+                    Parameter { name, param_type }
+                })
+                .collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    (parameters, return_type)
 }
 
 /// Infer SymbolKind from SCIP symbol string format

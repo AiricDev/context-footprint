@@ -118,7 +118,7 @@ fn test_fastapi_project() {
 
     let mut function_cf: Vec<u32> = Vec::new();
     let mut variable_cf: Vec<u32> = Vec::new();
-    let mut type_cf: Vec<u32> = Vec::new();
+    let type_cf: Vec<u32> = Vec::new(); // Types are in TypeRegistry, not graph nodes
     let mut low_cf_examples: Vec<(String, String, u32, &'static str)> = Vec::new();
 
     // Invert symbol_to_node for better reporting
@@ -133,19 +133,15 @@ fn test_fastapi_project() {
         let result = solver.compute_cf(&graph, &[idx], &policy, None);
         let cf = result.total_context_size;
 
+        // Types are in TypeRegistry, not graph nodes; only Function and Variable nodes exist
         let kind = match node {
             context_footprint::domain::node::Node::Function(_) => {
                 function_cf.push(cf);
                 "Function"
             }
-            context_footprint::domain::node::Node::Variable(v) => {
-                if v.type_definition.is_some() {
-                    type_cf.push(cf);
-                    "Type"
-                } else {
-                    variable_cf.push(cf);
-                    "Variable"
-                }
+            context_footprint::domain::node::Node::Variable(_) => {
+                variable_cf.push(cf);
+                "Variable"
             }
         };
 

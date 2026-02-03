@@ -10,7 +10,6 @@ pub enum PolicyKind {
     Strict,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HealthResponse {
     pub scip_path: String,

@@ -1,12 +1,12 @@
 use crate::domain::edge::EdgeKind;
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::{
-    FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeDefAttribute, TypeKind, VariableKind,
-    VariableNode, Visibility,
+    FunctionNode, Mutability, Node, NodeCore, SourceSpan, VariableKind, VariableNode, Visibility,
 };
 use crate::domain::policy::{DocumentationScorer, NodeInfo, NodeType, SizeFunction};
 use crate::domain::ports::SourceReader;
 use crate::domain::semantic::{ReferenceRole, SemanticData, SymbolKind, SymbolMetadata};
+use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeKind, TypeRegistry};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
@@ -35,6 +35,7 @@ impl GraphBuilder {
         source_reader: &dyn SourceReader,
     ) -> Result<ContextGraph> {
         let mut graph = ContextGraph::new();
+        let mut type_registry = TypeRegistry::new();
 
         // 1. Pre-collect kinds and parentage for all definitions
         let mut symbol_to_kind: HashMap<String, SymbolKind> = HashMap::new();
@@ -61,68 +62,28 @@ impl GraphBuilder {
 
                 if matches!(kind, SymbolKind::Parameter) {
                     if let Some(parent) = &definition.metadata.enclosing_symbol {
-                        let mut type_annotation = None;
+                        let mut param_type = None;
                         // Try to find type definition relationship
                         for rel in &definition.metadata.relationships {
                             if matches!(
                                 rel.kind,
                                 crate::domain::semantic::RelationshipKind::TypeDefinition
                             ) {
-                                type_annotation = Some(crate::domain::node::TypeRefAttribute {
-                                    type_name: rel.target_symbol.clone(),
-                                });
+                                param_type = Some(rel.target_symbol.clone());
                                 break;
                             }
                         }
 
                         let param = crate::domain::node::Parameter {
                             name: definition.metadata.display_name.clone(),
-                            type_annotation,
+                            param_type,
                         };
                         parameter_map.entry(parent.clone()).or_default().push(param);
                     }
                     continue;
                 }
 
-                // Determine if this symbol should be an independent node
-                let should_be_node = match kind {
-                    // Always nodes
-                    SymbolKind::Function
-                    | SymbolKind::Method
-                    | SymbolKind::Constructor
-                    | SymbolKind::StaticMethod
-                    | SymbolKind::AbstractMethod
-                    | SymbolKind::Class
-                    | SymbolKind::Interface
-                    | SymbolKind::Struct
-                    | SymbolKind::Enum
-                    | SymbolKind::TypeAlias
-                    | SymbolKind::Trait
-                    | SymbolKind::Protocol => true,
-
-                    // Variable-like nodes: only if they are not parameters or local-like
-                    SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant => definition
-                        .metadata
-                        .enclosing_symbol
-                        .as_ref()
-                        .and_then(|parent_sym| symbol_to_kind.get(parent_sym))
-                        .is_none_or(|parent_kind| {
-                            !matches!(
-                                parent_kind,
-                                SymbolKind::Function
-                                    | SymbolKind::Method
-                                    | SymbolKind::Constructor
-                                    | SymbolKind::StaticMethod
-                                    | SymbolKind::AbstractMethod
-                            )
-                        }),
-                    _ => false, // Parameters, Modules, etc. are not independent nodes
-                };
-
-                if !should_be_node {
-                    continue;
-                }
-
+                // First compute metrics (needed for both nodes and types)
                 let node_id = graph.graph.node_count() as u32;
 
                 // Extract documentation strings
@@ -152,6 +113,54 @@ impl GraphBuilder {
                 };
                 let doc_score = self.doc_scorer.score(&node_info, doc_text);
 
+                // Determine if this symbol should be an independent node
+                // Types are NOT nodes anymore - they go into TypeRegistry
+                let should_be_node = match kind {
+                    // Functions are nodes
+                    SymbolKind::Function
+                    | SymbolKind::Method
+                    | SymbolKind::Constructor
+                    | SymbolKind::StaticMethod
+                    | SymbolKind::AbstractMethod => true,
+
+                    // Types go into TypeRegistry, not the graph
+                    SymbolKind::Class
+                    | SymbolKind::Interface
+                    | SymbolKind::Struct
+                    | SymbolKind::Enum
+                    | SymbolKind::TypeAlias
+                    | SymbolKind::Trait
+                    | SymbolKind::Protocol => {
+                        // Register type in TypeRegistry
+                        let type_info =
+                            create_type_info(kind, &definition.metadata, context_size, doc_score);
+                        type_registry.register(definition.symbol.clone(), type_info);
+                        false // Don't create a graph node for types
+                    }
+
+                    // Variable-like nodes: only if they are not parameters or local-like
+                    SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant => definition
+                        .metadata
+                        .enclosing_symbol
+                        .as_ref()
+                        .and_then(|parent_sym| symbol_to_kind.get(parent_sym))
+                        .is_none_or(|parent_kind| {
+                            !matches!(
+                                parent_kind,
+                                SymbolKind::Function
+                                    | SymbolKind::Method
+                                    | SymbolKind::Constructor
+                                    | SymbolKind::StaticMethod
+                                    | SymbolKind::AbstractMethod
+                            )
+                        }),
+                    _ => false, // Parameters, Modules, etc. are not independent nodes
+                };
+
+                if !should_be_node {
+                    continue;
+                }
+
                 // Create NodeCore
                 let core = NodeCore::new(
                     node_id,
@@ -177,13 +186,6 @@ impl GraphBuilder {
                 if let Node::Function(f) = graph.graph.node_weight_mut(func_idx).unwrap() {
                     f.parameters = params.clone();
                 }
-
-                // 2. Add ParamType edges (Function -> Type) - Optional if we use attributes,
-                // but checking relationships for edge creation is handled in Pass 2.5.
-                // However, parameters aren't nodes anymore, so relationship from Parameter -> Type
-                // won't be picked up by Pass 2.5.
-                // We should add edges here for explicit dependency tracking if desired.
-                // For now, relying on internal attributes is the goal, edges can be implicit.
             }
         }
 
@@ -250,52 +252,34 @@ impl GraphBuilder {
             }
         }
 
-        // Pass 2.5: Process relationships from definitions (e.g., return types, implements, inherits)
+        // Pass 2.5: Process TypeDefinition relationships
+        // Types are now in TypeRegistry, not graph nodes.
+        // We fill in type references in FunctionNode and VariableNode.
         for document in &semantic_data.documents {
             for definition in &document.definitions {
                 if let Some(&source_idx) = graph.symbol_to_node.get(&definition.symbol) {
                     for relationship in &definition.metadata.relationships {
-                        // Resolve target symbol to a node symbol
-                        if let Some(target_idx) = resolve_to_node_symbol(
-                            relationship.target_symbol.clone(),
-                            &graph,
-                            &symbol_to_parent,
-                        )
-                        .and_then(|resolved_target| {
-                            graph.symbol_to_node.get(&resolved_target).copied()
-                        }) {
-                            if source_idx == target_idx {
-                                continue;
-                            }
+                        if matches!(
+                            relationship.kind,
+                            crate::domain::semantic::RelationshipKind::TypeDefinition
+                        ) {
+                            // TypeDefinition means "source uses target as a type"
+                            let target_type_id = &relationship.target_symbol;
 
-                            // Convert relationship kind to edge kind based on source node type
-                            let edge_kind = match relationship.kind {
-                                crate::domain::semantic::RelationshipKind::TypeDefinition => {
-                                    // TypeDefinition means "source uses target as a type"
-                                    // The specific edge depends on what the source is
-                                    match graph.node(source_idx) {
-                                        crate::domain::node::Node::Function(_) => {
-                                            EdgeKind::ReturnType
-                                        }
-                                        crate::domain::node::Node::Variable(_) => {
-                                            EdgeKind::VariableType
-                                        }
+                            // Only process if target is a registered type
+                            if type_registry.contains(target_type_id) {
+                                match graph.graph.node_weight_mut(source_idx) {
+                                    Some(Node::Function(f)) => {
+                                        f.return_type = Some(target_type_id.clone());
                                     }
+                                    Some(Node::Variable(v)) => {
+                                        v.var_type = Some(target_type_id.clone());
+                                    }
+                                    None => {}
                                 }
-                                crate::domain::semantic::RelationshipKind::Implements => {
-                                    EdgeKind::Implements
-                                }
-                                crate::domain::semantic::RelationshipKind::Inherits => {
-                                    EdgeKind::Inherits
-                                }
-                                crate::domain::semantic::RelationshipKind::References => {
-                                    // Generic references - skip, handled by occurrences
-                                    continue;
-                                }
-                            };
-
-                            graph.add_edge(source_idx, target_idx, edge_kind);
+                            }
                         }
+                        // Implements/Inherits are stored in TypeRegistry, not as graph edges
                     }
                 }
             }
@@ -327,7 +311,7 @@ impl GraphBuilder {
                 }
             }
         }
-
+        graph.type_registry = type_registry;
         Ok(graph)
     }
 }
@@ -343,168 +327,100 @@ fn infer_node_type_from_kind(kind: &SymbolKind) -> NodeType {
         | SymbolKind::Field
         | SymbolKind::Constant
         | SymbolKind::Parameter
-        | SymbolKind::Module // Module __init__ treated as variable-like
-        | SymbolKind::Namespace // Namespace/package treated as variable-like
+        | SymbolKind::Module
+        | SymbolKind::Namespace
         | SymbolKind::Package
-        | SymbolKind::Macro => NodeType::Variable, // Macro definitions are declaration-like
+        | SymbolKind::Macro => NodeType::Variable,
+        // Types are not nodes anymore (they go into TypeRegistry).
+        // Return Variable so NodeInfo is valid for doc scoring; create_node_from_definition is never called for types.
         SymbolKind::Class
         | SymbolKind::Interface
         | SymbolKind::Struct
         | SymbolKind::Enum
         | SymbolKind::TypeAlias
         | SymbolKind::Trait
-        | SymbolKind::Protocol => NodeType::Type,
-        _ => NodeType::Variable, // Default: treat unknown as variable (safer than function)
+        | SymbolKind::Protocol => NodeType::Variable,
+        _ => NodeType::Variable,
     }
 }
 
 fn create_node_from_definition(core: NodeCore, metadata: &SymbolMetadata) -> Result<Node> {
+    use crate::domain::node::Parameter as NodeParameter;
+
     match infer_node_type_from_kind(&metadata.kind) {
         NodeType::Function => {
-            // Parse signature to extract parameters and return type
-            let (parameters, return_type_annotation) =
-                parse_function_signature(metadata.signature.as_deref());
+            // Parameters and return_type are filled by adapter (language-specific parsing of signature)
+            let parameters: Vec<NodeParameter> = metadata
+                .parameters
+                .iter()
+                .map(|p| NodeParameter {
+                    name: p.name.clone(),
+                    param_type: p.param_type.clone(),
+                })
+                .collect();
 
             Ok(Node::Function(FunctionNode {
                 core,
                 parameters,
-                is_async: false,                // TODO: extract from signature
-                is_generator: false,            // TODO: extract from signature
-                visibility: Visibility::Public, // TODO: extract from metadata
-                return_type_annotation,
+                is_async: false,
+                is_generator: false,
+                visibility: Visibility::Public,
+                return_type: metadata.return_type.clone(),
             }))
         }
         NodeType::Variable => Ok(Node::Variable(VariableNode {
             core,
-            type_annotation: None, // TODO: extract from signature
-            type_definition: None,
-            mutability: Mutability::Mutable, // TODO: infer from context
-            variable_kind: VariableKind::Global, // TODO: infer from context
+            var_type: None, // Will be filled from relationships in Pass 2.5
+            mutability: Mutability::Mutable,
+            variable_kind: VariableKind::Global,
         })),
-        NodeType::Type => {
-            // Check if it's abstract based on kind
-            let mut is_abstract = matches!(
-                metadata.kind,
-                SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Protocol
-            );
-
-            // Python Protocol detection: SCIP-python marks Protocols as Class but with Implements relationship to typing.Protocol
-            if matches!(metadata.kind, SymbolKind::Class) {
-                is_abstract = metadata.relationships.iter().any(|r| {
-                    matches!(
-                        r.kind,
-                        crate::domain::semantic::RelationshipKind::Implements
-                    ) && r.target_symbol.contains("typing/Protocol#")
-                });
-            }
-
-            Ok(Node::Variable(VariableNode {
-                core,
-                type_annotation: None,
-                type_definition: Some(TypeDefAttribute {
-                    type_kind: match metadata.kind {
-                        SymbolKind::Class if is_abstract => TypeKind::Protocol, // Python Protocol
-                        SymbolKind::Class => TypeKind::Class,
-                        SymbolKind::Interface => TypeKind::Interface,
-                        SymbolKind::Struct => TypeKind::Struct,
-                        SymbolKind::Enum => TypeKind::Enum,
-                        SymbolKind::TypeAlias => TypeKind::TypeAlias,
-                        SymbolKind::Trait => TypeKind::Protocol, // Trait is similar to Protocol
-                        SymbolKind::Protocol => TypeKind::Protocol,
-                        _ => TypeKind::Class, // Default
-                    },
-                    is_abstract,
-                    type_param_count: 0, // TODO: extract from signature
-                }),
-                mutability: Mutability::Immutable, // Type definitions are mostly immutable
-                variable_kind: VariableKind::TypeDef,
-            }))
-        }
     }
 }
 
-/// Parse a function signature string to extract parameters and return type
-/// Supports formats like:
-/// - "() -> int"
-/// - "(x: int) -> int"
-/// - "(x: int, y: str) -> bool"
-/// - "(x, y)" (no types)
-fn parse_function_signature(
-    signature: Option<&str>,
-) -> (
-    Vec<crate::domain::node::Parameter>,
-    Option<crate::domain::node::TypeRefAttribute>,
-) {
-    use crate::domain::node::{Parameter, TypeRefAttribute};
+/// Create TypeInfo for registering in TypeRegistry
+fn create_type_info(
+    kind: &SymbolKind,
+    metadata: &SymbolMetadata,
+    context_size: u32,
+    doc_score: f32,
+) -> TypeInfo {
+    // Check if it's abstract based on kind
+    let mut is_abstract = matches!(
+        kind,
+        SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Protocol
+    );
 
-    let signature = match signature {
-        Some(s) if !s.is_empty() => s,
-        _ => return (Vec::new(), None),
+    // Python Protocol detection
+    if matches!(kind, SymbolKind::Class) {
+        is_abstract = metadata.relationships.iter().any(|r| {
+            matches!(
+                r.kind,
+                crate::domain::semantic::RelationshipKind::Implements
+            ) && r.target_symbol.contains("typing/Protocol#")
+        });
+    }
+
+    let type_kind = match kind {
+        SymbolKind::Class if is_abstract => TypeKind::Protocol,
+        SymbolKind::Class => TypeKind::Class,
+        SymbolKind::Interface => TypeKind::Interface,
+        SymbolKind::Struct => TypeKind::Struct,
+        SymbolKind::Enum => TypeKind::Enum,
+        SymbolKind::TypeAlias => TypeKind::TypeAlias,
+        SymbolKind::Trait => TypeKind::Protocol,
+        SymbolKind::Protocol => TypeKind::Protocol,
+        _ => TypeKind::Class,
     };
 
-    // Find the arrow separating params and return type
-    let (params_part, return_part) = match signature.split_once("->") {
-        Some((params, ret)) => (params.trim(), Some(ret.trim())),
-        None => (signature.trim(), None),
-    };
-
-    // Parse return type if present
-    let return_type_annotation = return_part.and_then(|ret| {
-        let ret = ret.trim().trim_end_matches(':'); // Remove trailing colon if present
-        if ret.is_empty() {
-            None
-        } else {
-            Some(TypeRefAttribute {
-                type_name: ret.to_string(),
-            })
-        }
-    });
-
-    // Parse parameters - extract content between parentheses
-    let parameters = if params_part.starts_with('(') && params_part.contains(')') {
-        let params_content = params_part
-            .trim_start_matches('(')
-            .split(')')
-            .next()
-            .unwrap_or("")
-            .trim();
-
-        if params_content.is_empty() {
-            Vec::new()
-        } else {
-            params_content
-                .split(',')
-                .map(|param| {
-                    let param = param.trim();
-                    // Check if param has type annotation (contains ':')
-                    let (name, type_annotation) = match param.split_once(':') {
-                        Some((name, type_str)) => {
-                            let type_str = type_str.trim();
-                            (
-                                name.trim().to_string(),
-                                if type_str.is_empty() {
-                                    None
-                                } else {
-                                    Some(TypeRefAttribute {
-                                        type_name: type_str.to_string(),
-                                    })
-                                },
-                            )
-                        }
-                        None => (param.to_string(), None),
-                    };
-                    Parameter {
-                        name,
-                        type_annotation,
-                    }
-                })
-                .collect()
-        }
-    } else {
-        Vec::new()
-    };
-
-    (parameters, return_type_annotation)
+    TypeInfo {
+        definition: TypeDefAttribute {
+            type_kind,
+            is_abstract,
+            type_param_count: 0, // TODO: extract from signature
+        },
+        context_size,
+        doc_score,
+    }
 }
 
 fn infer_edge_kind(
@@ -516,9 +432,9 @@ fn infer_edge_kind(
         ReferenceRole::Read => EdgeKind::Read,
         ReferenceRole::Write => EdgeKind::Write,
         ReferenceRole::Call => EdgeKind::Call,
-        ReferenceRole::TypeUsage => EdgeKind::ParamType, // Simplified
-        ReferenceRole::Import => EdgeKind::Call,         // Simplified
-        ReferenceRole::Unknown => EdgeKind::Call,        // Default
+        ReferenceRole::TypeUsage => EdgeKind::Call, // Types are in TypeRegistry, not graph
+        ReferenceRole::Import => EdgeKind::Call,
+        ReferenceRole::Unknown => EdgeKind::Call,
     }
 }
 
@@ -534,10 +450,6 @@ mod tests {
             NodeType::Function
         );
         assert_eq!(
-            infer_node_type_from_kind(&SymbolKind::Class),
-            NodeType::Type
-        );
-        assert_eq!(
             infer_node_type_from_kind(&SymbolKind::Variable),
             NodeType::Variable
         );
@@ -548,62 +460,47 @@ mod tests {
     }
 
     #[test]
-    fn test_create_node_from_definition_class_vs_protocol() {
-        let core = NodeCore::new(
-            0,
-            "MyClass".into(),
-            None,
-            10,
-            SourceSpan {
-                start_line: 0,
-                start_column: 0,
-                end_line: 1,
-                end_column: 0,
-            },
-            1.0,
-            false,
-            "file.py".into(),
-        );
-
-        let mut metadata = SymbolMetadata {
+    fn test_create_type_info() {
+        let metadata = SymbolMetadata {
             symbol: "MyClass#".into(),
             kind: SymbolKind::Class,
             display_name: "MyClass".into(),
             documentation: vec![],
             signature: None,
+            parameters: vec![],
+            return_type: None,
             relationships: vec![],
             enclosing_symbol: None,
             is_external: false,
         };
 
-        let node = create_node_from_definition(core.clone(), &metadata).unwrap();
-        if let Node::Variable(v) = node {
-            if let Some(td) = v.type_definition {
-                assert_eq!(td.type_kind, TypeKind::Class);
-            } else {
-                panic!("Expected TypeDefinition attribute");
-            }
-        } else {
-            panic!("Expected Variable node");
-        }
+        let type_info = create_type_info(&SymbolKind::Class, &metadata, 100, 0.8);
+        assert_eq!(type_info.definition.type_kind, TypeKind::Class);
+        assert!(!type_info.definition.is_abstract);
+        assert_eq!(type_info.context_size, 100);
+        assert_eq!(type_info.doc_score, 0.8);
+    }
 
-        // Add Protocol relationship
-        metadata
-            .relationships
-            .push(crate::domain::semantic::Relationship {
+    #[test]
+    fn test_create_type_info_protocol() {
+        let metadata = SymbolMetadata {
+            symbol: "MyProtocol#".into(),
+            kind: SymbolKind::Class,
+            display_name: "MyProtocol".into(),
+            documentation: vec![],
+            signature: None,
+            parameters: vec![],
+            return_type: None,
+            relationships: vec![crate::domain::semantic::Relationship {
                 target_symbol: "typing/Protocol#".into(),
                 kind: crate::domain::semantic::RelationshipKind::Implements,
-            });
+            }],
+            enclosing_symbol: None,
+            is_external: false,
+        };
 
-        let node = create_node_from_definition(core.clone(), &metadata).unwrap();
-        if let Node::Variable(v) = node {
-            if let Some(td) = v.type_definition {
-                assert_eq!(td.type_kind, TypeKind::Protocol);
-            } else {
-                panic!("Expected TypeDefinition attribute");
-            }
-        } else {
-            panic!("Expected Variable node");
-        }
+        let type_info = create_type_info(&SymbolKind::Class, &metadata, 100, 0.8);
+        assert_eq!(type_info.definition.type_kind, TypeKind::Protocol);
+        assert!(type_info.definition.is_abstract);
     }
 }

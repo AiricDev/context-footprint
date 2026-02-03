@@ -71,9 +71,10 @@ pub struct FunctionNode {
     pub is_generator: bool,
     pub visibility: Visibility,
 
-    // Signature
+    // Signature - type references are stored as TypeIds (symbols)
+    // The actual type information is in TypeRegistry
     pub parameters: Vec<Parameter>,
-    pub return_type_annotation: Option<TypeRefAttribute>,
+    pub return_type: Option<String>, // TypeId (symbol) of return type
 }
 
 impl FunctionNode {
@@ -81,7 +82,7 @@ impl FunctionNode {
     pub fn typed_param_count(&self) -> usize {
         self.parameters
             .iter()
-            .filter(|p| p.type_annotation.is_some())
+            .filter(|p| p.param_type.is_some())
             .count()
     }
 
@@ -92,20 +93,26 @@ impl FunctionNode {
 
     /// Has return type annotation
     pub fn has_return_type(&self) -> bool {
-        self.return_type_annotation.is_some()
+        self.return_type.is_some()
     }
 
     /// Check if function signature is complete (all params typed + has return type)
     pub fn is_signature_complete(&self) -> bool {
         self.typed_param_count() == self.param_count() && self.has_return_type()
     }
+
+    /// Get return type ID if present
+    pub fn return_type_id(&self) -> Option<&str> {
+        self.return_type.as_deref()
+    }
 }
 
-/// Function parameter attribute
+/// Function parameter
 #[derive(Debug, Clone)]
 pub struct Parameter {
     pub name: String,
-    pub type_annotation: Option<TypeRefAttribute>,
+    /// Type ID (symbol) of the parameter type, stored in TypeRegistry
+    pub param_type: Option<String>,
     // We could add default value presence, etc.
 }
 
@@ -122,7 +129,6 @@ pub enum Mutability {
 pub enum VariableKind {
     Global,     // Module-level
     ClassField, // Class/struct field
-    TypeDef,    // Represents a class/struct/interface definition
     Local,      // Local variable
 }
 
@@ -131,49 +137,14 @@ pub enum VariableKind {
 pub struct VariableNode {
     pub core: NodeCore,
 
-    // Type annotation (The type OF this variable)
-    pub type_annotation: Option<TypeRefAttribute>,
-
-    // Type Definition (If this variable IS a type)
-    pub type_definition: Option<TypeDefAttribute>,
+    // Type ID of this variable (stored in TypeRegistry)
+    pub var_type: Option<String>,
 
     // Mutability (critical for Expansion)
     pub mutability: Mutability,
 
     // Scope kind
     pub variable_kind: VariableKind,
-}
-
-/// Type kind
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TypeKind {
-    Class,
-    Interface, // Java, Go, TypeScript
-    Protocol,  // Python, Swift
-    Struct,
-    Enum,
-    TypeAlias,    // type UserId = string
-    FunctionType, // (int, int) -> bool
-    Union,        // A | B
-    Intersection, // A & B
-}
-
-/// Attribute for Type Definitions (when a VariableNode represents a Type)
-#[derive(Debug, Clone)]
-pub struct TypeDefAttribute {
-    pub type_kind: TypeKind,
-    pub is_abstract: bool,
-    pub type_param_count: u32,
-    // We can add more type-specific metadata here (e.g., generic constraints)
-}
-
-/// Attribute for Type References (when a Node refers to a Type)
-#[derive(Debug, Clone)]
-pub struct TypeRefAttribute {
-    // Just a simple string representation for now, or could be more structured
-    pub type_name: String,
-    // We might want to resolve this to a NodeId if possible, but edges do that.
-    // This is mostly for display or heuristic size calculation.
 }
 
 /// Polymorphic node type

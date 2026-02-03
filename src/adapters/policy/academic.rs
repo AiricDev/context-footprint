@@ -2,7 +2,6 @@ use crate::domain::edge::EdgeKind;
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::Node;
 use crate::domain::policy::{PruningDecision, PruningPolicy};
-use petgraph::visit::EdgeRef;
 
 /// Academic baseline pruning policy
 /// Uses type completeness + documentation presence check
@@ -25,30 +24,17 @@ impl AcademicBaseline {
     /// This identifies the Abstract Factory design pattern where a function/method
     /// returns an interface/protocol, hiding concrete implementation details
     fn is_abstract_factory(&self, function_node: &Node, graph: &ContextGraph) -> bool {
-        // Find the NodeIndex for this function node by comparing node IDs
-        let func_node_id = function_node.core().id;
-        let mut func_idx = None;
-        for &idx in graph.symbol_to_node.values() {
-            if graph.node(idx).core().id == func_node_id {
-                func_idx = Some(idx);
-                break;
-            }
-        }
-
-        if let Some(idx) = func_idx {
-            // Check all outgoing edges from this function
-            for edge_ref in graph.graph.edges(idx) {
-                if matches!(edge_ref.weight(), EdgeKind::ReturnType) {
-                    let target_idx = edge_ref.target();
-                    let target_node = graph.node(target_idx);
-
+        if let Node::Function(f) = function_node {
+            // Check if function has a return type annotation
+            if let Some(return_type_id) = f.return_type_id() {
+                // Look up the return type in the TypeRegistry
+                if let Some(type_info) = graph.type_registry.get(return_type_id) {
                     // If return type is an abstract type (Protocol/Interface/Trait)
                     // with sufficient documentation, this is an abstract factory
-                    if let Node::Variable(v) = target_node
-                        && let Some(td) = &v.type_definition
-                            && td.is_abstract && v.core.doc_score >= self.doc_threshold {
-                                return true;
-                            }
+                    if type_info.definition.is_abstract && type_info.doc_score >= self.doc_threshold
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -91,18 +77,10 @@ impl PruningPolicy for AcademicBaseline {
             return PruningDecision::Boundary;
         }
         match target {
-            Node::Variable(v) => {
-                if let Some(td) = &v.type_definition {
-                    // Type boundary: must be abstract (interface/protocol) and well-documented
-                    if td.is_abstract && v.core.doc_score >= self.doc_threshold {
-                        PruningDecision::Boundary
-                    } else {
-                        PruningDecision::Transparent
-                    }
-                } else {
-                    // Variables are always transparent (need to see type definition)
-                    PruningDecision::Transparent
-                }
+            Node::Variable(_) => {
+                // Regular variables are always transparent
+                // (Types are no longer in the graph, they are in TypeRegistry)
+                PruningDecision::Transparent
             }
             Node::Function(f) => {
                 // Check if this function is an "abstract factory"
@@ -135,8 +113,8 @@ mod tests {
     use crate::domain::edge::EdgeKind;
     use crate::domain::graph::ContextGraph;
     use crate::domain::node::{
-        FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeDefAttribute, TypeKind,
-        VariableKind, VariableNode, Visibility,
+        FunctionNode, Mutability, Node, NodeCore, SourceSpan, VariableKind, VariableNode,
+        Visibility,
     };
 
     fn make_core(id: u32, name: &str, doc_score: f32, is_external: bool) -> NodeCore {
@@ -164,23 +142,17 @@ mod tests {
             parameters: vec![
                 crate::domain::node::Parameter {
                     name: "x".to_string(),
-                    type_annotation: Some(crate::domain::node::TypeRefAttribute {
-                        type_name: "int".to_string(),
-                    }),
+                    param_type: Some("int#".to_string()),
                 },
                 crate::domain::node::Parameter {
                     name: "y".to_string(),
-                    type_annotation: Some(crate::domain::node::TypeRefAttribute {
-                        type_name: "int".to_string(),
-                    }),
+                    param_type: Some("int#".to_string()),
                 },
             ],
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: Some(crate::domain::node::TypeRefAttribute {
-                type_name: "int".to_string(),
-            }),
+            return_type: Some("int#".to_string()),
         })
     }
 
@@ -190,42 +162,12 @@ mod tests {
             core,
             parameters: vec![crate::domain::node::Parameter {
                 name: "x".to_string(),
-                type_annotation: None,
+                param_type: None,
             }],
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: None,
-        })
-    }
-
-    fn abstract_type_with_doc() -> Node {
-        let core = make_core(0, "I", 0.6, false);
-        Node::Variable(VariableNode {
-            core,
-            type_annotation: None,
-            type_definition: Some(TypeDefAttribute {
-                type_kind: TypeKind::Interface,
-                is_abstract: true,
-                type_param_count: 0,
-            }),
-            mutability: Mutability::Immutable,
-            variable_kind: VariableKind::TypeDef,
-        })
-    }
-
-    fn concrete_type() -> Node {
-        let core = make_core(0, "C", 0.9, false);
-        Node::Variable(VariableNode {
-            core,
-            type_annotation: None,
-            type_definition: Some(TypeDefAttribute {
-                type_kind: TypeKind::Class,
-                is_abstract: false,
-                type_param_count: 0,
-            }),
-            mutability: Mutability::Immutable,
-            variable_kind: VariableKind::TypeDef,
+            return_type: None,
         })
     }
 
@@ -233,8 +175,7 @@ mod tests {
         let core = make_core(0, "v", 1.0, false);
         Node::Variable(VariableNode {
             core,
-            type_annotation: None, // Simplified
-            type_definition: None,
+            var_type: None,
             mutability: Mutability::Immutable,
             variable_kind: VariableKind::Global,
         })
@@ -248,7 +189,7 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: None,
+            return_type: None,
         })
     }
 
@@ -285,28 +226,6 @@ mod tests {
         let target = poorly_documented_function();
         let source = well_documented_function();
         let edge = EdgeKind::Call;
-        let d = policy.evaluate(&source, &target, &edge, &graph);
-        assert!(matches!(d, PruningDecision::Transparent));
-    }
-
-    #[test]
-    fn test_abstract_type_with_doc_is_boundary() {
-        let policy = AcademicBaseline::default();
-        let graph = empty_graph();
-        let target = abstract_type_with_doc();
-        let source = well_documented_function();
-        let edge = EdgeKind::ParamType;
-        let d = policy.evaluate(&source, &target, &edge, &graph);
-        assert!(matches!(d, PruningDecision::Boundary));
-    }
-
-    #[test]
-    fn test_concrete_type_is_transparent() {
-        let policy = AcademicBaseline::default();
-        let graph = empty_graph();
-        let target = concrete_type();
-        let source = well_documented_function();
-        let edge = EdgeKind::ParamType;
         let d = policy.evaluate(&source, &target, &edge, &graph);
         assert!(matches!(d, PruningDecision::Transparent));
     }
@@ -369,30 +288,23 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: Some(crate::domain::node::TypeRefAttribute {
-                type_name: "ServicePort".to_string(),
-            }),
+            return_type: Some("ServicePort#".to_string()),
         });
 
-        // Create an abstract protocol it returns
-        let protocol_core = make_core(1, "ServicePort", 0.9, false);
-        let protocol = Node::Variable(VariableNode {
-            core: protocol_core,
-            type_annotation: None,
-            type_definition: Some(TypeDefAttribute {
-                type_kind: TypeKind::Interface,
-                is_abstract: true,
-                type_param_count: 0,
-            }),
-            mutability: Mutability::Immutable,
-            variable_kind: VariableKind::TypeDef,
-        });
-
-        // Build graph with ReturnType edge from factory to protocol
+        // Register abstract type in TypeRegistry
         let mut graph = ContextGraph::new();
-        let factory_idx = graph.add_node("get_service".to_string(), factory.clone());
-        let protocol_idx = graph.add_node("ServicePort".to_string(), protocol.clone());
-        graph.add_edge(factory_idx, protocol_idx, EdgeKind::ReturnType);
+        graph.type_registry.register(
+            "ServicePort#".to_string(),
+            crate::domain::type_registry::TypeInfo {
+                definition: crate::domain::type_registry::TypeDefAttribute {
+                    type_kind: crate::domain::type_registry::TypeKind::Interface,
+                    is_abstract: true,
+                    type_param_count: 0,
+                },
+                context_size: 100,
+                doc_score: 0.9,
+            },
+        );
 
         // Test: factory function should be recognized as boundary (abstract factory pattern)
         let caller = poorly_documented_function();
@@ -405,39 +317,33 @@ mod tests {
         let policy = AcademicBaseline::default();
 
         // Create a factory function with incomplete docs that returns abstract type
-        // Normally this would be Transparent, but abstract factory rule makes it Boundary
-        let factory_core = make_core(0, "get_service", 0.3, false); // Low doc score
+        let factory_core = make_core(0, "get_service", 0.3, false);
         let factory = Node::Function(FunctionNode {
             core: factory_core,
             parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: None,
+            return_type: Some("ServicePort#".to_string()),
         });
 
-        // Create an abstract protocol it returns
-        let protocol_core = make_core(1, "ServicePort", 0.9, false);
-        let protocol = Node::Variable(VariableNode {
-            core: protocol_core,
-            type_annotation: None,
-            type_definition: Some(TypeDefAttribute {
-                type_kind: TypeKind::Interface,
-                is_abstract: true,
-                type_param_count: 0,
-            }),
-            mutability: Mutability::Immutable,
-            variable_kind: VariableKind::TypeDef,
-        });
-
-        // Build graph with ReturnType edge
+        // Register abstract type in TypeRegistry
         let mut graph = ContextGraph::new();
-        let factory_idx = graph.add_node("get_service".to_string(), factory.clone());
-        let protocol_idx = graph.add_node("ServicePort".to_string(), protocol.clone());
-        graph.add_edge(factory_idx, protocol_idx, EdgeKind::ReturnType);
+        graph.type_registry.register(
+            "ServicePort#".to_string(),
+            crate::domain::type_registry::TypeInfo {
+                definition: crate::domain::type_registry::TypeDefAttribute {
+                    type_kind: crate::domain::type_registry::TypeKind::Interface,
+                    is_abstract: true,
+                    type_param_count: 0,
+                },
+                context_size: 100,
+                doc_score: 0.9,
+            },
+        );
 
-        // Test: Even though factory has poor docs and incomplete signature,
-        // it becomes Boundary because it returns an abstract type (abstract factory pattern)
+        // Test: Even though factory has poor docs, it becomes Boundary
+        // because it returns an abstract type (abstract factory pattern)
         let caller = well_documented_function();
         let d = policy.evaluate(&caller, &factory, &EdgeKind::Call, &graph);
         assert!(matches!(d, PruningDecision::Boundary));

@@ -1,5 +1,6 @@
 use crate::domain::edge::EdgeKind;
 use crate::domain::node::Node;
+use crate::domain::type_registry::TypeRegistry;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 
@@ -13,6 +14,9 @@ pub struct ContextGraph {
 
     /// Mapping from symbol to node index
     pub symbol_to_node: HashMap<SymbolId, NodeIndex>,
+
+    /// Type registry - stores type definitions outside the graph
+    pub type_registry: TypeRegistry,
 }
 
 impl Default for ContextGraph {
@@ -26,6 +30,7 @@ impl ContextGraph {
         Self {
             graph: DiGraph::new(),
             symbol_to_node: HashMap::new(),
+            type_registry: TypeRegistry::new(),
         }
     }
 
@@ -86,7 +91,7 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: crate::domain::node::Visibility::Public,
-            return_type_annotation: None,
+            return_type: None,
         })
     }
 
@@ -197,7 +202,7 @@ mod tests {
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 10));
         graph.add_edge(a, b, EdgeKind::Call);
-        graph.add_edge(a, b, EdgeKind::ParamType); // petgraph allows multi-edges
+        graph.add_edge(a, b, EdgeKind::Call); // petgraph allows multi-edges
         assert!(graph.graph.edge_count() >= 2);
     }
 

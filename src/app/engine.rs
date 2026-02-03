@@ -82,16 +82,16 @@ impl ContextEngine {
         semantic_data.project_root = project_root.to_string_lossy().to_string();
 
         let builder = crate::domain::builder::GraphBuilder::new(size_function, doc_scorer);
-        let graph = builder.build(semantic_data, source_reader.as_ref())?;
+        let build_result = builder.build(semantic_data, source_reader.as_ref())?;
 
-        let (node_id_to_index, node_id_to_symbol) = build_node_maps(&graph);
+        let (node_id_to_index, node_id_to_symbol) = build_node_maps(&build_result);
 
         Ok(Self {
             inner: Arc::new(RwLock::new(EngineData {
                 scip_path,
                 project_root,
                 project_root_override,
-                graph: Arc::new(graph),
+                graph: Arc::new(build_result),
                 node_id_to_index,
                 node_id_to_symbol,
                 source_reader,
@@ -477,9 +477,10 @@ mod tests {
     use super::*;
     use crate::domain::edge::EdgeKind;
     use crate::domain::node::{
-        FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeDefAttribute, TypeKind,
-        VariableKind, VariableNode, Visibility,
+        FunctionNode, Mutability, Node, NodeCore, SourceSpan, VariableKind, VariableNode,
+        Visibility,
     };
+    use crate::domain::type_registry::{TypeDefAttribute, TypeKind};
 
     struct MockReader;
     impl SourceReader for MockReader {
@@ -532,24 +533,19 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type_annotation: None,
+            return_type: None,
         });
 
-        let t1 = Node::Variable(VariableNode {
-            core: make_core(1, "Type1", "app/types.py", 0, 1),
-            type_annotation: None,
-            type_definition: Some(TypeDefAttribute {
-                type_kind: TypeKind::Class,
-                is_abstract: false,
-                type_param_count: 0,
-            }),
-            mutability: Mutability::Immutable,
-            variable_kind: VariableKind::TypeDef,
+        let v1 = Node::Variable(VariableNode {
+            core: make_core(1, "var1", "app/main.py", 0, 1),
+            var_type: None,
+            mutability: Mutability::Mutable,
+            variable_kind: VariableKind::Global,
         });
 
         let i_f1 = g.add_node("sym/func1().".into(), f1);
-        let i_t1 = g.add_node("sym/Type1#".into(), t1);
-        g.add_edge(i_f1, i_t1, EdgeKind::Call);
+        let i_v1 = g.add_node("sym/var1.".into(), v1);
+        g.add_edge(i_f1, i_v1, EdgeKind::Read);
 
         g
     }
@@ -656,7 +652,6 @@ fn make_policy(kind: PolicyKind) -> Box<dyn crate::domain::policy::PruningPolicy
 fn node_type_str(node: &Node) -> &'static str {
     match node {
         Node::Function(_) => "function",
-        Node::Variable(v) if v.type_definition.is_some() => "type",
         Node::Variable(_) => "variable",
     }
 }

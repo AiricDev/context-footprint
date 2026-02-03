@@ -7,7 +7,6 @@ use crate::domain::node::Node;
 pub enum NodeType {
     Function,
     Variable,
-    Type,
 }
 
 /// Pruning decision

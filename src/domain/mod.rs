@@ -6,3 +6,4 @@ pub mod policy;
 pub mod ports;
 pub mod semantic;
 pub mod solver;
+pub mod type_registry;

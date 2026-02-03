@@ -93,49 +93,33 @@ fn test_llmrelay_auth_port_is_abstract() {
         .build(semantic_data, &source_reader)
         .expect("Failed to build graph");
 
-    // Find AuthPort node
+    // AuthPort is a Protocol; types are stored in TypeRegistry, not as graph nodes
     let auth_port_symbol = "scip-python python llmrelay 0.1.0 `app.domain.ports.auth`/AuthPort#";
-    let Some(auth_port_idx) = graph.get_node_by_symbol(auth_port_symbol) else {
+    let Some(type_info) = graph.type_registry.get(auth_port_symbol) else {
         eprintln!(
-            "Skipping test: expected symbol not found in graph: {}",
+            "Skipping test: AuthPort not found in type registry: {}",
             auth_port_symbol
         );
         return;
     };
-    let auth_port_node = graph.node(auth_port_idx);
 
-    // Test 1: AuthPort should be a Type node
-    match auth_port_node {
-        Node::Variable(v) => {
-            if let Some(td) = &v.type_definition {
-                println!("✓ AuthPort is a Variable node representing a Type");
-                println!("  is_abstract: {}", td.is_abstract);
-                println!("  doc_score: {}", v.core.doc_score);
+    // Test 1: AuthPort should be registered as a type
+    println!("✓ AuthPort is in TypeRegistry");
+    println!("  is_abstract: {}", type_info.definition.is_abstract);
+    println!("  doc_score: {}", type_info.doc_score);
 
-                // Test 2: AuthPort should be abstract (Protocol)
-                assert!(
-                    td.is_abstract,
-                    "AuthPort should be abstract (it's a Protocol), but is_abstract = false"
-                );
+    // Test 2: AuthPort should be abstract (Protocol)
+    assert!(
+        type_info.definition.is_abstract,
+        "AuthPort should be abstract (it's a Protocol), but is_abstract = false"
+    );
 
-                // Test 3: AuthPort should have good documentation
-                assert!(
-                    v.core.doc_score >= 0.5,
-                    "AuthPort should have doc_score >= 0.5, got {}",
-                    v.core.doc_score
-                );
-            } else {
-                panic!(
-                    "AuthPort should be a Variable node with type_definition, got {:?}",
-                    auth_port_node
-                )
-            }
-        }
-        _ => panic!(
-            "AuthPort should be a Variable node, got {:?}",
-            auth_port_node
-        ),
-    }
+    // Test 3: AuthPort should have good documentation
+    assert!(
+        type_info.doc_score >= 0.5,
+        "AuthPort should have doc_score >= 0.5, got {}",
+        type_info.doc_score
+    );
 }
 
 #[test]
@@ -167,30 +151,20 @@ fn test_llmrelay_get_auth_port_has_return_type_edge() {
         return;
     };
 
-    // Find AuthPort type
-    let auth_port_symbol = "scip-python python llmrelay 0.1.0 `app.domain.ports.auth`/AuthPort#";
-    let Some(auth_port_idx) = graph.get_node_by_symbol(auth_port_symbol) else {
-        eprintln!(
-            "Skipping test: expected symbol not found in graph: {}",
-            auth_port_symbol
-        );
-        return;
+    let auth_port_type_id = "scip-python python llmrelay 0.1.0 `app.domain.ports.auth`/AuthPort#";
+
+    // Return type is stored on FunctionNode.return_type; types are in TypeRegistry, no ReturnType edge
+    let get_auth_port_node = graph.node(get_auth_port_idx);
+    let Node::Function(f) = get_auth_port_node else {
+        panic!("get_auth_port should be a Function node");
     };
 
-    // Test: get_auth_port should have a ReturnType edge to AuthPort
-    let mut found_return_type_edge = false;
-    for (neighbor_idx, edge_kind) in graph.neighbors(get_auth_port_idx) {
-        if matches!(edge_kind, EdgeKind::ReturnType) && neighbor_idx == auth_port_idx {
-            found_return_type_edge = true;
-            println!("✓ get_auth_port has ReturnType edge to AuthPort");
-            break;
-        }
-    }
-
     assert!(
-        found_return_type_edge,
-        "get_auth_port should have a ReturnType edge to AuthPort"
+        f.return_type.as_deref() == Some(auth_port_type_id),
+        "get_auth_port should have return_type = AuthPort, got {:?}",
+        f.return_type
     );
+    println!("✓ get_auth_port has return_type set to AuthPort");
 }
 
 #[test]
@@ -245,7 +219,7 @@ fn test_llmrelay_get_auth_port_is_abstract_factory() {
         is_async: false,
         is_generator: false,
         visibility: context_footprint::domain::node::Visibility::Public,
-        return_type_annotation: None,
+        return_type: None,
     });
 
     let decision = policy.evaluate(&dummy_caller, get_auth_port_node, &EdgeKind::Call, &graph);

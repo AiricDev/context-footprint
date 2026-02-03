@@ -2,12 +2,21 @@
 #![allow(dead_code)]
 
 use context_footprint::domain::semantic::{
-    Definition, DocumentData, Parameter, Reference, ReferenceRole, SemanticData, SourceRange,
-    SymbolIndex, SymbolKind, SymbolMetadata,
+    DocumentSemantics, FunctionDetails, FunctionModifiers, Mutability, ParameterInfo,
+    ReferenceRole, SemanticData, SourceLocation, SourceSpan, SymbolDefinition, SymbolDetails,
+    SymbolKind, SymbolReference, VariableDetails, VariableKind, Visibility,
 };
 
-fn default_range() -> SourceRange {
-    SourceRange {
+fn default_location() -> SourceLocation {
+    SourceLocation {
+        file_path: "test.py".to_string(),
+        line: 0,
+        column: 0,
+    }
+}
+
+fn default_span() -> SourceSpan {
+    SourceSpan {
         start_line: 0,
         start_column: 0,
         end_line: 1,
@@ -15,28 +24,98 @@ fn default_range() -> SourceRange {
     }
 }
 
-fn metadata(
-    symbol: &str,
-    display_name: &str,
-    kind: SymbolKind,
+fn function_def(
+    symbol_id: &str,
+    name: &str,
     documentation: Vec<String>,
-    signature: Option<String>,
-    parameters: Vec<Parameter>,
+    parameters: Vec<ParameterInfo>,
     return_type: Option<String>,
-    is_external: bool,
-) -> SymbolMetadata {
-    SymbolMetadata {
-        symbol: symbol.to_string(),
-        kind,
-        display_name: display_name.to_string(),
-        documentation,
-        signature,
-        parameters,
-        return_type,
-        relationships: Vec::new(),
+) -> SymbolDefinition {
+    SymbolDefinition {
+        symbol_id: symbol_id.to_string(),
+        kind: SymbolKind::Function,
+        name: name.to_string(),
+        display_name: name.to_string(),
+        location: default_location(),
+        span: SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 5,
+            end_column: 20,
+        },
         enclosing_symbol: None,
-        is_external,
-        throws: vec![],
+        is_external: false,
+        documentation,
+        details: SymbolDetails::Function(FunctionDetails {
+            parameters,
+            return_type,
+            throws: vec![],
+            type_params: vec![],
+            modifiers: FunctionModifiers {
+                is_async: false,
+                is_generator: false,
+                is_static: false,
+                is_abstract: false,
+                is_constructor: false,
+                visibility: Visibility::Public,
+            },
+        }),
+    }
+}
+
+fn variable_def(
+    symbol_id: &str,
+    name: &str,
+    documentation: Vec<String>,
+    var_type: Option<String>,
+    mutability: Mutability,
+) -> SymbolDefinition {
+    SymbolDefinition {
+        symbol_id: symbol_id.to_string(),
+        kind: SymbolKind::Variable,
+        name: name.to_string(),
+        display_name: name.to_string(),
+        location: default_location(),
+        span: default_span(),
+        enclosing_symbol: None,
+        is_external: false,
+        documentation,
+        details: SymbolDetails::Variable(VariableDetails {
+            var_type,
+            mutability,
+            variable_kind: VariableKind::Global,
+            visibility: Visibility::Public,
+        }),
+    }
+}
+
+fn call_reference(target: &str, enclosing: &str) -> SymbolReference {
+    SymbolReference {
+        target_symbol: target.to_string(),
+        location: default_location(),
+        enclosing_symbol: enclosing.to_string(),
+        role: ReferenceRole::Call,
+        context: None,
+    }
+}
+
+fn read_reference(target: &str, enclosing: &str) -> SymbolReference {
+    SymbolReference {
+        target_symbol: target.to_string(),
+        location: default_location(),
+        enclosing_symbol: enclosing.to_string(),
+        role: ReferenceRole::Read,
+        context: None,
+    }
+}
+
+fn write_reference(target: &str, enclosing: &str) -> SymbolReference {
+    SymbolReference {
+        target_symbol: target.to_string(),
+        location: default_location(),
+        enclosing_symbol: enclosing.to_string(),
+        role: ReferenceRole::Write,
+        context: None,
     }
 }
 
@@ -45,67 +124,31 @@ pub fn create_semantic_data_simple() -> SemanticData {
     let sym_a = "sym::func_a";
     let sym_b = "sym::func_b";
 
-    let documents = vec![DocumentData {
-            relative_path: "main.py".into(),
-            language: "python".into(),
-            definitions: vec![
-                Definition {
-                    symbol: sym_a.to_string(),
-                    range: default_range(),
-                    enclosing_range: SourceRange {
-                        start_line: 0,
-                        start_column: 0,
-                        end_line: 5,
-                        end_column: 20,
-                    },
-                    metadata: metadata(
-                        sym_a,
-                        "func_a",
-                        SymbolKind::Function,
-                        vec!["Doc for A".into()],
-                        Some("(x: int) -> int".into()),
-                        vec![Parameter {
-                            name: "x".into(),
-                            param_type: Some("int".into()),
-                        }],
-                        Some("int".into()),
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_b.to_string(),
-                    range: default_range(),
-                    enclosing_range: SourceRange {
-                        start_line: 6,
-                        start_column: 0,
-                        end_line: 10,
-                        end_column: 20,
-                    },
-                    metadata: metadata(
-                        sym_b,
-                        "func_b",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-            ],
-            references: vec![Reference {
-                symbol: sym_b.to_string(),
-                range: default_range(),
-                enclosing_symbol: sym_a.to_string(),
-                role: ReferenceRole::Call,
-            }],
-        }];
-    let symbol_index = SymbolIndex::from_definitions(&documents);
+    let documents = vec![DocumentSemantics {
+        relative_path: "main.py".into(),
+        language: "python".into(),
+        definitions: vec![
+            function_def(
+                sym_a,
+                "func_a",
+                vec!["Doc for A".into()],
+                vec![ParameterInfo {
+                    name: "x".into(),
+                    param_type: Some("int".into()),
+                    has_default: false,
+                    is_variadic: false,
+                }],
+                Some("int".into()),
+            ),
+            function_def(sym_b, "func_b", vec![], vec![], None),
+        ],
+        references: vec![call_reference(sym_b, sym_a)],
+    }];
+
     SemanticData {
         project_root: "/test".into(),
         documents,
         external_symbols: vec![],
-        symbol_index,
     }
 }
 
@@ -115,58 +158,30 @@ pub fn create_semantic_data_two_files() -> SemanticData {
     let sym_util = "sym::utils::func_util";
 
     let documents = vec![
-            DocumentData {
-                relative_path: "main.py".into(),
-                language: "python".into(),
-                definitions: vec![Definition {
-                    symbol: sym_main.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_main,
-                        "func_main",
-                        SymbolKind::Function,
-                        vec!["Main".into()],
-                        Some("() -> ()".into()),
-                        vec![],
-                        Some("()".into()),
-                        false,
-                    ),
-                }],
-                references: vec![Reference {
-                    symbol: sym_util.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_main.to_string(),
-                    role: ReferenceRole::Call,
-                }],
-            },
-            DocumentData {
-                relative_path: "utils.py".into(),
-                language: "python".into(),
-                definitions: vec![Definition {
-                    symbol: sym_util.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_util,
-                        "func_util",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                }],
-                references: vec![],
-            },
-        ];
-    let symbol_index = SymbolIndex::from_definitions(&documents);
+        DocumentSemantics {
+            relative_path: "main.py".into(),
+            language: "python".into(),
+            definitions: vec![function_def(
+                sym_main,
+                "func_main",
+                vec!["Main".into()],
+                vec![],
+                Some("()".into()),
+            )],
+            references: vec![call_reference(sym_util, sym_main)],
+        },
+        DocumentSemantics {
+            relative_path: "utils.py".into(),
+            language: "python".into(),
+            definitions: vec![function_def(sym_util, "func_util", vec![], vec![], None)],
+            references: vec![],
+        },
+    ];
+
     SemanticData {
         project_root: "/test".into(),
         documents,
         external_symbols: vec![],
-        symbol_index,
     }
 }
 
@@ -176,83 +191,25 @@ pub fn create_semantic_data_with_cycle() -> SemanticData {
     let sym_b = "sym::b";
     let sym_c = "sym::c";
 
-    let documents = vec![DocumentData {
-            relative_path: "cycle.py".into(),
-            language: "python".into(),
-            definitions: vec![
-                Definition {
-                    symbol: sym_a.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_a,
-                        "a",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_b.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_b,
-                        "b",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_c.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_c,
-                        "c",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-            ],
-            references: vec![
-                Reference {
-                    symbol: sym_b.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_a.to_string(),
-                    role: ReferenceRole::Call,
-                },
-                Reference {
-                    symbol: sym_c.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_b.to_string(),
-                    role: ReferenceRole::Call,
-                },
-                Reference {
-                    symbol: sym_a.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_c.to_string(),
-                    role: ReferenceRole::Call,
-                },
-            ],
-        }];
-    let symbol_index = SymbolIndex::from_definitions(&documents);
+    let documents = vec![DocumentSemantics {
+        relative_path: "cycle.py".into(),
+        language: "python".into(),
+        definitions: vec![
+            function_def(sym_a, "a", vec![], vec![], None),
+            function_def(sym_b, "b", vec![], vec![], None),
+            function_def(sym_c, "c", vec![], vec![], None),
+        ],
+        references: vec![
+            call_reference(sym_b, sym_a),
+            call_reference(sym_c, sym_b),
+            call_reference(sym_a, sym_c),
+        ],
+    }];
+
     SemanticData {
         project_root: "/test".into(),
         documents,
         external_symbols: vec![],
-        symbol_index,
     }
 }
 
@@ -264,98 +221,32 @@ pub fn create_semantic_data_with_shared_state() -> SemanticData {
     let sym_w2 = "sym::writer2";
     let sym_v = "sym::global_var";
 
-    let documents = vec![DocumentData {
-            relative_path: "state.py".into(),
-            language: "python".into(),
-            definitions: vec![
-                Definition {
-                    symbol: sym_r.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_r,
-                        "reader",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_w1.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_w1,
-                        "writer1",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_w2.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_w2,
-                        "writer2",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_v.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_v,
-                        "global_var",
-                        SymbolKind::Variable,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-            ],
-            references: vec![
-                Reference {
-                    symbol: sym_v.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_r.to_string(),
-                    role: ReferenceRole::Read,
-                },
-                Reference {
-                    symbol: sym_v.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_w1.to_string(),
-                    role: ReferenceRole::Write,
-                },
-                Reference {
-                    symbol: sym_v.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_w2.to_string(),
-                    role: ReferenceRole::Write,
-                },
-            ],
-        }];
-    let symbol_index = SymbolIndex::from_definitions(&documents);
+    let documents = vec![DocumentSemantics {
+        relative_path: "state.py".into(),
+        language: "python".into(),
+        definitions: vec![
+            function_def(sym_r, "reader", vec![], vec![], None),
+            function_def(sym_w1, "writer1", vec![], vec![], None),
+            function_def(sym_w2, "writer2", vec![], vec![], None),
+            variable_def(
+                sym_v,
+                "global_var",
+                vec![],
+                Some("int".into()),
+                Mutability::Mutable,
+            ),
+        ],
+        references: vec![
+            read_reference(sym_v, sym_r),
+            write_reference(sym_v, sym_w1),
+            write_reference(sym_v, sym_w2),
+        ],
+    }];
+
     SemanticData {
         project_root: "/test".into(),
         documents,
         external_symbols: vec![],
-        symbol_index,
     }
 }
 
@@ -365,94 +256,46 @@ pub fn create_semantic_data_chain_well_documented_middle() -> SemanticData {
     let sym_b = "sym::chain_b";
     let sym_c = "sym::chain_c";
 
-    let documents = vec![DocumentData {
-            relative_path: "chain.py".into(),
-            language: "python".into(),
-            definitions: vec![
-                Definition {
-                    symbol: sym_a.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_a,
-                        "chain_a",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_b.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_b,
-                        "chain_b",
-                        SymbolKind::Function,
-                        vec!["Well documented.".into()],
-                        Some("() -> int".into()),
-                        vec![],
-                        Some("int".into()),
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_c.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_c,
-                        "chain_c",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-            ],
-            references: vec![
-                Reference {
-                    symbol: sym_b.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_a.to_string(),
-                    role: ReferenceRole::Call,
-                },
-                Reference {
-                    symbol: sym_c.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_b.to_string(),
-                    role: ReferenceRole::Call,
-                },
-            ],
-        }];
-    let symbol_index = SymbolIndex::from_definitions(&documents);
+    let documents = vec![DocumentSemantics {
+        relative_path: "chain.py".into(),
+        language: "python".into(),
+        definitions: vec![
+            function_def(sym_a, "chain_a", vec![], vec![], None),
+            function_def(
+                sym_b,
+                "chain_b",
+                vec!["Well documented.".into()],
+                vec![],
+                Some("int".into()),
+            ),
+            function_def(sym_c, "chain_c", vec![], vec![], None),
+        ],
+        references: vec![
+            call_reference(sym_b, sym_a),
+            call_reference(sym_c, sym_b),
+        ],
+    }];
+
     SemanticData {
         project_root: "/test".into(),
         documents,
         external_symbols: vec![],
-        symbol_index,
     }
 }
 
 /// One document with no definitions and no references. Builder should produce 0 nodes.
 pub fn create_semantic_data_empty_document() -> SemanticData {
-    let documents = vec![DocumentData {
+    let documents = vec![DocumentSemantics {
         relative_path: "empty.py".into(),
         language: "python".into(),
         definitions: vec![],
         references: vec![],
     }];
-    let symbol_index = SymbolIndex::from_definitions(&documents);
+
     SemanticData {
         project_root: "/test".into(),
         documents,
         external_symbols: vec![],
-        symbol_index,
     }
 }
 
@@ -462,77 +305,24 @@ pub fn create_semantic_data_multiple_callers() -> SemanticData {
     let sym_b = "sym::caller_b";
     let sym_c = "sym::callee";
 
-    let documents = vec![DocumentData {
-            relative_path: "multi_call.py".into(),
-            language: "python".into(),
-            definitions: vec![
-                Definition {
-                    symbol: sym_a.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_a,
-                        "caller_a",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_b.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_b,
-                        "caller_b",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-                Definition {
-                    symbol: sym_c.to_string(),
-                    range: default_range(),
-                    enclosing_range: default_range(),
-                    metadata: metadata(
-                        sym_c,
-                        "callee",
-                        SymbolKind::Function,
-                        vec![],
-                        None,
-                        vec![],
-                        None,
-                        false,
-                    ),
-                },
-            ],
-            references: vec![
-                Reference {
-                    symbol: sym_c.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_a.to_string(),
-                    role: ReferenceRole::Call,
-                },
-                Reference {
-                    symbol: sym_c.to_string(),
-                    range: default_range(),
-                    enclosing_symbol: sym_b.to_string(),
-                    role: ReferenceRole::Call,
-                },
-            ],
-        }];
-    let symbol_index = SymbolIndex::from_definitions(&documents);
+    let documents = vec![DocumentSemantics {
+        relative_path: "multi_call.py".into(),
+        language: "python".into(),
+        definitions: vec![
+            function_def(sym_a, "caller_a", vec![], vec![], None),
+            function_def(sym_b, "caller_b", vec![], vec![], None),
+            function_def(sym_c, "callee", vec![], vec![], None),
+        ],
+        references: vec![
+            call_reference(sym_c, sym_a),
+            call_reference(sym_c, sym_b),
+        ],
+    }];
+
     SemanticData {
         project_root: "/test".into(),
         documents,
         external_symbols: vec![],
-        symbol_index,
     }
 }
 

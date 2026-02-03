@@ -1,426 +1,590 @@
-//! Unified semantic data representation: contract between SCIP (or other indexers) and the
-//! Context Footprint (CF) algorithm.
+//! SemanticData - Intermediate representation of code semantics
 //!
-//! **SCIP mapping**: Types here correspond to SCIP Index → Document → Occurrence /
-//! SymbolInformation. **CF usage**: scope = `enclosing_symbol`, code span = `range` (symbol name)
-//! and `enclosing_range` (full definition, used for token count), documentation = `metadata.documentation`.
-
-use std::collections::HashMap;
+//! Responsibility: Provide language-agnostic semantic information as a contract
+//! between Adapters and GraphBuilder.
+//!
+//! Principles:
+//! 1. Only describe "what is", not "how to build the graph"
+//! 2. Preserve raw reference information, let GraphBuilder infer Edge types
+//! 3. Explicitly express core concepts that are common across languages
+//!    (mutability, visibility, etc.)
 
 use serde::Serialize;
+use std::collections::HashMap;
 
-/// Unified semantic data: core information extracted from a SCIP Index (or other source) for
-/// building the ContextGraph.
-///
-/// **SCIP**: Corresponds to `Index`; `project_root` from `Metadata.project_root` (often
-/// `file://` — normalize in adapter); `documents` = per-file definitions + references;
-/// `external_symbols` = `Index.external_symbols`.
-#[derive(Debug, Clone)]
-#[derive(Serialize)]
+/// ============================================================================
+/// Top-level container
+/// ============================================================================
+
+/// Project-level semantic data
+#[derive(Debug, Clone, Serialize)]
 pub struct SemanticData {
-    /// Project root path (adapter normalizes `file://` prefix from SCIP Metadata.project_root).
+    /// Project root directory
     pub project_root: String,
-    /// Per-document definitions and references (from SCIP Document.occurrences partitioned by role).
-    pub documents: Vec<DocumentData>,
-    /// External dependencies (e.g. stdlib); from SCIP Index.external_symbols.
-    pub external_symbols: Vec<SymbolMetadata>,
-    /// Pre-aggregated index: symbol → kind/parent, function → parameters. Built during
-    /// SemanticData construction so the builder can avoid a full scan. Used for node/type
-    /// classification and function parameter attachment.
-    pub symbol_index: SymbolIndex,
+
+    /// Semantic information for all documents (files)
+    pub documents: Vec<DocumentSemantics>,
+
+    /// External symbols (stdlib/third-party)
+    pub external_symbols: Vec<SymbolDefinition>,
 }
 
-/// Pre-aggregated index over all definitions: used by the CF builder for node/type classification
-/// and function parameter attachment without rescanning definitions.
-///
-/// **SCIP source**: Built from Document.occurrences where symbol_roles has Definition; kind and
-/// enclosing_symbol come from SymbolInformation (or inferred). **CF use**: Pass 1 uses
-/// `symbol_kind`/`symbol_parent` to decide GraphNode vs TypeOnly vs Skip; parameters come from
-/// `function_parameters`.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct SymbolIndex {
-    /// Map: symbol → SymbolKind. Used to classify definitions (node vs type vs parameter) and
-    /// to resolve parent kind for variable/field scope checks.
-    pub symbol_kind: HashMap<String, SymbolKind>,
-    /// Map: symbol → enclosing symbol (scope). From SymbolInformation.enclosing_symbol. Used by
-    /// builder to resolve reference.enclosing_symbol and definition parent chain to a graph node.
-    pub symbol_parent: HashMap<String, String>,
-    /// Map: function symbol → ordered parameters. Built from definitions with kind=Parameter
-    /// (parent = function); param_type from TypeDefinition relationship. Order = definition order.
-    pub function_parameters: HashMap<String, Vec<Parameter>>,
-}
-
-impl SymbolIndex {
-    /// Build a SymbolIndex from all definitions across documents (e.g. in adapter or tests).
-    /// - symbol_kind / symbol_parent: from every definition.
-    /// - function_parameters: from (1) function definition's metadata.parameters (adapter merges
-    ///   Parameter definitions into metadata.parameters), or (2) Parameter definitions in the list
-    ///   when present (e.g. in tests). metadata.parameters takes precedence when both exist.
-    pub fn from_definitions(documents: &[DocumentData]) -> Self {
-        let mut symbol_kind = HashMap::new();
-        let mut symbol_parent = HashMap::new();
-        let mut function_parameters: HashMap<String, Vec<Parameter>> = HashMap::new();
-
-        for doc in documents {
-            for def in &doc.definitions {
-                symbol_kind.insert(def.symbol.clone(), def.metadata.kind.clone());
-                if let Some(ref parent) = def.metadata.enclosing_symbol {
-                    symbol_parent.insert(def.symbol.clone(), parent.clone());
-                }
-                // From Parameter definitions (e.g. tests that still include them)
-                if matches!(def.metadata.kind, SymbolKind::Parameter)
-                    && let Some(ref parent) = def.metadata.enclosing_symbol
-                {
-                    let mut param_type = None;
-                    for rel in &def.metadata.relationships {
-                        if matches!(rel.kind, RelationshipKind::TypeDefinition) {
-                            param_type = Some(rel.target_symbol.clone());
-                            break;
-                        }
-                    }
-                    let param = Parameter {
-                        name: def.metadata.display_name.clone(),
-                        param_type,
-                    };
-                    function_parameters
-                        .entry(parent.clone())
-                        .or_default()
-                        .push(param);
-                }
-            }
-            // From function metadata.parameters (adapter output; takes precedence)
-            for def in &doc.definitions {
-                if matches!(
-                    def.metadata.kind,
-                    SymbolKind::Function
-                        | SymbolKind::Method
-                        | SymbolKind::Constructor
-                        | SymbolKind::StaticMethod
-                        | SymbolKind::AbstractMethod
-                ) && !def.metadata.parameters.is_empty()
-                {
-                    function_parameters.insert(def.symbol.clone(), def.metadata.parameters.clone());
-                }
-            }
-        }
-
-        Self {
-            symbol_kind,
-            symbol_parent,
-            function_parameters,
-        }
-    }
-}
-
-/// Classification of a definition for the CF graph: whether it becomes a graph node, is only
-/// registered as a type, is an inline parameter, or is skipped.
-///
-/// **CF use**: Builder uses this to decide create node vs register type vs skip; avoids
-/// duplicating kind/parent logic in the builder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DefinitionRole {
-    /// Becomes a ContextGraph node (functions; variables/fields/constants not enclosed by a function).
-    GraphNode,
-    /// Registered in TypeRegistry only, no graph node (Class, Interface, Struct, Enum, etc.).
-    TypeOnly,
-    /// Inline parameter of a function; not a standalone node; parameters attached to function via SymbolIndex.
-    InlineParameter,
-    /// Not a node and not a type (Module, Namespace, Macro, etc.).
-    Skip,
-}
-
-/// Classifies a definition into GraphNode, TypeOnly, InlineParameter, or Skip using only
-/// SymbolKind and SymbolIndex (no SizeFunction/DocumentationScorer). Used by the builder in Pass 1.
-pub fn definition_role(definition: &Definition, index: &SymbolIndex) -> DefinitionRole {
-    let kind = &definition.metadata.kind;
-
-    if matches!(kind, SymbolKind::Parameter) {
-        return DefinitionRole::InlineParameter;
-    }
-
-    match kind {
-        SymbolKind::Function
-        | SymbolKind::Method
-        | SymbolKind::Constructor
-        | SymbolKind::StaticMethod
-        | SymbolKind::AbstractMethod => DefinitionRole::GraphNode,
-
-        SymbolKind::Class
-        | SymbolKind::Interface
-        | SymbolKind::Struct
-        | SymbolKind::Enum
-        | SymbolKind::TypeAlias
-        | SymbolKind::Trait
-        | SymbolKind::Protocol => DefinitionRole::TypeOnly,
-
-        SymbolKind::Variable | SymbolKind::Field | SymbolKind::Constant => {
-            let parent_kind = definition
-                .metadata
-                .enclosing_symbol
-                .as_ref()
-                .and_then(|p| index.symbol_kind.get(p));
-            match parent_kind {
-                None => DefinitionRole::GraphNode,
-                Some(SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor
-                | SymbolKind::StaticMethod | SymbolKind::AbstractMethod) => DefinitionRole::Skip,
-                _ => DefinitionRole::GraphNode,
-            }
-        }
-
-        _ => DefinitionRole::Skip,
-    }
-}
-
-/// Semantic information for a single source file.
-///
-/// **SCIP**: Corresponds to `Document`; `relative_path`, `language`; definitions and references
-/// come from partitioning Occurrences by Definition role.
+/// Semantic information for a single file
 #[derive(Debug, Clone, Serialize)]
-pub struct DocumentData {
-    /// Path relative to project_root (SCIP Document.relative_path).
+pub struct DocumentSemantics {
+    /// Relative path from project root
     pub relative_path: String,
-    /// Programming language id (e.g. "python", "java") (SCIP Document.language).
+
+    /// Programming language (e.g., "python", "rust", "java")
     pub language: String,
-    /// Symbols defined in this file (Occurrence with Definition role).
-    pub definitions: Vec<Definition>,
-    /// References to other symbols (Occurrence without Definition role).
-    pub references: Vec<Reference>,
+
+    /// Symbol definitions in this file
+    pub definitions: Vec<SymbolDefinition>,
+
+    /// Symbol references in this file
+    pub references: Vec<SymbolReference>,
 }
 
-/// A symbol definition: one occurrence with the Definition role.
-///
-/// **SCIP**: Occurrence where symbol_roles has Definition; `range` = Occurrence.range (symbol name
-/// span), `enclosing_range` = Occurrence.enclosing_range (full definition including docs/body),
-/// used by CF for context_size; `metadata` from SymbolInformation plus adapter enrichment.
-#[derive(Debug, Clone, Serialize)]
-pub struct Definition {
-    /// SCIP symbol string (e.g. "scip python pkg ...").
-    pub symbol: String,
-    /// Position of the symbol name (SCIP Occurrence.range).
-    pub range: SourceRange,
-    /// Full definition range including documentation and body (SCIP Occurrence.enclosing_range).
-    pub enclosing_range: SourceRange,
-    /// Symbol metadata (from SymbolInformation + adapter).
-    pub metadata: SymbolMetadata,
-}
+/// ============================================================================
+/// Symbol Definition (GraphBuilder decides which become Nodes vs Types)
+/// ============================================================================
 
-/// A reference to a symbol (non-definition occurrence).
-///
-/// **SCIP**: Occurrence without Definition role. `enclosing_symbol` is used in Pass 2 to resolve
-/// the source node of edges (via parent chain to a graph node).
+/// Symbol definition - Unified representation of all definable entities
 #[derive(Debug, Clone, Serialize)]
-pub struct Reference {
-    /// Referenced symbol (Occurrence.symbol).
-    pub symbol: String,
-    /// Reference position (Occurrence.range).
-    pub range: SourceRange,
-    /// Symbol containing this reference (used to resolve source node in builder Pass 2).
-    pub enclosing_symbol: String,
-    /// Role: Read/Write/Call/Import/TypeUsage (from SCIP SymbolRole bitset; Call/TypeUsage often inferred).
-    pub role: ReferenceRole,
-}
+pub struct SymbolDefinition {
+    /// Globally unique identifier (Adapter generates, format flexible)
+    pub symbol_id: SymbolId,
 
-/// Single parameter in a function signature (language-agnostic).
-///
-/// **CF**: param_type is a type symbol ID for TypeRegistry/ParamType edges.
-#[derive(Debug, Clone, Serialize)]
-pub struct Parameter {
-    pub name: String,
-    /// Type symbol ID (from signature parsing or TypeDefinition relationship).
-    pub param_type: Option<String>,
-}
-
-/// Symbol metadata: corresponds to SCIP SymbolInformation plus adapter-filled fields.
-///
-/// **SCIP**: symbol, kind, display_name, documentation, relationships, enclosing_symbol;
-/// signature from signature_documentation. **Adapter**: parameters and return_type from
-/// signature or relationships; **scope** in CF = enclosing_symbol.
-#[derive(Debug, Clone, Serialize)]
-pub struct SymbolMetadata {
-    /// SCIP symbol identifier.
-    pub symbol: String,
-    /// Symbol kind (SCIP SymbolInformation.Kind; Unknown may be refined from symbol string in adapter).
+    /// Symbol kind classification
     pub kind: SymbolKind,
-    /// Display name (SCIP display_name).
+
+    /// Short name (without path)
+    pub name: String,
+
+    /// Display name (may include signature, e.g., "foo(x: int) -> str")
     pub display_name: String,
-    /// Documentation strings (SCIP documentation; CF uses for doc_score).
-    pub documentation: Vec<String>,
-    /// Raw signature from indexer (SCIP signature_documentation).
-    pub signature: Option<String>,
-    /// Parsed parameters (adapter from signature or from Parameter definitions).
-    pub parameters: Vec<Parameter>,
-    /// Return type symbol (adapter from signature or relationships).
-    pub return_type: Option<String>,
-    /// Relationships to other symbols (SCIP Relationship: TypeDefinition, Implements, etc.).
-    pub relationships: Vec<Relationship>,
-    /// Enclosing symbol = scope in CF (SCIP enclosing_symbol).
-    pub enclosing_symbol: Option<String>,
-    /// True if from Index.external_symbols.
+
+    /// Definition location
+    pub location: SourceLocation,
+
+    /// Source span for context size calculation
+    /// For functions, should include the entire function body
+    pub span: SourceSpan,
+
+    /// Enclosing scope (parent symbol)
+    pub enclosing_symbol: Option<SymbolId>,
+
+    /// Whether this is an external dependency
     pub is_external: bool,
-    /// Exception/throws type symbols (optional; SCIP rarely provides; adapter may infer from signature/source).
-    #[allow(dead_code)]
-    pub throws: Vec<String>,
+
+    /// Documentation strings (for doc_score calculation)
+    pub documentation: Vec<String>,
+
+    /// Symbol-specific details (selected based on kind)
+    pub details: SymbolDetails,
 }
 
-/// Source code range (line/column).
-///
-/// **SCIP**: Same encoding as Occurrence.range and enclosing_range (0-based). Convert to 1-based
-/// in UI if needed.
+pub type SymbolId = String;
+
+/// Symbol kind - Language-agnostic classification
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SourceRange {
+pub enum SymbolKind {
+    // Types that may become Graph Nodes
+    Function,
+    Method,
+    Constructor,
+
+    Variable, // Global/module-level variables
+    Field,    // Class/struct fields
+    Constant,
+
+    // Types that may become TypeRegistry entries
+    Class,
+    Interface,
+    Struct,
+    Enum,
+    Trait,
+    Protocol,
+    TypeAlias,
+
+    // Types that usually don't create Nodes (but info preserved for GraphBuilder)
+    Parameter,     // Function parameters
+    TypeParameter, // Generic parameters T
+
+    // Others
+    Module,
+    Namespace,
+    Package,
+
+    Unknown,
+}
+
+/// Symbol-specific details
+#[derive(Debug, Clone, Serialize)]
+pub enum SymbolDetails {
+    Function(FunctionDetails),
+    Variable(VariableDetails),
+    Type(TypeDetails),
+    None,
+}
+
+impl SymbolDetails {
+    pub fn as_function(&self) -> Option<&FunctionDetails> {
+        match self {
+            SymbolDetails::Function(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn as_variable(&self) -> Option<&VariableDetails> {
+        match self {
+            SymbolDetails::Variable(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_type(&self) -> Option<&TypeDetails> {
+        match self {
+            SymbolDetails::Type(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+/// Function details
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionDetails {
+    /// Parameters (in definition order)
+    pub parameters: Vec<ParameterInfo>,
+
+    /// Return type (symbol ID of type definition)
+    pub return_type: Option<SymbolId>,
+
+    /// Exception types that may be thrown
+    pub throws: Vec<SymbolId>,
+
+    /// Generic type parameters
+    pub type_params: Vec<TypeParamInfo>,
+
+    /// Function modifiers
+    pub modifiers: FunctionModifiers,
+}
+
+impl Default for FunctionDetails {
+    fn default() -> Self {
+        Self {
+            parameters: Vec::new(),
+            return_type: None,
+            throws: Vec::new(),
+            type_params: Vec::new(),
+            modifiers: FunctionModifiers::default(),
+        }
+    }
+}
+
+/// Parameter information
+#[derive(Debug, Clone, Serialize)]
+pub struct ParameterInfo {
+    pub name: String,
+    /// Parameter type (symbol ID of type definition)
+    pub param_type: Option<SymbolId>,
+    pub has_default: bool,
+    pub is_variadic: bool,
+}
+
+impl Default for ParameterInfo {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            param_type: None,
+            has_default: false,
+            is_variadic: false,
+        }
+    }
+}
+
+/// Type parameter (generic) information
+#[derive(Debug, Clone, Serialize)]
+pub struct TypeParamInfo {
+    pub name: String,
+    /// Constraints (e.g., T: Clone)
+    pub bounds: Vec<SymbolId>,
+}
+
+/// Function modifiers
+#[derive(Debug, Clone, Serialize)]
+pub struct FunctionModifiers {
+    pub is_async: bool,
+    pub is_generator: bool,
+    pub is_static: bool,
+    pub is_abstract: bool,
+    pub is_constructor: bool,
+    pub visibility: Visibility,
+}
+
+impl Default for FunctionModifiers {
+    fn default() -> Self {
+        Self {
+            is_async: false,
+            is_generator: false,
+            is_static: false,
+            is_abstract: false,
+            is_constructor: false,
+            visibility: Visibility::Unspecified,
+        }
+    }
+}
+
+/// Variable details
+#[derive(Debug, Clone, Serialize)]
+pub struct VariableDetails {
+    /// Variable type (symbol ID of type definition)
+    pub var_type: Option<SymbolId>,
+
+    /// Mutability (key attribute! GraphBuilder uses for Expansion judgment)
+    pub mutability: Mutability,
+
+    /// Variable kind
+    pub variable_kind: VariableKind,
+
+    pub visibility: Visibility,
+}
+
+impl Default for VariableDetails {
+    fn default() -> Self {
+        Self {
+            var_type: None,
+            mutability: Mutability::Mutable,
+            variable_kind: VariableKind::Global,
+            visibility: Visibility::Unspecified,
+        }
+    }
+}
+
+/// Mutability - Used by GraphBuilder to determine SharedStateWrite Expansion
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Mutability {
+    Const,     // Compile-time constant
+    Immutable, // Runtime immutable (e.g., Java final, Rust let)
+    Mutable,   // Mutable (triggers SharedStateWrite Expansion)
+}
+
+/// Variable kind
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum VariableKind {
+    Global,     // Module-level global variables
+    ClassField, // Class/struct fields
+    Local,      // Local variables (GraphBuilder may ignore)
+}
+
+/// Type details
+#[derive(Debug, Clone, Serialize)]
+pub struct TypeDetails {
+    pub kind: TypeKind,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub visibility: Visibility,
+
+    /// Type parameters (generics)
+    pub type_params: Vec<TypeParamInfo>,
+
+    /// Member fields
+    pub fields: Vec<FieldInfo>,
+
+    /// Implementation/inheritance relationships (symbol IDs of other types)
+    pub implements: Vec<SymbolId>,
+    pub inherits: Vec<SymbolId>,
+}
+
+impl Default for TypeDetails {
+    fn default() -> Self {
+        Self {
+            kind: TypeKind::Class,
+            is_abstract: false,
+            is_final: false,
+            visibility: Visibility::Unspecified,
+            type_params: Vec::new(),
+            fields: Vec::new(),
+            implements: Vec::new(),
+            inherits: Vec::new(),
+        }
+    }
+}
+
+/// Type kind
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum TypeKind {
+    Class,
+    Interface,
+    Protocol,
+    Struct,
+    Enum,
+    Trait,
+    TypeAlias,
+    Union,        // Union types
+    Intersection, // Intersection types
+}
+
+/// Field information (for class/struct fields)
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldInfo {
+    pub name: String,
+    pub field_type: Option<SymbolId>,
+    pub mutability: Mutability,
+    pub visibility: Visibility,
+}
+
+/// Visibility
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Visibility {
+    Public,
+    Private,
+    Protected,
+    Internal,
+    Unspecified,
+}
+
+/// ============================================================================
+/// Symbol Reference (Raw info, GraphBuilder infers Edge types)
+/// ============================================================================
+
+/// Symbol reference - Represents "symbol used at location"
+#[derive(Debug, Clone, Serialize)]
+pub struct SymbolReference {
+    /// Referenced symbol
+    pub target_symbol: SymbolId,
+
+    /// Reference location (file + line/column)
+    pub location: SourceLocation,
+
+    /// Context containing this reference (function/method that contains it)
+    pub enclosing_symbol: SymbolId,
+
+    /// Reference role (Adapter reports as accurately as possible)
+    pub role: ReferenceRole,
+
+    /// Additional context (optional)
+    pub context: Option<ReferenceContext>,
+}
+
+/// Reference role - Adapter reports based on language semantics
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ReferenceRole {
+    // Control flow related
+    Call, // Function call (GraphBuilder -> Call edge)
+
+    // Data flow related
+    Read,  // Variable read (GraphBuilder -> Read edge)
+    Write, // Variable write (GraphBuilder -> Write edge)
+
+    // Type related
+    TypeAnnotation,    // Type annotation (e.g., parameter type, return type)
+    TypeInstantiation, // Type instantiation (e.g., new Class())
+
+    // Other
+    Import,          // Import statement
+    AttributeAccess, // Attribute access (e.g., obj.field)
+    Documentation,   // Mentioned in documentation (usually ignored)
+}
+
+/// Reference context (optional additional information)
+#[derive(Debug, Clone, Serialize)]
+pub enum ReferenceContext {
+    /// Function call context
+    CallArgument {
+        arg_index: usize,
+        param_name: Option<String>,
+    },
+    /// Binary operator context
+    BinaryOp { op: String },
+}
+
+/// ============================================================================
+/// Common structures
+/// ============================================================================
+
+/// Source location
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceLocation {
+    pub file_path: String, // Relative path
+    pub line: u32,         // 0-based
+    pub column: u32,       // 0-based
+}
+
+/// Source span
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceSpan {
     pub start_line: u32,
     pub start_column: u32,
     pub end_line: u32,
     pub end_column: u32,
 }
 
-/// Reference role: maps from SCIP SymbolRole bitset (ReadAccess, WriteAccess, Import, etc.).
-/// Call and TypeUsage are often inferred when not explicitly marked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum ReferenceRole {
-    Read,
-    Write,
-    Call,
-    Import,
-    TypeUsage,
-    Unknown,
+/// ============================================================================
+/// Helper functions
+/// ============================================================================
+
+/// Check if a symbol kind typically becomes a graph node
+pub fn is_node_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Constructor
+            | SymbolKind::Variable
+            | SymbolKind::Field
+            | SymbolKind::Constant
+    )
 }
 
-/// Symbol kind: maps from SCIP SymbolInformation.Kind. When kind is Unknown, adapter may infer
-/// from symbol string (e.g. infer_kind_from_symbol using descriptor suffixes).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum SymbolKind {
-    Function,
-    Method,
-    Constructor,
-    StaticMethod,
-    AbstractMethod,
-    Class,
-    Interface,
-    Struct,
-    Enum,
-    TypeAlias,
-    Trait,
-    Protocol,
-    Variable,
-    Field,
-    Constant,
-    Parameter,
-    Namespace,
-    Module,
-    Package,
-    Macro,
-    Unknown,
+/// Check if a symbol kind typically becomes a type registry entry
+pub fn is_type_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Class
+            | SymbolKind::Interface
+            | SymbolKind::Struct
+            | SymbolKind::Enum
+            | SymbolKind::Trait
+            | SymbolKind::Protocol
+            | SymbolKind::TypeAlias
+    )
 }
 
-/// Relationship to another symbol: maps from SCIP Relationship (is_type_definition,
-/// is_implementation, is_reference, etc.).
-#[derive(Debug, Clone, Serialize)]
-pub struct Relationship {
-    pub target_symbol: String,
-    pub kind: RelationshipKind,
+/// Check if a symbol kind should be skipped (not node, not type)
+pub fn should_skip_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Parameter | SymbolKind::TypeParameter | SymbolKind::Unknown
+    ) || matches!(
+        kind,
+        SymbolKind::Module | SymbolKind::Namespace | SymbolKind::Package
+    )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Serialize)]
-pub enum RelationshipKind {
-    Implements,
-    Inherits,
-    References,
-    TypeDefinition,
+/// Get all symbol definitions from all documents
+pub fn collect_all_definitions(data: &SemanticData) -> Vec<&SymbolDefinition> {
+    let mut result: Vec<&SymbolDefinition> = Vec::new();
+
+    // Collect from documents
+    for doc in &data.documents {
+        for def in &doc.definitions {
+            result.push(def);
+        }
+    }
+
+    // Include external symbols
+    for ext in &data.external_symbols {
+        result.push(ext);
+    }
+
+    result
+}
+
+/// Build a map from symbol_id to its enclosing symbol_id
+pub fn build_enclosing_map(data: &SemanticData) -> HashMap<SymbolId, SymbolId> {
+    let mut map = HashMap::new();
+
+    for doc in &data.documents {
+        for def in &doc.definitions {
+            if let Some(ref parent) = def.enclosing_symbol {
+                map.insert(def.symbol_id.clone(), parent.clone());
+            }
+        }
+    }
+
+    map
+}
+
+/// Resolve a symbol to the nearest ancestor that is a node
+pub fn resolve_to_node_symbol(
+    symbol: &str,
+    node_symbols: &std::collections::HashSet<SymbolId>,
+    enclosing_map: &HashMap<SymbolId, SymbolId>,
+) -> Option<SymbolId> {
+    let mut current = symbol.to_string();
+
+    loop {
+        if node_symbols.contains(&current) {
+            return Some(current);
+        }
+
+        match enclosing_map.get(&current) {
+            Some(parent) => current = parent.clone(),
+            None => return None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn def(symbol: &str, kind: SymbolKind, enclosing: Option<&str>) -> Definition {
-        Definition {
-            symbol: symbol.to_string(),
-            range: SourceRange {
+    fn create_test_definition(symbol_id: &str, kind: SymbolKind) -> SymbolDefinition {
+        SymbolDefinition {
+            symbol_id: symbol_id.to_string(),
+            kind,
+            name: symbol_id.to_string(),
+            display_name: symbol_id.to_string(),
+            location: SourceLocation {
+                file_path: "test.py".to_string(),
+                line: 0,
+                column: 0,
+            },
+            span: SourceSpan {
                 start_line: 0,
                 start_column: 0,
-                end_line: 0,
-                end_column: 10,
+                end_line: 10,
+                end_column: 0,
             },
-            enclosing_range: SourceRange {
-                start_line: 0,
-                start_column: 0,
-                end_line: 5,
-                end_column: 20,
-            },
-            metadata: SymbolMetadata {
-                symbol: symbol.to_string(),
-                kind,
-                display_name: symbol.to_string(),
-                documentation: vec![],
-                signature: None,
-                parameters: vec![],
-                return_type: None,
-                relationships: vec![],
-                enclosing_symbol: enclosing.map(String::from),
-                is_external: false,
-                throws: vec![],
-            },
+            enclosing_symbol: None,
+            is_external: false,
+            documentation: vec![],
+            details: SymbolDetails::None,
         }
     }
 
     #[test]
-    fn definition_role_function_is_graph_node() {
-        let idx = SymbolIndex::default();
-        let d = def("pkg::foo().", SymbolKind::Function, None);
-        assert_eq!(definition_role(&d, &idx), DefinitionRole::GraphNode);
+    fn test_is_node_kind() {
+        assert!(is_node_kind(&SymbolKind::Function));
+        assert!(is_node_kind(&SymbolKind::Method));
+        assert!(is_node_kind(&SymbolKind::Variable));
+        assert!(!is_node_kind(&SymbolKind::Class));
+        assert!(!is_node_kind(&SymbolKind::Parameter));
     }
 
     #[test]
-    fn definition_role_class_is_type_only() {
-        let idx = SymbolIndex::default();
-        let d = def("pkg::Bar#", SymbolKind::Class, None);
-        assert_eq!(definition_role(&d, &idx), DefinitionRole::TypeOnly);
+    fn test_is_type_kind() {
+        assert!(is_type_kind(&SymbolKind::Class));
+        assert!(is_type_kind(&SymbolKind::Interface));
+        assert!(!is_type_kind(&SymbolKind::Function));
+        assert!(!is_type_kind(&SymbolKind::Variable));
     }
 
     #[test]
-    fn definition_role_parameter_is_inline_parameter() {
-        let idx = SymbolIndex::default();
-        let d = def("pkg::foo().(x)", SymbolKind::Parameter, Some("pkg::foo()."));
-        assert_eq!(definition_role(&d, &idx), DefinitionRole::InlineParameter);
-    }
+    fn test_resolve_to_node_symbol() {
+        let mut node_symbols = std::collections::HashSet::new();
+        node_symbols.insert("pkg::func()".to_string());
 
-    #[test]
-    fn definition_role_module_is_skip() {
-        let idx = SymbolIndex::default();
-        let d = def("pkg/", SymbolKind::Module, None);
-        assert_eq!(definition_role(&d, &idx), DefinitionRole::Skip);
-    }
+        let mut enclosing_map = HashMap::new();
+        enclosing_map.insert("pkg::func().local".to_string(), "pkg::func()".to_string());
 
-    #[test]
-    fn definition_role_variable_under_function_is_skip() {
-        let mut idx = SymbolIndex::default();
-        idx.symbol_kind.insert("pkg::func().".into(), SymbolKind::Function);
-        let d = def("pkg::func().(local)", SymbolKind::Variable, Some("pkg::func()."));
-        assert_eq!(definition_role(&d, &idx), DefinitionRole::Skip);
-    }
+        // Direct node
+        assert_eq!(
+            resolve_to_node_symbol("pkg::func()", &node_symbols, &enclosing_map),
+            Some("pkg::func()".to_string())
+        );
 
-    #[test]
-    fn definition_role_variable_no_parent_is_graph_node() {
-        let idx = SymbolIndex::default();
-        let d = def("pkg::global.", SymbolKind::Variable, None);
-        assert_eq!(definition_role(&d, &idx), DefinitionRole::GraphNode);
-    }
+        // Child of node
+        assert_eq!(
+            resolve_to_node_symbol("pkg::func().local", &node_symbols, &enclosing_map),
+            Some("pkg::func()".to_string())
+        );
 
-    #[test]
-    fn symbol_index_from_definitions_collects_kind_and_parameters() {
-        let docs = vec![DocumentData {
-            relative_path: "a.py".into(),
-            language: "python".into(),
-            definitions: vec![
-                def("pkg::f().", SymbolKind::Function, None),
-                def("pkg::f().(x)", SymbolKind::Parameter, Some("pkg::f().")),
-            ],
-            references: vec![],
-        }];
-        let idx = SymbolIndex::from_definitions(&docs);
-        assert_eq!(idx.symbol_kind.get("pkg::f()."), Some(&SymbolKind::Function));
-        assert_eq!(idx.function_parameters.get("pkg::f().").map(|v| v.len()), Some(1));
+        // Unknown symbol
+        assert_eq!(
+            resolve_to_node_symbol("unknown", &node_symbols, &enclosing_map),
+            None
+        );
     }
 }

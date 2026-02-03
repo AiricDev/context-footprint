@@ -61,7 +61,7 @@ impl ContextGraph {
 mod tests {
     use super::*;
     use crate::domain::edge::EdgeKind;
-    use crate::domain::node::{FunctionNode, Node, NodeCore, SourceSpan, Visibility};
+    use crate::domain::node::{FunctionNode, Node, NodeCore, SourceSpan};
 
     fn test_node(id: u32, name: &str, context_size: u32) -> Node {
         let span = SourceSpan {
@@ -82,12 +82,11 @@ mod tests {
         );
         Node::Function(FunctionNode {
             core,
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
-            visibility: Visibility::Public,
+            visibility: crate::domain::node::Visibility::Public,
+            return_type_annotation: None,
         })
     }
 

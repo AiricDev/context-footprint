@@ -62,8 +62,7 @@ pub fn search_symbols(
     };
     println!(
         "Found {} matching symbol(s){}:\n",
-        result.total_matches,
-        filter_msg
+        result.total_matches, filter_msg
     );
 
     if let Some(lim) = limit.filter(|&lim| result.total_matches > lim) {
@@ -120,10 +119,7 @@ pub fn display_context_code(
             println!("\n  \u{1F4C4} File: {}", file.file_path);
             for node in &file.nodes {
                 let display = node.symbol.split('/').next_back().unwrap_or(&node.symbol);
-                println!(
-                    "    Symbol: {} ({} tokens)",
-                    display, node.context_size
-                );
+                println!("    Symbol: {} ({} tokens)", display, node.context_size);
                 println!(
                     "    Lines: {}-{}",
                     node.span.start_line_1based, node.span.end_line_1based
@@ -152,8 +148,6 @@ pub fn compute_and_display_cf_stats(engine: &ContextEngine, include_tests: bool)
 
     println!("\n{}", "=".repeat(60));
     print_distribution(&format!("Functions{}", filter_msg), &result.functions);
-    println!("{}", "=".repeat(60));
-    print_distribution(&format!("Types{}", filter_msg), &result.types);
     println!("{}", "=".repeat(60));
 
     Ok(())

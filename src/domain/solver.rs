@@ -59,7 +59,8 @@ impl CfSolver {
         max_tokens: Option<u32>,
     ) -> CfResult {
         // Build a reverse mapping once so neighbor ordering isn't O(|V|) per comparison.
-        let mut idx_to_symbol: HashMap<NodeIndex, &str> = HashMap::with_capacity(graph.symbol_to_node.len());
+        let mut idx_to_symbol: HashMap<NodeIndex, &str> =
+            HashMap::with_capacity(graph.symbol_to_node.len());
         for (sym, &idx) in &graph.symbol_to_node {
             idx_to_symbol.insert(idx, sym.as_str());
         }
@@ -193,9 +194,9 @@ impl CfSolver {
 
         // Helper to add a node exactly once (and keep totals in sync).
         let add_node = |idx: NodeIndex,
-                            visited: &mut [bool],
-                            reachable: &mut Vec<NodeIndex>,
-                            total_size: &mut u32| {
+                        visited: &mut [bool],
+                        reachable: &mut Vec<NodeIndex>,
+                        total_size: &mut u32| {
             let pos = idx.index();
             if pos >= visited.len() {
                 return;
@@ -277,12 +278,11 @@ mod tests {
         );
         Node::Function(FunctionNode {
             core,
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         })
     }
 
@@ -560,7 +560,9 @@ mod tests {
         let mut memo = CfMemo::new();
 
         for idx in graph.graph.node_indices() {
-            let expected = solver.compute_cf(&graph, &[idx], &policy, None).total_context_size;
+            let expected = solver
+                .compute_cf(&graph, &[idx], &policy, None)
+                .total_context_size;
             let got = solver.compute_cf_total_context_size_cached(&graph, idx, &policy, &mut memo);
             assert_eq!(got, expected);
         }
@@ -580,7 +582,9 @@ mod tests {
         let policy = AlwaysBoundary;
         let mut memo = CfMemo::new();
 
-        let expected = solver.compute_cf(&graph, &[a], &policy, None).total_context_size;
+        let expected = solver
+            .compute_cf(&graph, &[a], &policy, None)
+            .total_context_size;
         let got = solver.compute_cf_total_context_size_cached(&graph, a, &policy, &mut memo);
         assert_eq!(got, expected);
         assert_eq!(got, 10 + 20);

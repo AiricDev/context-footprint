@@ -2,11 +2,11 @@ use crate::app::dto::*;
 use crate::app::engine::ContextEngine;
 use anyhow::Result;
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -158,10 +158,7 @@ async fn stats(
     }
 }
 
-async fn top(
-    State(state): State<Arc<HttpState>>,
-    Query(q): Query<TopQuery>,
-) -> impl IntoResponse {
+async fn top(State(state): State<Arc<HttpState>>, Query(q): Query<TopQuery>) -> impl IntoResponse {
     let engine = state.engine.clone();
     let node_type = q.node_type.clone();
     let policy = q.policy.unwrap_or_default();
@@ -185,13 +182,7 @@ async fn search(
     let policy = q.policy.unwrap_or_default();
 
     match spawn_blocking(move || {
-        engine.search(
-            &q.pattern,
-            q.with_cf,
-            q.limit,
-            q.include_tests,
-            policy,
-        )
+        engine.search(&q.pattern, q.with_cf, q.limit, q.include_tests, policy)
     })
     .await
     {
@@ -255,12 +246,11 @@ mod tests {
         );
         let f = Node::Function(FunctionNode {
             core,
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         });
         let idx = g.add_node("sym/f().".into(), f);
         g.add_edge(idx, idx, EdgeKind::Call); // self-loop, harmless
@@ -279,7 +269,12 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);

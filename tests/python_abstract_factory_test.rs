@@ -106,25 +106,35 @@ fn test_llmrelay_auth_port_is_abstract() {
 
     // Test 1: AuthPort should be a Type node
     match auth_port_node {
-        Node::Type(t) => {
-            println!("✓ AuthPort is a Type node");
-            println!("  is_abstract: {}", t.is_abstract);
-            println!("  doc_score: {}", t.core.doc_score);
+        Node::Variable(v) => {
+            if let Some(td) = &v.type_definition {
+                println!("✓ AuthPort is a Variable node representing a Type");
+                println!("  is_abstract: {}", td.is_abstract);
+                println!("  doc_score: {}", v.core.doc_score);
 
-            // Test 2: AuthPort should be abstract (Protocol)
-            assert!(
-                t.is_abstract,
-                "AuthPort should be abstract (it's a Protocol), but is_abstract = false"
-            );
+                // Test 2: AuthPort should be abstract (Protocol)
+                assert!(
+                    td.is_abstract,
+                    "AuthPort should be abstract (it's a Protocol), but is_abstract = false"
+                );
 
-            // Test 3: AuthPort should have good documentation
-            assert!(
-                t.core.doc_score >= 0.5,
-                "AuthPort should have doc_score >= 0.5, got {}",
-                t.core.doc_score
-            );
+                // Test 3: AuthPort should have good documentation
+                assert!(
+                    v.core.doc_score >= 0.5,
+                    "AuthPort should have doc_score >= 0.5, got {}",
+                    v.core.doc_score
+                );
+            } else {
+                panic!(
+                    "AuthPort should be a Variable node with type_definition, got {:?}",
+                    auth_port_node
+                )
+            }
         }
-        _ => panic!("AuthPort should be a Type node, got {:?}", auth_port_node),
+        _ => panic!(
+            "AuthPort should be a Variable node, got {:?}",
+            auth_port_node
+        ),
     }
 }
 
@@ -231,12 +241,11 @@ fn test_llmrelay_get_auth_port_is_abstract_factory() {
             false,
             "dummy.py".to_string(),
         ),
-        param_count: 0,
-        typed_param_count: 0,
-        has_return_type: false,
+        parameters: Vec::new(),
         is_async: false,
         is_generator: false,
         visibility: context_footprint::domain::node::Visibility::Public,
+        return_type_annotation: None,
     });
 
     let decision = policy.evaluate(&dummy_caller, get_auth_port_node, &EdgeKind::Call, &graph);

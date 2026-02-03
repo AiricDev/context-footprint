@@ -93,8 +93,7 @@ enum Commands {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -103,8 +102,10 @@ async fn main() -> Result<()> {
     println!("Loading SCIP index from: {}", cli.scip_path);
 
     println!("Building context graph...");
-    let engine =
-        ContextEngine::load_from_scip_with_project_root(&cli.scip_path, cli.project_root.as_deref())?;
+    let engine = ContextEngine::load_from_scip_with_project_root(
+        &cli.scip_path,
+        cli.project_root.as_deref(),
+    )?;
     let health = engine.health();
 
     println!("Graph Summary:");

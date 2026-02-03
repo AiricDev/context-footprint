@@ -37,7 +37,7 @@ impl PruningPolicy for StrictPolicy {
             EdgeKind::CallIn => {
                 // In strict mode, we might still want to check the source
                 if let Node::Function(f) = source {
-                    let sig_complete = f.typed_param_count == f.param_count && f.has_return_type;
+                    let sig_complete = f.is_signature_complete();
                     if sig_complete && f.core.doc_score >= self.doc_threshold {
                         return PruningDecision::Boundary;
                     }
@@ -53,10 +53,14 @@ impl PruningPolicy for StrictPolicy {
         }
 
         match target {
-            Node::Type(t) => {
-                // Only abstract types with very high doc score
-                if t.is_abstract && t.core.doc_score >= self.doc_threshold {
-                    PruningDecision::Boundary
+            Node::Variable(v) => {
+                if let Some(td) = &v.type_definition {
+                    // Only abstract types with very high doc score
+                    if td.is_abstract && v.core.doc_score >= self.doc_threshold {
+                        PruningDecision::Boundary
+                    } else {
+                        PruningDecision::Transparent
+                    }
                 } else {
                     PruningDecision::Transparent
                 }
@@ -64,8 +68,7 @@ impl PruningPolicy for StrictPolicy {
             Node::Function(_) => {
                 // Functions are always transparent in strict mode
                 PruningDecision::Transparent
-            }
-            Node::Variable(_) => PruningDecision::Transparent,
+            } // Node::Variable case handled above is merged content
         }
     }
 
@@ -80,8 +83,8 @@ mod tests {
     use crate::domain::edge::EdgeKind;
     use crate::domain::graph::ContextGraph;
     use crate::domain::node::{
-        FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeKind, TypeNode, VariableKind,
-        VariableNode, Visibility,
+        FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeDefAttribute, TypeKind,
+        VariableKind, VariableNode, Visibility,
     };
 
     fn make_core(id: u32, name: &str, doc_score: f32, is_external: bool) -> NodeCore {
@@ -106,12 +109,26 @@ mod tests {
         let core = make_core(0, "f", 0.9, false);
         Node::Function(FunctionNode {
             core,
-            param_count: 2,
-            typed_param_count: 2,
-            has_return_type: true,
+            parameters: vec![
+                crate::domain::node::Parameter {
+                    name: "x".to_string(),
+                    type_annotation: Some(crate::domain::node::TypeRefAttribute {
+                        type_name: "int".to_string(),
+                    }),
+                },
+                crate::domain::node::Parameter {
+                    name: "y".to_string(),
+                    type_annotation: Some(crate::domain::node::TypeRefAttribute {
+                        type_name: "int".to_string(),
+                    }),
+                },
+            ],
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: Some(crate::domain::node::TypeRefAttribute {
+                type_name: "int".to_string(),
+            }),
         })
     }
 
@@ -119,42 +136,59 @@ mod tests {
         let core = make_core(0, "g", 0.0, false);
         Node::Function(FunctionNode {
             core,
-            param_count: 1,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: vec![crate::domain::node::Parameter {
+                name: "x".to_string(),
+                type_annotation: None,
+            }],
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         })
     }
 
     fn abstract_type_high_doc() -> Node {
         let core = make_core(0, "I", 0.9, false);
-        Node::Type(TypeNode {
+        Node::Variable(VariableNode {
             core,
-            type_kind: TypeKind::Interface,
-            is_abstract: true,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Interface,
+                is_abstract: true,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         })
     }
 
     fn abstract_type_low_doc() -> Node {
         let core = make_core(0, "I", 0.6, false);
-        Node::Type(TypeNode {
+        Node::Variable(VariableNode {
             core,
-            type_kind: TypeKind::Interface,
-            is_abstract: true,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Interface,
+                is_abstract: true,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         })
     }
 
     fn concrete_type() -> Node {
         let core = make_core(0, "C", 0.9, false);
-        Node::Type(TypeNode {
+        Node::Variable(VariableNode {
             core,
-            type_kind: TypeKind::Class,
-            is_abstract: false,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Class,
+                is_abstract: false,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         })
     }
 
@@ -162,7 +196,8 @@ mod tests {
         let core = make_core(0, "v", 1.0, false);
         Node::Variable(VariableNode {
             core,
-            has_type_annotation: true,
+            type_annotation: None, // Simplified
+            type_definition: None,
             mutability: Mutability::Immutable,
             variable_kind: VariableKind::Global,
         })
@@ -172,12 +207,11 @@ mod tests {
         let core = make_core(0, "ext", 0.0, true);
         Node::Function(FunctionNode {
             core,
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         })
     }
 

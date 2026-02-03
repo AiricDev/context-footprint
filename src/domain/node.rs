@@ -66,14 +66,47 @@ pub struct FunctionNode {
     pub core: NodeCore,
 
     // Signature completeness signals
-    pub param_count: u32,
-    pub typed_param_count: u32,
-    pub has_return_type: bool,
-
     // Behavioral signals
     pub is_async: bool,
     pub is_generator: bool,
     pub visibility: Visibility,
+
+    // Signature
+    pub parameters: Vec<Parameter>,
+    pub return_type_annotation: Option<TypeRefAttribute>,
+}
+
+impl FunctionNode {
+    /// Count parameters with type annotations
+    pub fn typed_param_count(&self) -> usize {
+        self.parameters
+            .iter()
+            .filter(|p| p.type_annotation.is_some())
+            .count()
+    }
+
+    /// Total parameter count
+    pub fn param_count(&self) -> usize {
+        self.parameters.len()
+    }
+
+    /// Has return type annotation
+    pub fn has_return_type(&self) -> bool {
+        self.return_type_annotation.is_some()
+    }
+
+    /// Check if function signature is complete (all params typed + has return type)
+    pub fn is_signature_complete(&self) -> bool {
+        self.typed_param_count() == self.param_count() && self.has_return_type()
+    }
+}
+
+/// Function parameter attribute
+#[derive(Debug, Clone)]
+pub struct Parameter {
+    pub name: String,
+    pub type_annotation: Option<TypeRefAttribute>,
+    // We could add default value presence, etc.
 }
 
 /// Mutability
@@ -89,6 +122,8 @@ pub enum Mutability {
 pub enum VariableKind {
     Global,     // Module-level
     ClassField, // Class/struct field
+    TypeDef,    // Represents a class/struct/interface definition
+    Local,      // Local variable
 }
 
 /// Variable node
@@ -96,8 +131,11 @@ pub enum VariableKind {
 pub struct VariableNode {
     pub core: NodeCore,
 
-    // Type annotation
-    pub has_type_annotation: bool,
+    // Type annotation (The type OF this variable)
+    pub type_annotation: Option<TypeRefAttribute>,
+
+    // Type Definition (If this variable IS a type)
+    pub type_definition: Option<TypeDefAttribute>,
 
     // Mutability (critical for Expansion)
     pub mutability: Mutability,
@@ -120,19 +158,22 @@ pub enum TypeKind {
     Intersection, // A & B
 }
 
-/// Type node
+/// Attribute for Type Definitions (when a VariableNode represents a Type)
 #[derive(Debug, Clone)]
-pub struct TypeNode {
-    pub core: NodeCore,
-
-    // Type classification
+pub struct TypeDefAttribute {
     pub type_kind: TypeKind,
+    pub is_abstract: bool,
+    pub type_param_count: u32,
+    // We can add more type-specific metadata here (e.g., generic constraints)
+}
 
-    // Abstraction signal (Pruning key)
-    pub is_abstract: bool, // interface, protocol, abstract class
-
-    // Generics
-    pub type_param_count: u32, // Generic parameters (e.g., List<T> → 1)
+/// Attribute for Type References (when a Node refers to a Type)
+#[derive(Debug, Clone)]
+pub struct TypeRefAttribute {
+    // Just a simple string representation for now, or could be more structured
+    pub type_name: String,
+    // We might want to resolve this to a NodeId if possible, but edges do that.
+    // This is mostly for display or heuristic size calculation.
 }
 
 /// Polymorphic node type
@@ -140,7 +181,6 @@ pub struct TypeNode {
 pub enum Node {
     Function(FunctionNode),
     Variable(VariableNode),
-    Type(TypeNode),
 }
 
 impl Node {
@@ -148,7 +188,6 @@ impl Node {
         match self {
             Node::Function(f) => &f.core,
             Node::Variable(v) => &v.core,
-            Node::Type(t) => &t.core,
         }
     }
 
@@ -156,7 +195,6 @@ impl Node {
         match self {
             Node::Function(f) => &mut f.core,
             Node::Variable(v) => &mut v.core,
-            Node::Type(t) => &mut t.core,
         }
     }
 }

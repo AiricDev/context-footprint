@@ -1,13 +1,9 @@
 use crate::app::dto::*;
 use crate::app::engine::ContextEngine;
 use rmcp::{
-    handler::server::wrapper::Parameters,
-    handler::server::tool::ToolRouter,
-    model::*,
-    Json,
-    tool, tool_handler, tool_router,
+    Json, ServerHandler, ServiceExt, handler::server::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
     transport::stdio,
-    ServerHandler, ServiceExt,
 };
 use tokio::task::spawn_blocking;
 
@@ -44,7 +40,7 @@ impl CfMcpServer {
         spawn_blocking(move || engine.compute(req))
             .await
             .map_err(|e| format!("task join error: {e}"))?
-            .map(|v| Json(v))
+            .map(Json)
             .map_err(|e| e.to_string())
     }
 
@@ -58,15 +54,12 @@ impl CfMcpServer {
         spawn_blocking(move || engine.stats(p.include_tests, p.policy.unwrap_or_default()))
             .await
             .map_err(|e| format!("task join error: {e}"))?
-            .map(|v| Json(v))
+            .map(Json)
             .map_err(|e| e.to_string())
     }
 
     #[tool(description = "List nodes with highest CF.")]
-    async fn top_cf(
-        &self,
-        params: Parameters<TopParams>,
-    ) -> Result<Json<TopResponse>, String> {
+    async fn top_cf(&self, params: Parameters<TopParams>) -> Result<Json<TopResponse>, String> {
         let engine = self.engine.clone();
         let p = params.0;
         let node_type = p.node_type.unwrap_or_else(|| "all".to_string());
@@ -80,7 +73,7 @@ impl CfMcpServer {
         })
         .await
         .map_err(|e| format!("task join error: {e}"))?
-        .map(|v| Json(v))
+        .map(Json)
         .map_err(|e| e.to_string())
     }
 
@@ -102,11 +95,13 @@ impl CfMcpServer {
         })
         .await
         .map_err(|e| format!("task join error: {e}"))?
-        .map(|v| Json(v))
+        .map(Json)
         .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Get the context contributing to a symbol's CF (optionally include code).")]
+    #[tool(
+        description = "Get the context contributing to a symbol's CF (optionally include code)."
+    )]
     async fn context(
         &self,
         params: Parameters<ContextRequest>,
@@ -116,7 +111,7 @@ impl CfMcpServer {
         spawn_blocking(move || engine.context(req))
             .await
             .map_err(|e| format!("task join error: {e}"))?
-            .map(|v| Json(v))
+            .map(Json)
             .map_err(|e| e.to_string())
     }
 }
@@ -177,7 +172,12 @@ mod tests {
         fn read(&self, _path: &Path) -> anyhow::Result<String> {
             Ok("line1\n".into())
         }
-        fn read_lines(&self, _path: &str, _start_line: usize, _end_line: usize) -> anyhow::Result<Vec<String>> {
+        fn read_lines(
+            &self,
+            _path: &str,
+            _start_line: usize,
+            _end_line: usize,
+        ) -> anyhow::Result<Vec<String>> {
             Ok(vec!["line1".into()])
         }
     }
@@ -201,12 +201,11 @@ mod tests {
         );
         let f = Node::Function(FunctionNode {
             core,
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         });
         let idx = g.add_node("sym/f().".into(), f);
         g.add_edge(idx, idx, EdgeKind::Call);
@@ -279,4 +278,3 @@ mod tests {
             .0;
     }
 }
-

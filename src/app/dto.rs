@@ -3,16 +3,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PolicyKind {
+    #[default]
     Academic,
     Strict,
 }
 
-impl Default for PolicyKind {
-    fn default() -> Self {
-        Self::Academic
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HealthResponse {
@@ -71,7 +68,6 @@ pub struct SpanDto {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct StatsResponse {
     pub functions: CfDistribution,
-    pub types: CfDistribution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -162,4 +158,3 @@ pub struct CodeLine {
     pub line_number: u32, // 1-based
     pub text: String,
 }
-

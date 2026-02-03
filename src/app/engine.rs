@@ -10,7 +10,7 @@ use crate::domain::graph::ContextGraph;
 use crate::domain::node::{Node, NodeId};
 use crate::domain::ports::{SemanticDataSource, SourceReader};
 use crate::domain::solver::{CfMemo, CfSolver};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -46,15 +46,14 @@ impl ContextEngine {
         scip_path: P,
         project_root_override: Option<&str>,
     ) -> Result<Self> {
-        let override_path = project_root_override
-            .and_then(|s| {
-                let normalized = s.strip_prefix("file://").unwrap_or(s).trim();
-                if normalized.is_empty() {
-                    None
-                } else {
-                    Some(PathBuf::from(normalized))
-                }
-            });
+        let override_path = project_root_override.and_then(|s| {
+            let normalized = s.strip_prefix("file://").unwrap_or(s).trim();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(normalized))
+            }
+        });
         Self::load_from_scip_internal(scip_path.as_ref().to_path_buf(), override_path)
     }
 
@@ -208,10 +207,14 @@ impl ContextEngine {
         let mut memo = CfMemo::new();
 
         let mut function_cf: Vec<u32> = Vec::new();
-        let mut type_cf: Vec<u32> = Vec::new();
 
         for node_idx in graph.graph.node_indices() {
             let node = graph.node(node_idx);
+
+            // Only count function nodes
+            if !matches!(node, Node::Function(_)) {
+                continue;
+            }
 
             if !include_tests {
                 let symbol = data
@@ -231,16 +234,11 @@ impl ContextEngine {
                 &mut memo,
             );
 
-            match node {
-                Node::Function(_) => function_cf.push(cf),
-                Node::Type(_) => type_cf.push(cf),
-                Node::Variable(_) => {}
-            }
+            function_cf.push(cf);
         }
 
         Ok(StatsResponse {
             functions: compute_distribution(function_cf),
-            types: compute_distribution(type_cf),
         })
     }
 
@@ -341,7 +339,11 @@ impl ContextEngine {
                 .map(|(symbol, node_type, cf)| SearchItem {
                     symbol: symbol.clone(),
                     node_type: node_type.clone(),
-                    cf: if with_cf || limit.is_some() { Some(*cf) } else { None },
+                    cf: if with_cf || limit.is_some() {
+                        Some(*cf)
+                    } else {
+                        None
+                    },
                 })
                 .collect(),
             total_matches,
@@ -368,11 +370,9 @@ impl ContextEngine {
 
             let mut files_map: HashMap<String, Vec<NodeIndex>> = HashMap::new();
             for node_id in layer {
-                let idx = data
-                    .node_id_to_index
-                    .get(node_id)
-                    .copied()
-                    .ok_or_else(|| anyhow!("Internal error: missing node_id_to_index for {node_id}"))?;
+                let idx = data.node_id_to_index.get(node_id).copied().ok_or_else(|| {
+                    anyhow!("Internal error: missing node_id_to_index for {node_id}")
+                })?;
                 let file_path = graph.node(idx).core().file_path.clone();
                 files_map.entry(file_path).or_default().push(idx);
             }
@@ -446,7 +446,11 @@ impl ContextEngine {
         })
     }
 
-    fn node_id_to_reachable_node_locked(&self, data: &EngineData, id: NodeId) -> Option<ReachableNode> {
+    fn node_id_to_reachable_node_locked(
+        &self,
+        data: &EngineData,
+        id: NodeId,
+    ) -> Option<ReachableNode> {
         let idx = *data.node_id_to_index.get(&id)?;
         let node = data.graph.node(idx);
         let core = node.core();
@@ -472,7 +476,10 @@ impl ContextEngine {
 mod tests {
     use super::*;
     use crate::domain::edge::EdgeKind;
-    use crate::domain::node::{FunctionNode, NodeCore, SourceSpan, TypeNode, TypeKind, Visibility};
+    use crate::domain::node::{
+        FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeDefAttribute, TypeKind,
+        VariableKind, VariableNode, Visibility,
+    };
 
     struct MockReader;
     impl SourceReader for MockReader {
@@ -480,7 +487,12 @@ mod tests {
             Ok("line1\nline2\nline3\nline4\n".into())
         }
 
-        fn read_lines(&self, _path: &str, start_line: usize, end_line: usize) -> Result<Vec<String>> {
+        fn read_lines(
+            &self,
+            _path: &str,
+            start_line: usize,
+            end_line: usize,
+        ) -> Result<Vec<String>> {
             let lines = vec![
                 "line1".to_string(),
                 "line2".to_string(),
@@ -516,19 +528,23 @@ mod tests {
 
         let f1 = Node::Function(FunctionNode {
             core: make_core(0, "func1", "app/main.py", 0, 1),
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         });
 
-        let t1 = Node::Type(TypeNode {
+        let t1 = Node::Variable(VariableNode {
             core: make_core(1, "Type1", "app/types.py", 0, 1),
-            type_kind: TypeKind::Class,
-            is_abstract: false,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Class,
+                is_abstract: false,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         });
 
         let i_f1 = g.add_node("sym/func1().".into(), f1);
@@ -622,7 +638,9 @@ fn build_node_maps(graph: &ContextGraph) -> (HashMap<NodeId, NodeIndex>, HashMap
 
     for (symbol, &idx) in &graph.symbol_to_node {
         let id = graph.node(idx).core().id;
-        node_id_to_symbol.entry(id).or_insert_with(|| symbol.clone());
+        node_id_to_symbol
+            .entry(id)
+            .or_insert_with(|| symbol.clone());
     }
 
     (node_id_to_index, node_id_to_symbol)
@@ -638,7 +656,7 @@ fn make_policy(kind: PolicyKind) -> Box<dyn crate::domain::policy::PruningPolicy
 fn node_type_str(node: &Node) -> &'static str {
     match node {
         Node::Function(_) => "function",
-        Node::Type(_) => "type",
+        Node::Variable(v) if v.type_definition.is_some() => "type",
         Node::Variable(_) => "variable",
     }
 }
@@ -728,4 +746,3 @@ fn filter_top_level_nodes(
 
     top_level_nodes
 }
-

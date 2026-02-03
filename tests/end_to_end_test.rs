@@ -138,13 +138,14 @@ fn test_fastapi_project() {
                 function_cf.push(cf);
                 "Function"
             }
-            context_footprint::domain::node::Node::Variable(_) => {
-                variable_cf.push(cf);
-                "Variable"
-            }
-            context_footprint::domain::node::Node::Type(_) => {
-                type_cf.push(cf);
-                "Type"
+            context_footprint::domain::node::Node::Variable(v) => {
+                if v.type_definition.is_some() {
+                    type_cf.push(cf);
+                    "Type"
+                } else {
+                    variable_cf.push(cf);
+                    "Variable"
+                }
             }
         };
 

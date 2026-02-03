@@ -44,10 +44,11 @@ impl AcademicBaseline {
 
                     // If return type is an abstract type (Protocol/Interface/Trait)
                     // with sufficient documentation, this is an abstract factory
-                    if matches!(target_node, Node::Type(t) if t.is_abstract && t.core.doc_score >= self.doc_threshold)
-                    {
-                        return true;
-                    }
+                    if let Node::Variable(v) = target_node
+                        && let Some(td) = &v.type_definition
+                            && td.is_abstract && v.core.doc_score >= self.doc_threshold {
+                                return true;
+                            }
                 }
             }
         }
@@ -72,7 +73,7 @@ impl PruningPolicy for AcademicBaseline {
             EdgeKind::CallIn => {
                 // Call-in edges traverse only when source lacks complete specification
                 if let Node::Function(f) = source {
-                    let sig_complete = f.typed_param_count == f.param_count && f.has_return_type;
+                    let sig_complete = f.is_signature_complete();
                     if sig_complete && f.core.doc_score >= self.doc_threshold {
                         return PruningDecision::Boundary;
                     } else {
@@ -89,13 +90,17 @@ impl PruningPolicy for AcademicBaseline {
         if target.core().is_external {
             return PruningDecision::Boundary;
         }
-
         match target {
-            Node::Type(t) => {
-                // Type boundary: must be abstract (interface/protocol) and well-documented
-                if t.is_abstract && t.core.doc_score >= self.doc_threshold {
-                    PruningDecision::Boundary
+            Node::Variable(v) => {
+                if let Some(td) = &v.type_definition {
+                    // Type boundary: must be abstract (interface/protocol) and well-documented
+                    if td.is_abstract && v.core.doc_score >= self.doc_threshold {
+                        PruningDecision::Boundary
+                    } else {
+                        PruningDecision::Transparent
+                    }
                 } else {
+                    // Variables are always transparent (need to see type definition)
                     PruningDecision::Transparent
                 }
             }
@@ -109,16 +114,12 @@ impl PruningPolicy for AcademicBaseline {
                 }
 
                 // Function boundary: signature complete and well-documented
-                let sig_complete = f.typed_param_count == f.param_count && f.has_return_type;
+                let sig_complete = f.is_signature_complete();
                 if sig_complete && f.core.doc_score >= self.doc_threshold {
                     PruningDecision::Boundary
                 } else {
                     PruningDecision::Transparent
                 }
-            }
-            Node::Variable(_) => {
-                // Variables are always transparent (need to see type definition)
-                PruningDecision::Transparent
             }
         }
     }
@@ -134,8 +135,8 @@ mod tests {
     use crate::domain::edge::EdgeKind;
     use crate::domain::graph::ContextGraph;
     use crate::domain::node::{
-        FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeKind, TypeNode, VariableKind,
-        VariableNode, Visibility,
+        FunctionNode, Mutability, Node, NodeCore, SourceSpan, TypeDefAttribute, TypeKind,
+        VariableKind, VariableNode, Visibility,
     };
 
     fn make_core(id: u32, name: &str, doc_score: f32, is_external: bool) -> NodeCore {
@@ -160,12 +161,26 @@ mod tests {
         let core = make_core(0, "f", 0.8, false);
         Node::Function(FunctionNode {
             core,
-            param_count: 2,
-            typed_param_count: 2,
-            has_return_type: true,
+            parameters: vec![
+                crate::domain::node::Parameter {
+                    name: "x".to_string(),
+                    type_annotation: Some(crate::domain::node::TypeRefAttribute {
+                        type_name: "int".to_string(),
+                    }),
+                },
+                crate::domain::node::Parameter {
+                    name: "y".to_string(),
+                    type_annotation: Some(crate::domain::node::TypeRefAttribute {
+                        type_name: "int".to_string(),
+                    }),
+                },
+            ],
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: Some(crate::domain::node::TypeRefAttribute {
+                type_name: "int".to_string(),
+            }),
         })
     }
 
@@ -173,32 +188,44 @@ mod tests {
         let core = make_core(0, "g", 0.0, false);
         Node::Function(FunctionNode {
             core,
-            param_count: 1,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: vec![crate::domain::node::Parameter {
+                name: "x".to_string(),
+                type_annotation: None,
+            }],
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         })
     }
 
     fn abstract_type_with_doc() -> Node {
         let core = make_core(0, "I", 0.6, false);
-        Node::Type(TypeNode {
+        Node::Variable(VariableNode {
             core,
-            type_kind: TypeKind::Interface,
-            is_abstract: true,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Interface,
+                is_abstract: true,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         })
     }
 
     fn concrete_type() -> Node {
         let core = make_core(0, "C", 0.9, false);
-        Node::Type(TypeNode {
+        Node::Variable(VariableNode {
             core,
-            type_kind: TypeKind::Class,
-            is_abstract: false,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Class,
+                is_abstract: false,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         })
     }
 
@@ -206,7 +233,8 @@ mod tests {
         let core = make_core(0, "v", 1.0, false);
         Node::Variable(VariableNode {
             core,
-            has_type_annotation: true,
+            type_annotation: None, // Simplified
+            type_definition: None,
             mutability: Mutability::Immutable,
             variable_kind: VariableKind::Global,
         })
@@ -216,12 +244,11 @@ mod tests {
         let core = make_core(0, "ext", 0.0, true);
         Node::Function(FunctionNode {
             core,
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: false,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         })
     }
 
@@ -338,21 +365,27 @@ mod tests {
         let factory_core = make_core(0, "get_service", 0.8, false);
         let factory = Node::Function(FunctionNode {
             core: factory_core,
-            param_count: 0,
-            typed_param_count: 0,
-            has_return_type: true,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: Some(crate::domain::node::TypeRefAttribute {
+                type_name: "ServicePort".to_string(),
+            }),
         });
 
         // Create an abstract protocol it returns
         let protocol_core = make_core(1, "ServicePort", 0.9, false);
-        let protocol = Node::Type(TypeNode {
+        let protocol = Node::Variable(VariableNode {
             core: protocol_core,
-            type_kind: TypeKind::Interface,
-            is_abstract: true,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Interface,
+                is_abstract: true,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         });
 
         // Build graph with ReturnType edge from factory to protocol
@@ -376,21 +409,25 @@ mod tests {
         let factory_core = make_core(0, "get_service", 0.3, false); // Low doc score
         let factory = Node::Function(FunctionNode {
             core: factory_core,
-            param_count: 1,
-            typed_param_count: 0, // Incomplete signature
-            has_return_type: true,
+            parameters: Vec::new(),
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
+            return_type_annotation: None,
         });
 
         // Create an abstract protocol it returns
         let protocol_core = make_core(1, "ServicePort", 0.9, false);
-        let protocol = Node::Type(TypeNode {
+        let protocol = Node::Variable(VariableNode {
             core: protocol_core,
-            type_kind: TypeKind::Interface,
-            is_abstract: true,
-            type_param_count: 0,
+            type_annotation: None,
+            type_definition: Some(TypeDefAttribute {
+                type_kind: TypeKind::Interface,
+                is_abstract: true,
+                type_param_count: 0,
+            }),
+            mutability: Mutability::Immutable,
+            variable_kind: VariableKind::TypeDef,
         });
 
         // Build graph with ReturnType edge

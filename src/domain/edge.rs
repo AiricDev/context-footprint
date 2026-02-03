@@ -5,16 +5,17 @@ pub enum EdgeKind {
     Call, // Function → Function
 
     // ============ Type Usage (granular) ============
-    ParamType,    // Function → Type (parameter type dependency)
-    ReturnType,   // Function → Type (return type dependency)
-    FieldType,    // Type → Type (field type, e.g., Order.customer: Customer)
-    VariableType, // Variable → Type (declared type)
-    GenericBound, // Type → Type (e.g., T: Comparable)
-    TypeArgument, // Usage → Type (generic instantiation, e.g., User in List<User>)
+    ParamType,  // Function → Variable (TypeDef) (parameter type dependency)
+    ReturnType, // Function → Variable (TypeDef) (return type dependency)
+    // FieldType removed: Use VariableType (Variable(Field) → Variable(TypeDef))
+    VariableType, // Variable → Variable (TypeDef) (declared type)
+    GenericBound, // Variable (TypeDef) → Variable (TypeDef) (e.g., T: Comparable)
+    TypeArgument, // Usage → Variable (TypeDef) (generic instantiation)
 
     // ============ Type Hierarchy ============
-    Inherits,   // Type → Type (class extends)
-    Implements, // Type → Type (class implements interface)
+    // ============ Type Hierarchy ============
+    Inherits,   // Variable (TypeDef) → Variable (TypeDef) (class extends)
+    Implements, // Variable (TypeDef) → Variable (TypeDef) (class implements interface)
 
     // ============ Data Flow (Expansion triggers) ============
     Read,  // Function → Variable
@@ -31,5 +32,6 @@ pub enum EdgeKind {
     },
 
     // ============ Exception Flow ============
-    Throws, // Function → Type (exception type)
+    // ============ Exception Flow ============
+    Throws, // Function → Variable (TypeDef) (exception type)
 }

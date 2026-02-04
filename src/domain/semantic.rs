@@ -160,9 +160,6 @@ pub struct FunctionDetails {
     /// Return types (symbol IDs of type definitions)
     pub return_types: Vec<SymbolId>,
 
-    /// Exception types that may be thrown
-    pub throws: Vec<SymbolId>,
-
     /// Generic type parameters
     pub type_params: Vec<TypeParamInfo>,
 

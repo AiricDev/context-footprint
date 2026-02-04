@@ -508,7 +508,6 @@ mod tests {
             is_generator: false,
             visibility: Visibility::Public,
             return_types: vec![],
-            throws: vec![],
         });
 
         let v1 = Node::Variable(VariableNode {

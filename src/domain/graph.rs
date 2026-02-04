@@ -92,7 +92,6 @@ mod tests {
             is_generator: false,
             visibility: crate::domain::node::Visibility::Public,
             return_types: vec![],
-            throws: vec![],
         })
     }
 

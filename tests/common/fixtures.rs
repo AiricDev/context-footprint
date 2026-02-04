@@ -50,7 +50,6 @@ pub fn function_def(
         details: SymbolDetails::Function(FunctionDetails {
             parameters,
             return_types,
-            throws: vec![],
             type_params: vec![],
             modifiers: FunctionModifiers {
                 is_async: false,

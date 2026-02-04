@@ -185,12 +185,6 @@ impl GraphBuilder {
                                         func_node.return_types.push(type_id.clone());
                                     }
                                 }
-                                // Set throws types
-                                for type_id in &func_details.throws {
-                                    if type_registry.contains(type_id) {
-                                        func_node.throws.push(type_id.clone());
-                                    }
-                                }
                                 // Note: Parameters are already set in create_node_from_definition
                             }
                         }
@@ -355,7 +349,6 @@ fn create_node_from_definition(core: NodeCore, def: &SymbolDefinition) -> Result
                 is_generator: func_details.modifiers.is_generator,
                 visibility: convert_visibility(&func_details.modifiers.visibility),
                 return_types: func_details.return_types.clone(),
-                throws: func_details.throws.clone(),
             }))
         }
         SymbolDetails::Variable(var_details) => {

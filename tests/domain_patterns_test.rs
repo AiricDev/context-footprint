@@ -10,7 +10,7 @@
 use context_footprint::domain::builder::GraphBuilder;
 use context_footprint::domain::policy::{DocumentationScorer, PruningParams, SizeFunction};
 use context_footprint::domain::semantic::{
-    DocumentSemantics, Mutability, ParameterInfo, SemanticData, TypeKind,
+    DocumentSemantics, Mutability, Parameter, SemanticData, TypeKind,
 };
 use context_footprint::domain::solver::CfSolver;
 use std::sync::Arc;
@@ -125,7 +125,7 @@ fn test_strategy_pattern_boundary() {
                 sym_context,
                 "execute_strategy",
                 vec!["Uses strategy".into()], // Documented
-                vec![ParameterInfo {
+                vec![Parameter {
                     name: "strategy".into(),
                     param_type: Some(sym_strategy_interface.into()),
                     ..Default::default()
@@ -283,7 +283,7 @@ fn test_observer_pattern_boundary() {
                 sym_generic_update,
                 "update",
                 vec!["Abstract update".into()], // Documented
-                vec![ParameterInfo {
+                vec![Parameter {
                     name: "event".into(),
                     param_type: Some("Event".into()),
                     ..Default::default()
@@ -336,7 +336,7 @@ fn test_facade_pattern_boundary() {
                 sym_facade,
                 "simple_interface",
                 vec!["Unified interface".into()],
-                vec![ParameterInfo {
+                vec![Parameter {
                     name: "req".into(),
                     param_type: Some("Request".into()),
                     ..Default::default()
@@ -388,7 +388,7 @@ fn test_template_method_boundary() {
                 sym_template,
                 "process",
                 vec!["Defines algorithm skeleton".into()],
-                vec![ParameterInfo {
+                vec![Parameter {
                     name: "data".into(),
                     param_type: Some("Data".into()),
                     ..Default::default()
@@ -480,7 +480,7 @@ fn test_leaky_facade_traversed() {
                 sym_bad_facade,
                 "do_stuff",
                 vec![], // No docs
-                vec![ParameterInfo {
+                vec![Parameter {
                     name: "x".into(),
                     param_type: None,
                     ..Default::default()
@@ -810,7 +810,7 @@ fn test_mediator_topology_decoupling() {
                 sym_mediator,
                 "broadcast",
                 vec!["Coordinates B,C,D".into()],
-                vec![ParameterInfo {
+                vec![Parameter {
                     name: "msg".into(),
                     param_type: Some("str".into()),
                     ..Default::default()

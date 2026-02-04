@@ -1,10 +1,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 use context_footprint::app::engine::ContextEngine;
 use context_footprint::cli;
 use context_footprint::server;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "context-footprint")]
@@ -91,13 +91,13 @@ enum Commands {
 
     /// Debug: print SemanticData built from SCIP index as JSON (for manual inspection)
     DebugSemanticData {},
-    
+
     /// Build graph from SemanticData JSON file (output from extract_python_semantics.py)
     BuildFromJson {
         /// Path to SemanticData JSON file
         #[arg(required = true)]
         json_path: PathBuf,
-        
+
         /// Symbol to compute CF for (optional, for testing)
         #[arg(long)]
         symbol: Option<String>,

@@ -2,9 +2,10 @@
 #![allow(dead_code)]
 
 use context_footprint::domain::semantic::{
-    DocumentSemantics, FunctionDetails, FunctionModifiers, Mutability, ParameterInfo,
+    DocumentSemantics, FunctionDetails, FunctionModifiers, Mutability, Parameter,
     ReferenceRole, SemanticData, SourceLocation, SourceSpan, SymbolDefinition, SymbolDetails,
-    SymbolKind, SymbolReference, TypeDetails, TypeKind, VariableDetails, VariableKind, Visibility,
+    SymbolKind, SymbolReference, TypeDetails, TypeKind, VariableDetails, VariableScope,
+    Visibility,
 };
 
 fn default_location() -> SourceLocation {
@@ -28,7 +29,7 @@ pub fn function_def(
     symbol_id: &str,
     name: &str,
     documentation: Vec<String>,
-    parameters: Vec<ParameterInfo>,
+    parameters: Vec<Parameter>,
     return_type: Option<String>,
 ) -> SymbolDefinition {
     let return_types = return_type.map(|s| vec![s]).unwrap_or_default();
@@ -56,7 +57,6 @@ pub fn function_def(
                 is_generator: false,
                 is_static: false,
                 is_abstract: false,
-                is_constructor: false,
                 visibility: Visibility::Public,
             },
         }),
@@ -83,7 +83,7 @@ pub fn variable_def(
         details: SymbolDetails::Variable(VariableDetails {
             var_type,
             mutability,
-            variable_kind: VariableKind::Global,
+            scope: VariableScope::Global,
             visibility: Visibility::Public,
         }),
     }
@@ -96,18 +96,9 @@ pub fn type_def(
     type_kind: TypeKind,
     is_abstract: bool,
 ) -> SymbolDefinition {
-    let kind = match type_kind {
-        TypeKind::Class => SymbolKind::Class,
-        TypeKind::Interface => SymbolKind::Interface,
-        TypeKind::Struct => SymbolKind::Struct,
-        TypeKind::Enum => SymbolKind::Enum,
-        TypeKind::TypeAlias => SymbolKind::TypeAlias,
-        _ => SymbolKind::Class,
-    };
-
     SymbolDefinition {
         symbol_id: symbol_id.to_string(),
-        kind,
+        kind: SymbolKind::Type,
         name: name.to_string(),
         display_name: name.to_string(),
         location: default_location(),
@@ -134,7 +125,7 @@ pub fn call_reference(target: &str, enclosing: &str) -> SymbolReference {
         location: default_location(),
         enclosing_symbol: enclosing.to_string(),
         role: ReferenceRole::Call,
-        context: None,
+        receiver: None,
     }
 }
 
@@ -144,7 +135,7 @@ pub fn read_reference(target: &str, enclosing: &str) -> SymbolReference {
         location: default_location(),
         enclosing_symbol: enclosing.to_string(),
         role: ReferenceRole::Read,
-        context: None,
+        receiver: None,
     }
 }
 
@@ -154,7 +145,7 @@ pub fn write_reference(target: &str, enclosing: &str) -> SymbolReference {
         location: default_location(),
         enclosing_symbol: enclosing.to_string(),
         role: ReferenceRole::Write,
-        context: None,
+        receiver: None,
     }
 }
 
@@ -171,7 +162,7 @@ pub fn create_semantic_data_simple() -> SemanticData {
                 sym_a,
                 "func_a",
                 vec!["Doc for A".into()],
-                vec![ParameterInfo {
+                vec![Parameter {
                     name: "x".into(),
                     param_type: Some("int".into()),
                     has_default: false,

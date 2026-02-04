@@ -8,7 +8,7 @@ use context_footprint::domain::node::Node;
 use context_footprint::domain::policy::{PruningParams, evaluate};
 use context_footprint::domain::ports::SourceReader;
 use context_footprint::domain::semantic::{
-    DocumentSemantics, FunctionDetails, FunctionModifiers, ParameterInfo, ReferenceRole,
+    DocumentSemantics, FunctionDetails, FunctionModifiers, Parameter, ReferenceRole,
     SemanticData, SourceLocation, SourceSpan, SymbolDefinition, SymbolDetails, SymbolKind,
     SymbolReference, TypeDetails, Visibility,
 };
@@ -42,7 +42,7 @@ fn test_interface_method_becomes_node_with_flag() {
                 // Interface/Protocol definition
                 SymbolDefinition {
                     symbol_id: interface_id.to_string(),
-                    kind: SymbolKind::Protocol,
+                    kind: SymbolKind::Type,
                     name: "Repository".to_string(),
                     display_name: "Repository".to_string(),
                     location: SourceLocation {
@@ -73,7 +73,7 @@ fn test_interface_method_becomes_node_with_flag() {
                 // Method definition in the interface
                 SymbolDefinition {
                     symbol_id: method_id.to_string(),
-                    kind: SymbolKind::Method,
+                    kind: SymbolKind::Function,
                     name: "load".to_string(),
                     display_name: "load".to_string(),
                     location: SourceLocation {
@@ -91,7 +91,7 @@ fn test_interface_method_becomes_node_with_flag() {
                     is_external: false,
                     documentation: vec!["Load data".to_string()],
                     details: SymbolDetails::Function(FunctionDetails {
-                        parameters: vec![ParameterInfo {
+                        parameters: vec![Parameter {
                             name: "id".to_string(),
                             param_type: Some("str#".to_string()),
                             has_default: false,
@@ -104,7 +104,6 @@ fn test_interface_method_becomes_node_with_flag() {
                             is_generator: false,
                             is_static: false,
                             is_abstract: true,
-                            is_constructor: false,
                             visibility: Visibility::Public,
                         },
                     }),
@@ -165,7 +164,7 @@ fn test_interface_method_with_good_doc_is_boundary() {
             definitions: vec![
                 SymbolDefinition {
                     symbol_id: interface_id.to_string(),
-                    kind: SymbolKind::Interface,
+                    kind: SymbolKind::Type,
                     name: "IService".to_string(),
                     display_name: "IService".to_string(),
                     location: SourceLocation {
@@ -195,7 +194,7 @@ fn test_interface_method_with_good_doc_is_boundary() {
                 },
                 SymbolDefinition {
                     symbol_id: method_id.to_string(),
-                    kind: SymbolKind::Method,
+                    kind: SymbolKind::Function,
                     name: "process".to_string(),
                     display_name: "process".to_string(),
                     location: SourceLocation {
@@ -216,7 +215,7 @@ fn test_interface_method_with_good_doc_is_boundary() {
                             .to_string(),
                     ],
                     details: SymbolDetails::Function(FunctionDetails {
-                        parameters: vec![ParameterInfo {
+                        parameters: vec![Parameter {
                             name: "data".to_string(),
                             param_type: Some("str#".to_string()),
                             has_default: false,
@@ -229,7 +228,6 @@ fn test_interface_method_with_good_doc_is_boundary() {
                             is_generator: false,
                             is_static: false,
                             is_abstract: true,
-                            is_constructor: false,
                             visibility: Visibility::Public,
                         },
                     }),
@@ -279,7 +277,7 @@ fn test_call_to_interface_method_creates_edge() {
                 // Interface
                 SymbolDefinition {
                     symbol_id: interface_id.to_string(),
-                    kind: SymbolKind::Protocol,
+                    kind: SymbolKind::Type,
                     name: "DataRepo".to_string(),
                     display_name: "DataRepo".to_string(),
                     location: SourceLocation {
@@ -310,7 +308,7 @@ fn test_call_to_interface_method_creates_edge() {
                 // Interface method
                 SymbolDefinition {
                     symbol_id: method_id.to_string(),
-                    kind: SymbolKind::Method,
+                    kind: SymbolKind::Function,
                     name: "save".to_string(),
                     display_name: "save".to_string(),
                     location: SourceLocation {
@@ -328,7 +326,7 @@ fn test_call_to_interface_method_creates_edge() {
                     is_external: false,
                     documentation: vec!["Save data".to_string()],
                     details: SymbolDetails::Function(FunctionDetails {
-                        parameters: vec![ParameterInfo {
+                        parameters: vec![Parameter {
                             name: "data".to_string(),
                             param_type: Some("dict#".to_string()),
                             has_default: false,
@@ -341,7 +339,6 @@ fn test_call_to_interface_method_creates_edge() {
                             is_generator: false,
                             is_static: false,
                             is_abstract: true,
-                            is_constructor: false,
                             visibility: Visibility::Public,
                         },
                     }),
@@ -380,7 +377,7 @@ fn test_call_to_interface_method_creates_edge() {
                     },
                     enclosing_symbol: caller_id.to_string(),
                     role: ReferenceRole::Call,
-                    context: None,
+                    receiver: None,
                 },
             ],
         }],

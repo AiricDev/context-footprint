@@ -141,8 +141,11 @@ impl GraphBuilder {
                 );
 
                 // Resolve target symbol to nearest node or type
-                let target_node_sym =
-                    Self::resolve_to_node_symbol(&reference.target_symbol, &node_symbols, &enclosing_map);
+                let target_node_sym = Self::resolve_to_node_symbol(
+                    &reference.target_symbol,
+                    &node_symbols,
+                    &enclosing_map,
+                );
 
                 if let Some(source_sym) = source_node_sym {
                     let source_idx = match graph.get_node_by_symbol(&source_sym) {
@@ -403,7 +406,10 @@ fn create_node_from_definition(
         }
         SymbolDetails::Type(_) => {
             // Types should not become nodes, this is an error case
-            anyhow::bail!("Type symbol should not be converted to node: {}", def.symbol_id)
+            anyhow::bail!(
+                "Type symbol should not be converted to node: {}",
+                def.symbol_id
+            )
         }
     }
 }
@@ -457,37 +463,6 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
     }
 }
 
-/// Check if a symbol is enclosed by an abstract type (Interface/Protocol/Trait/Abstract Class)
-fn is_enclosed_by_abstract_type(
-    enclosing_symbol: &Option<SymbolId>,
-    semantic_data: &SemanticData,
-) -> bool {
-    let Some(parent_id) = enclosing_symbol else {
-        return false;
-    };
-
-    // Search in document definitions
-    for doc in &semantic_data.documents {
-        for def in &doc.definitions {
-            if &def.symbol_id == parent_id
-                && let SymbolDetails::Type(type_details) = &def.details
-            {
-                return type_details.is_abstract;
-            }
-        }
-    }
-
-    // Search in external_symbols
-    for def in &semantic_data.external_symbols {
-        if &def.symbol_id == parent_id
-            && let SymbolDetails::Type(type_details) = &def.details
-        {
-            return type_details.is_abstract;
-        }
-    }
-
-    false
-}
 
 /// Extract only the signature portion of a method span (first line to colon/semicolon)
 /// For interface methods, we only want to count the signature, not any implementation body
@@ -573,62 +548,6 @@ mod tests {
         let info = create_type_info(&def, 100, 0.8);
         assert_eq!(info.definition.type_kind, TypeKind::Class);
         assert!(!info.definition.is_abstract);
-    }
-
-    #[test]
-    fn test_is_enclosed_by_abstract_type_with_protocol() {
-        use crate::domain::semantic::{DocumentSemantics, TypeDetails};
-
-        let protocol_id = "MyProtocol#";
-        let semantic_data = SemanticData {
-            project_root: "/test".to_string(),
-            documents: vec![DocumentSemantics {
-                relative_path: "test.py".to_string(),
-                language: "python".to_string(),
-                definitions: vec![SymbolDefinition {
-                    symbol_id: protocol_id.to_string(),
-                    kind: SymbolKind::Type,
-                    name: "MyProtocol".to_string(),
-                    display_name: "MyProtocol".to_string(),
-                    location: SourceLocation {
-                        file_path: "test.py".to_string(),
-                        line: 0,
-                        column: 0,
-                    },
-                    span: SemanticSpan {
-                        start_line: 0,
-                        start_column: 0,
-                        end_line: 5,
-                        end_column: 0,
-                    },
-                    enclosing_symbol: None,
-                    is_external: false,
-                    documentation: vec![],
-                    details: SymbolDetails::Type(TypeDetails {
-                        kind: crate::domain::semantic::TypeKind::Interface,
-                        is_abstract: true,
-                        is_final: false,
-                        visibility: Visibility::Public,
-                        type_params: vec![],
-                        implements: vec![],
-                        inherits: vec![],
-                        fields: vec![],
-                    }),
-                }],
-                references: vec![],
-            }],
-            external_symbols: vec![],
-        };
-
-        assert!(is_enclosed_by_abstract_type(
-            &Some(protocol_id.to_string()),
-            &semantic_data
-        ));
-        assert!(!is_enclosed_by_abstract_type(&None, &semantic_data));
-        assert!(!is_enclosed_by_abstract_type(
-            &Some("NonExistent#".to_string()),
-            &semantic_data
-        ));
     }
 
     #[test]

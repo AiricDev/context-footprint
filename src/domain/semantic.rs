@@ -26,7 +26,7 @@
 //! - **Instance access**: `self.method()`, `obj.field` → `receiver=Some("self" or "obj")`
 //! - **Static access**: `Class.static_method()` → depends on language representation
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// ============================================================================
@@ -326,6 +326,17 @@ pub struct Parameter {
     /// - `true` for variadic parameters (Python *args, TS ...rest, etc.)
     /// - For variadic params, `param_type` is the element type (if annotated)
     pub is_variadic: bool,
+}
+
+impl Default for Parameter {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            param_type: None,
+            has_default: false,
+            is_variadic: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

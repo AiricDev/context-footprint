@@ -1,57 +1,68 @@
 // use crate::adapters::scip::adapter::ScipDataSourceAdapter;
+use crate::adapters::doc_scorer::heuristic::HeuristicDocScorer;
+use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
 use crate::app::dto::{ComputeRequest, ContextRequest, PolicyKind};
 use crate::app::engine::ContextEngine;
-use crate::domain::ports::{SemanticDataSource, SourceReader};
-use crate::domain::semantic::SemanticData;
 use crate::domain::builder::GraphBuilder;
-use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
-use crate::adapters::doc_scorer::heuristic::HeuristicDocScorer;
-use anyhow::{Result, Context as _};
+use crate::domain::ports::SourceReader;
+use crate::domain::semantic::SemanticData;
+use anyhow::{Context as _, Result};
 use std::path::Path;
 
 /// Load SemanticData from SCIP index and print as JSON for manual inspection.
 pub fn debug_semantic_data(_scip_path: &str) -> Result<()> {
-    anyhow::bail!("SCIP adapter temporarily disabled during SemanticData migration. Use BuildFromJson with extract_python_semantics.py instead.")
+    anyhow::bail!(
+        "SCIP adapter temporarily disabled during SemanticData migration. Use BuildFromJson with extract_python_semantics.py instead."
+    )
 }
 
 /// Build graph from SemanticData JSON file and optionally compute CF for a symbol
 pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()> {
     println!("Loading SemanticData from {}...", json_path.display());
-    
+
     // Read and parse JSON
-    let json_content = std::fs::read_to_string(json_path)
-        .context("Failed to read JSON file")?;
-    let semantic_data: SemanticData = serde_json::from_str(&json_content)
-        .context("Failed to parse SemanticData JSON")?;
-    
+    let json_content = std::fs::read_to_string(json_path).context("Failed to read JSON file")?;
+    let semantic_data: SemanticData =
+        serde_json::from_str(&json_content).context("Failed to parse SemanticData JSON")?;
+
     println!("SemanticData loaded:");
     println!("  Project root: {}", semantic_data.project_root);
     println!("  Documents: {}", semantic_data.documents.len());
-    let total_defs: usize = semantic_data.documents.iter()
+    let total_defs: usize = semantic_data
+        .documents
+        .iter()
         .map(|d| d.definitions.len())
         .sum();
-    let total_refs: usize = semantic_data.documents.iter()
+    let total_refs: usize = semantic_data
+        .documents
+        .iter()
         .map(|d| d.references.len())
         .sum();
     println!("  Total definitions: {}", total_defs);
     println!("  Total references: {}", total_refs);
     println!();
-    
+
     // Create source reader
     struct SimpleSourceReader {
         project_root: String,
     }
-    
+
     impl SourceReader for SimpleSourceReader {
         fn read(&self, path: &Path) -> Result<String> {
             let full_path = Path::new(&self.project_root).join(path);
             std::fs::read_to_string(&full_path)
                 .with_context(|| format!("Failed to read source file: {}", full_path.display()))
         }
-        
-        fn read_lines(&self, path: &str, start_line: usize, end_line: usize) -> Result<Vec<String>> {
+
+        fn read_lines(
+            &self,
+            path: &str,
+            start_line: usize,
+            end_line: usize,
+        ) -> Result<Vec<String>> {
             let content = self.read(Path::new(path))?;
-            let lines: Vec<String> = content.lines()
+            let lines: Vec<String> = content
+                .lines()
                 .skip(start_line.saturating_sub(1))
                 .take(end_line - start_line + 1)
                 .map(String::from)
@@ -59,43 +70,44 @@ pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()
             Ok(lines)
         }
     }
-    
+
     let source_reader = SimpleSourceReader {
         project_root: semantic_data.project_root.clone(),
     };
-    
+
     // Build graph
     println!("Building context graph...");
     let size_function = Box::new(TiktokenSizeFunction::new());
     let doc_scorer = Box::new(HeuristicDocScorer);
     let builder = GraphBuilder::new(size_function, doc_scorer);
-    
-    let graph = builder.build(semantic_data, &source_reader)
+
+    let graph = builder
+        .build(semantic_data, &source_reader)
         .context("Failed to build context graph")?;
-    
+
     println!("Graph built successfully:");
     println!("  Nodes: {}", graph.graph.node_count());
     println!("  Edges: {}", graph.graph.edge_count());
     println!("  Types in registry: {}", graph.type_registry.len());
     println!();
-    
+
     // If test symbol provided, compute CF
     if let Some(symbol) = test_symbol {
         println!("Computing CF for symbol: {}", symbol);
-        
+
         if let Some(node_idx) = graph.get_node_by_symbol(symbol) {
-            use crate::domain::solver::CfSolver;
             use crate::domain::policy::PruningParams;
+            use crate::domain::solver::CfSolver;
             use std::sync::Arc;
-            
+
             let params = PruningParams::academic(0.5);
             let graph_arc = Arc::new(graph);
             let mut solver = CfSolver::new(graph_arc.clone(), params);
             let result = solver.compute_cf(&[node_idx], None);
-            
+
             println!("  CF: {} tokens", result.total_context_size);
             println!("  Reachable nodes: {}", result.reachable_set.len());
-            
+
             // Show first few reachable nodes
             if !result.reachable_nodes_ordered.is_empty() {
                 println!("\n  First 5 reachable nodes (ordered):");
@@ -104,7 +116,12 @@ pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()
                     for (_sym, &idx) in &graph_arc.symbol_to_node {
                         let node = graph_arc.node(idx);
                         if node.core().id == node_id {
-                            println!("    {}. {} (size: {})", i + 1, node.core().name, node.core().context_size);
+                            println!(
+                                "    {}. {} (size: {})",
+                                i + 1,
+                                node.core().name,
+                                node.core().context_size
+                            );
                             break;
                         }
                     }
@@ -118,7 +135,7 @@ pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()
             }
         }
     }
-    
+
     Ok(())
 }
 

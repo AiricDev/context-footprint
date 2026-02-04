@@ -31,9 +31,24 @@ pub struct PruningParams {
 
 impl Default for PruningParams {
     fn default() -> Self {
+        Self::academic(0.5)
+    }
+}
+
+impl PruningParams {
+    /// Academic mode: internal function IS a boundary if typed + documented.
+    pub fn academic(doc_threshold: f32) -> Self {
         Self {
-            doc_threshold: 0.5,
+            doc_threshold,
             treat_typed_documented_function_as_boundary: true,
+        }
+    }
+
+    /// Strict mode: internal function is TRANSPARENT unless it's an abstract factory.
+    pub fn strict(doc_threshold: f32) -> Self {
+        Self {
+            doc_threshold,
+            treat_typed_documented_function_as_boundary: false,
         }
     }
 }

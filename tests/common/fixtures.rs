@@ -4,7 +4,7 @@
 use context_footprint::domain::semantic::{
     DocumentSemantics, FunctionDetails, FunctionModifiers, Mutability, ParameterInfo,
     ReferenceRole, SemanticData, SourceLocation, SourceSpan, SymbolDefinition, SymbolDetails,
-    SymbolKind, SymbolReference, VariableDetails, VariableKind, Visibility,
+    SymbolKind, SymbolReference, TypeDetails, TypeKind, VariableDetails, VariableKind, Visibility,
 };
 
 fn default_location() -> SourceLocation {
@@ -24,7 +24,7 @@ fn default_span() -> SourceSpan {
     }
 }
 
-fn function_def(
+pub fn function_def(
     symbol_id: &str,
     name: &str,
     documentation: Vec<String>,
@@ -63,7 +63,7 @@ fn function_def(
     }
 }
 
-fn variable_def(
+pub fn variable_def(
     symbol_id: &str,
     name: &str,
     documentation: Vec<String>,
@@ -89,7 +89,48 @@ fn variable_def(
     }
 }
 
-fn call_reference(target: &str, enclosing: &str) -> SymbolReference {
+pub fn type_def(
+    symbol_id: &str,
+    name: &str,
+    documentation: Vec<String>,
+    type_kind: TypeKind,
+    is_abstract: bool,
+) -> SymbolDefinition {
+    let kind = match type_kind {
+        TypeKind::Class => SymbolKind::Class,
+        TypeKind::Interface => SymbolKind::Interface,
+        TypeKind::Protocol => SymbolKind::Protocol,
+        TypeKind::Struct => SymbolKind::Struct,
+        TypeKind::Enum => SymbolKind::Enum,
+        TypeKind::Trait => SymbolKind::Trait,
+        TypeKind::TypeAlias => SymbolKind::TypeAlias,
+        _ => SymbolKind::Class,
+    };
+
+    SymbolDefinition {
+        symbol_id: symbol_id.to_string(),
+        kind,
+        name: name.to_string(),
+        display_name: name.to_string(),
+        location: default_location(),
+        span: default_span(),
+        enclosing_symbol: None,
+        is_external: false,
+        documentation,
+        details: SymbolDetails::Type(TypeDetails {
+            kind: type_kind,
+            is_abstract,
+            is_final: false,
+            visibility: Visibility::Public,
+            type_params: vec![],
+            fields: vec![],
+            implements: vec![],
+            inherits: vec![],
+        }),
+    }
+}
+
+pub fn call_reference(target: &str, enclosing: &str) -> SymbolReference {
     SymbolReference {
         target_symbol: target.to_string(),
         location: default_location(),
@@ -99,7 +140,7 @@ fn call_reference(target: &str, enclosing: &str) -> SymbolReference {
     }
 }
 
-fn read_reference(target: &str, enclosing: &str) -> SymbolReference {
+pub fn read_reference(target: &str, enclosing: &str) -> SymbolReference {
     SymbolReference {
         target_symbol: target.to_string(),
         location: default_location(),
@@ -109,7 +150,7 @@ fn read_reference(target: &str, enclosing: &str) -> SymbolReference {
     }
 }
 
-fn write_reference(target: &str, enclosing: &str) -> SymbolReference {
+pub fn write_reference(target: &str, enclosing: &str) -> SymbolReference {
     SymbolReference {
         target_symbol: target.to_string(),
         location: default_location(),

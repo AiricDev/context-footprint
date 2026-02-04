@@ -4,14 +4,15 @@ mod common;
 
 use std::path::Path;
 
-use context_footprint::adapters::doc_scorer::simple::SimpleDocScorer;
+use context_footprint::adapters::doc_scorer::heuristic::HeuristicDocScorer;
 use context_footprint::adapters::fs::reader::FileSourceReader;
-use context_footprint::adapters::policy::academic::AcademicBaseline;
 use context_footprint::adapters::scip::adapter::ScipDataSourceAdapter;
 use context_footprint::adapters::size_function::tiktoken::TiktokenSizeFunction;
 use context_footprint::domain::builder::GraphBuilder;
+use context_footprint::domain::policy::PruningParams;
 use context_footprint::domain::ports::SemanticDataSource;
 use context_footprint::domain::solver::CfSolver;
+use std::sync::Arc;
 
 const SIMPLE_PYTHON_SCIP: &str = "tests/fixtures/simple_python/index.scip";
 const FASTAPI_SCIP: &str = "tests/fixtures/fastapi/index.scip";
@@ -38,7 +39,7 @@ fn test_simple_python_project_when_scip_present() {
         .to_path_buf();
     let source_reader = FileSourceReader::new();
     let size_fn = Box::new(TiktokenSizeFunction::new());
-    let doc_scorer = Box::new(SimpleDocScorer::new());
+    let doc_scorer = Box::new(HeuristicDocScorer::new());
     let builder = GraphBuilder::new(size_fn, doc_scorer);
 
     // Builder expects paths relative to project_root; our SemanticData has project_root
@@ -54,12 +55,12 @@ fn test_simple_python_project_when_scip_present() {
     // Pick any symbol and compute CF
     let first_symbol = graph.symbol_to_node.keys().next().unwrap().clone();
     let start = graph.get_node_by_symbol(&first_symbol).unwrap();
-    let solver = CfSolver::new();
-    let policy = AcademicBaseline::default();
-    let result = solver.compute_cf(&graph, &[start], &policy, None);
+    let expected_min = graph.node(start).core().context_size;
+    let mut solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+    let result = solver.compute_cf(&[start], None);
 
     assert!(!result.reachable_set.is_empty());
-    assert!(result.total_context_size >= graph.node(start).core().context_size);
+    assert!(result.total_context_size >= expected_min);
 }
 
 /// E2E test with a real-world project: FastAPI.
@@ -91,7 +92,7 @@ fn test_fastapi_project() {
 
     let source_reader = FileSourceReader::new();
     let size_fn = Box::new(TiktokenSizeFunction::new());
-    let doc_scorer = Box::new(SimpleDocScorer::new());
+    let doc_scorer = Box::new(HeuristicDocScorer::new());
     let builder = GraphBuilder::new(size_fn, doc_scorer);
 
     println!("Building context graph for FastAPI...");
@@ -109,10 +110,10 @@ fn test_fastapi_project() {
         "FastAPI should have many symbols"
     );
 
-    // Compute CF for every node to calculate statistics
-    let solver = CfSolver::new();
-    let policy = AcademicBaseline::default();
-    let node_count = graph.graph.node_count();
+    // Compute CF for every node to calculate statistics (uses internal memo for efficiency)
+    let graph_arc = Arc::new(graph);
+    let mut solver = CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
+    let node_count = graph_arc.graph.node_count();
 
     println!("Calculating CF for all {} nodes...", node_count);
 
@@ -124,14 +125,13 @@ fn test_fastapi_project() {
     // Invert symbol_to_node for better reporting
     let mut node_to_symbol: std::collections::HashMap<petgraph::graph::NodeIndex, String> =
         std::collections::HashMap::new();
-    for (sym, idx) in &graph.symbol_to_node {
+    for (sym, idx) in &graph_arc.symbol_to_node {
         node_to_symbol.insert(*idx, sym.clone());
     }
 
-    for idx in graph.graph.node_indices() {
-        let node = graph.node(idx);
-        let result = solver.compute_cf(&graph, &[idx], &policy, None);
-        let cf = result.total_context_size;
+    for idx in graph_arc.graph.node_indices() {
+        let node = graph_arc.node(idx);
+        let cf = solver.compute_cf_total(idx);
 
         // Types are in TypeRegistry, not graph nodes; only Function and Variable nodes exist
         let kind = match node {

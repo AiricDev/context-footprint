@@ -195,7 +195,7 @@ This phase consumes the SCIP stream to build the in-memory `ContextGraph` and `S
 
 Executes the traversal algorithm on the constructed graph:
 
-- **Input**: `ContextGraph`, `SideIndices`, `PruningPolicy`.
+- **Input**: `ContextGraph`, `SideIndices`, `PruningParams` (doc_threshold + mode; solver uses `evaluate`).
 - **Output**: `CF` Score for each requested Node.
 
 ### 6.2 Graph Schema: The "Compact Graph + Side Indices" Model
@@ -375,98 +375,28 @@ To handle *Dynamic Expansion* without bloating the static graph with bidirection
     - *Query*: `callee_id -> list_of_callers`
     - *Optimization*: Can be lazily populated or restricted to "Untyped" callees if memory becomes a bottleneck.
 
-### 6.3 Extension Point: The Pruning Policy
+### 6.3 Pruning: Fully in Domain
 
-The core novelty—**Pruning Predicate** $P(v)$—is implemented as a configurable Trait, allowing different "Context Definitions" for different use cases.
-
-```rust
-pub trait PruningPolicy {
-    /// Evaluate if a node acts as a valid Context Boundary
-    fn evaluate(
-        &self,
-        source: &Node,
-        target: &Node,
-        edge_kind: &EdgeKind,
-        graph: &ContextGraph,
-    ) -> PruningDecision;
-}
-
-enum PruningDecision {
-    Boundary,     // Stop traversal here; node is a valid abstraction
-    Transparent,  // Continue traversal through this node
-}
-```
-
-**Reference Implementation: `AcademicBaseline`**
+The core novelty—**Pruning Predicate** $P(v)$—is implemented entirely in the domain. Only **doc_threshold** (and a mode flag) are configurable; doc_scorer supplies doc_score.
 
 ```rust
-impl PruningPolicy for AcademicBaseline {
-    fn evaluate(
-        &self,
-        source: &Node,
-        target: &Node,
-        edge_kind: &EdgeKind,
-        graph: &ContextGraph,
-    ) -> PruningDecision {
-        // Special handling for dynamic expansion edges
-        match edge_kind {
-            EdgeKind::SharedStateWrite => return PruningDecision::Transparent,
-            EdgeKind::CallIn => {
-                if let Node::Function(f) = source {
-                    let sig_complete = f.typed_param_count == f.param_count && f.has_return_type;
-                    if sig_complete && f.core.doc_score >= self.doc_threshold() {
-                        return PruningDecision::Boundary;
-                    }
-                }
-                return PruningDecision::Transparent;
-            }
-            _ => {}
-        }
-
-        // External nodes (3rd-party libs) are always boundaries
-        if target.core().is_external {
-            return PruningDecision::Boundary;
-        }
-        
-        match target {
-            Node::Type(t) => {
-                // Type boundary: must be abstract (interface/protocol) + documented
-                if t.is_abstract && t.core.doc_score >= self.doc_threshold() {
-                    PruningDecision::Boundary
-                } else {
-                    PruningDecision::Transparent
-                }
-            }
-            Node::Function(f) => {
-                // Abstract Factory check: returns an abstract type
-                if is_abstract_factory(target, graph) {
-                    return PruningDecision::Boundary;
-                }
-                
-                // Function boundary: signature complete + documented
-                let sig_complete = f.typed_param_count == f.param_count 
-                                && f.has_return_type;
-                if sig_complete && f.core.doc_score >= self.doc_threshold() {
-                    PruningDecision::Boundary
-                } else {
-                    PruningDecision::Transparent
-                }
-            }
-            Node::Variable(_) => {
-                // Variables are always transparent (traverse to their type)
-                PruningDecision::Transparent
-            }
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct PruningParams {
+    pub doc_threshold: f32,
+    pub treat_typed_documented_function_as_boundary: bool,  // Academic vs Strict
 }
+
+pub fn evaluate(
+    params: &PruningParams,
+    source: &Node, target: &Node, edge_kind: &EdgeKind, graph: &ContextGraph,
+) -> PruningDecision;
 ```
 
-**Policy Implementations:**
+**Modes:**
 
-1. **`AcademicBaseline` (Fast)**:
-    - **Logic**: See reference implementation above.
-    - **Use Case**: Large-scale validation (BugsInPy, SWE-bench).
-2. **`DeepAudit` (Slow, Future Work)**:
+1. **Academic** (`PruningParams::academic(0.5)`): Abstract factory + sig complete + doc_score >= doc_threshold → Boundary. Use case: Large-scale validation (BugsInPy, SWE-bench).
+2. **Strict** (`PruningParams::strict(0.8)`): Only external and abstract factory → Boundary; other internal functions Transparent.
+3. **DeepAudit** (Slow, Future Work):
     - **Logic**: LLM-based evaluation of documentation quality ("Does this docstring explain the side effects?").
     - **Use Case**: CI/CD Quality Gates for enterprise projects.
 

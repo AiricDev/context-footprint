@@ -149,8 +149,7 @@ fn process_document(
             &occ.symbol,
         );
 
-        let def =
-            convert_occurrence_to_definition(&occ, &sym_info, enclosing, doc, symbol_map);
+        let def = convert_occurrence_to_definition(&occ, &sym_info, enclosing, doc, symbol_map);
         definitions.push(def);
     }
 
@@ -354,7 +353,7 @@ fn extract_function_details(
 /// Extract variable details
 fn extract_variable_details(sym_info: &scip::SymbolInformation) -> VariableDetails {
     VariableDetails {
-        var_type: None, // Will be filled from relationships if available
+        var_type: None,                  // Will be filled from relationships if available
         mutability: Mutability::Mutable, // Default, may be refined by language
         variable_kind: VariableKind::Global,
         visibility: infer_visibility(&sym_info.symbol),
@@ -445,7 +444,7 @@ fn parse_signature(sig: &str) -> (Vec<ParameterInfo>, Option<SymbolId>) {
 
 /// Convert SCIP SymbolInformation kind to our SymbolKind
 /// SCIP kind values from scip.proto:
-/// Class = 7, Method = 26, Function = 17, Constructor = 9, 
+/// Class = 7, Method = 26, Function = 17, Constructor = 9,
 /// Enum = 11, Interface = 21, Struct = 49, Trait = 53,
 /// Variable = 61, Field = 15, Constant = 8, Parameter = 37,
 /// Namespace = 30, Module = 29, Package = 35, etc.

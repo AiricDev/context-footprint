@@ -270,10 +270,7 @@ pub fn create_semantic_data_chain_well_documented_middle() -> SemanticData {
             ),
             function_def(sym_c, "chain_c", vec![], vec![], None),
         ],
-        references: vec![
-            call_reference(sym_b, sym_a),
-            call_reference(sym_c, sym_b),
-        ],
+        references: vec![call_reference(sym_b, sym_a), call_reference(sym_c, sym_b)],
     }];
 
     SemanticData {
@@ -313,10 +310,7 @@ pub fn create_semantic_data_multiple_callers() -> SemanticData {
             function_def(sym_b, "caller_b", vec![], vec![], None),
             function_def(sym_c, "callee", vec![], vec![], None),
         ],
-        references: vec![
-            call_reference(sym_c, sym_a),
-            call_reference(sym_c, sym_b),
-        ],
+        references: vec![call_reference(sym_c, sym_a), call_reference(sym_c, sym_b)],
     }];
 
     SemanticData {

@@ -5,15 +5,15 @@
 /// 2. get_auth_port has ReturnType edge to AuthPort
 /// 3. is_abstract_factory correctly identifies get_auth_port
 /// 4. get_auth_port's CF doesn't include JuhellmAuthAdapter
-use context_footprint::adapters::policy::academic::AcademicBaseline;
 use context_footprint::adapters::scip::adapter::ScipDataSourceAdapter;
 use context_footprint::domain::builder::GraphBuilder;
 use context_footprint::domain::edge::EdgeKind;
 use context_footprint::domain::node::Node;
-use context_footprint::domain::policy::{DocumentationScorer, PruningPolicy, SizeFunction};
+use context_footprint::domain::policy::{evaluate, DocumentationScorer, PruningParams, SizeFunction};
 use context_footprint::domain::ports::{SemanticDataSource, SourceReader};
 use context_footprint::domain::solver::CfSolver;
 use std::path::Path;
+use std::sync::Arc;
 
 struct MockSourceReader;
 
@@ -197,8 +197,8 @@ fn test_llmrelay_get_auth_port_is_abstract_factory() {
     };
     let get_auth_port_node = graph.node(get_auth_port_idx);
 
-    // Test: AcademicBaseline should recognize get_auth_port as abstract factory
-    let policy = AcademicBaseline::default();
+    // Test: Academic params should recognize get_auth_port as abstract factory
+    let params = PruningParams::academic(0.5);
     let dummy_caller = Node::Function(context_footprint::domain::node::FunctionNode {
         core: context_footprint::domain::node::NodeCore::new(
             999,
@@ -222,7 +222,8 @@ fn test_llmrelay_get_auth_port_is_abstract_factory() {
         return_type: None,
     });
 
-    let decision = policy.evaluate(&dummy_caller, get_auth_port_node, &EdgeKind::Call, &graph);
+    let decision =
+        evaluate(&params, &dummy_caller, get_auth_port_node, &EdgeKind::Call, &graph);
 
     println!("Policy decision for get_auth_port: {:?}", decision);
 
@@ -271,10 +272,10 @@ fn test_llmrelay_caller_of_get_auth_port_cf_excludes_implementation() {
     };
     println!("Testing caller: {}", caller_symbol);
 
-    // Compute CF with AcademicBaseline policy
-    let policy = Box::new(AcademicBaseline::default());
-    let solver = CfSolver::new();
-    let result = solver.compute_cf(&graph, &[caller_idx], policy.as_ref(), None);
+    // Compute CF with academic pruning params
+    let graph_arc = Arc::new(graph);
+    let mut solver = CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
+    let result = solver.compute_cf(&[caller_idx], None);
 
     println!("Caller CF: {} tokens", result.total_context_size);
     println!("Reachable nodes: {}", result.reachable_set.len());
@@ -282,9 +283,9 @@ fn test_llmrelay_caller_of_get_auth_port_cf_excludes_implementation() {
     // Check if JuhellmAuthAdapter is in the context
     let juhellm_adapter_symbol = "scip-python python llmrelay 0.1.0 `app.adapters.auth.juhellm_auth_adapter`/JuhellmAuthAdapter#";
 
-    let juhellm_node_id = graph
+    let juhellm_node_id = graph_arc
         .get_node_by_symbol(juhellm_adapter_symbol)
-        .map(|idx| graph.node(idx).core().id);
+        .map(|idx| graph_arc.node(idx).core().id);
 
     let juhellm_in_context = if let Some(juhellm_id) = juhellm_node_id {
         result.reachable_set.contains(&juhellm_id)

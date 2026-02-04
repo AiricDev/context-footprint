@@ -1,7 +1,6 @@
-use crate::adapters::doc_scorer::simple::SimpleDocScorer;
 use crate::adapters::fs::reader::FileSourceReader;
-use crate::adapters::policy::academic::AcademicBaseline;
-use crate::adapters::policy::strict::StrictPolicy;
+use crate::adapters::doc_scorer::heuristic::HeuristicDocScorer;
+use crate::domain::policy::PruningParams;
 use crate::adapters::scip::adapter::ScipDataSourceAdapter;
 use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
 use crate::adapters::test_detector::UniversalTestDetector;
@@ -9,7 +8,7 @@ use crate::app::dto::*;
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::{Node, NodeId};
 use crate::domain::ports::{SemanticDataSource, SourceReader};
-use crate::domain::solver::{CfMemo, CfSolver};
+use crate::domain::solver::CfSolver;
 use anyhow::{Result, anyhow};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
@@ -64,7 +63,7 @@ impl ContextEngine {
         let data_source = ScipDataSourceAdapter::new(&scip_path);
         let source_reader: Arc<dyn SourceReader> = Arc::new(FileSourceReader::new());
         let size_function = Box::new(TiktokenSizeFunction::new());
-        let doc_scorer = Box::new(SimpleDocScorer::new());
+        let doc_scorer = Box::new(HeuristicDocScorer::new());
 
         let mut semantic_data = data_source.load()?;
 
@@ -168,9 +167,8 @@ impl ContextEngine {
             starts.push(idx);
         }
 
-        let solver = CfSolver::new();
-        let policy = make_policy(req.policy);
-        let result = solver.compute_cf(graph, &starts, policy.as_ref(), req.max_tokens);
+        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
+        let result = solver.compute_cf(&starts, req.max_tokens);
 
         let reachable_nodes_ordered = result
             .reachable_nodes_ordered
@@ -201,10 +199,8 @@ impl ContextEngine {
     pub fn stats(&self, include_tests: bool, policy: PolicyKind) -> Result<StatsResponse> {
         let data = self.inner.read().unwrap();
         let graph = data.graph.as_ref();
-        let solver = CfSolver::new();
-        let policy = make_policy(policy);
+        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
         let test_detector = UniversalTestDetector::new();
-        let mut memo = CfMemo::new();
 
         let mut function_cf: Vec<u32> = Vec::new();
 
@@ -227,13 +223,7 @@ impl ContextEngine {
                 }
             }
 
-            let cf = solver.compute_cf_total_context_size_cached(
-                graph,
-                node_idx,
-                policy.as_ref(),
-                &mut memo,
-            );
-
+            let cf = solver.compute_cf_total(node_idx);
             function_cf.push(cf);
         }
 
@@ -251,10 +241,8 @@ impl ContextEngine {
     ) -> Result<TopResponse> {
         let data = self.inner.read().unwrap();
         let graph = data.graph.as_ref();
-        let solver = CfSolver::new();
-        let policy = make_policy(policy);
+        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
         let test_detector = UniversalTestDetector::new();
-        let mut memo = CfMemo::new();
 
         let mut results: Vec<TopItem> = Vec::new();
         for (symbol, &node_idx) in &graph.symbol_to_node {
@@ -269,12 +257,7 @@ impl ContextEngine {
                 continue;
             }
 
-            let cf = solver.compute_cf_total_context_size_cached(
-                graph,
-                node_idx,
-                policy.as_ref(),
-                &mut memo,
-            );
+            let cf = solver.compute_cf_total(node_idx);
             results.push(TopItem {
                 symbol: symbol.clone(),
                 node_type: type_str.to_string(),
@@ -297,10 +280,8 @@ impl ContextEngine {
     ) -> Result<SearchResponse> {
         let data = self.inner.read().unwrap();
         let graph = data.graph.as_ref();
-        let solver = CfSolver::new();
-        let policy = make_policy(policy);
+        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
         let test_detector = UniversalTestDetector::new();
-        let mut memo = CfMemo::new();
 
         let pattern_lower = pattern.to_lowercase();
         let mut matches: Vec<(String, String, u32)> = Vec::new();
@@ -318,12 +299,7 @@ impl ContextEngine {
             }
 
             // Always compute CF for sorting (same as current CLI behavior).
-            let cf = solver.compute_cf_total_context_size_cached(
-                graph,
-                node_idx,
-                policy.as_ref(),
-                &mut memo,
-            );
+            let cf = solver.compute_cf_total(node_idx);
             matches.push((symbol.clone(), type_str, cf));
         }
 
@@ -357,9 +333,8 @@ impl ContextEngine {
             .get_node_by_symbol(&req.symbol)
             .ok_or_else(|| anyhow!("Symbol not found: {}", req.symbol))?;
 
-        let solver = CfSolver::new();
-        let policy = make_policy(req.policy);
-        let result = solver.compute_cf(graph, &[node_idx], policy.as_ref(), req.max_tokens);
+        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
+        let result = solver.compute_cf(&[node_idx], req.max_tokens);
 
         let mut layers: Vec<ContextLayer> = Vec::new();
 
@@ -641,10 +616,10 @@ fn build_node_maps(graph: &ContextGraph) -> (HashMap<NodeId, NodeIndex>, HashMap
     (node_id_to_index, node_id_to_symbol)
 }
 
-fn make_policy(kind: PolicyKind) -> Box<dyn crate::domain::policy::PruningPolicy> {
+fn pruning_params(kind: PolicyKind) -> PruningParams {
     match kind {
-        PolicyKind::Academic => Box::new(AcademicBaseline::default()),
-        PolicyKind::Strict => Box::new(StrictPolicy::default()),
+        PolicyKind::Academic => PruningParams::academic(0.5),
+        PolicyKind::Strict => PruningParams::strict(0.8),
     }
 }
 

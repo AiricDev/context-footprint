@@ -69,7 +69,7 @@ Four tests verify the complete flow:
    - Verifies `get_auth_port` has `ReturnType` edge to `AuthPort`
 
 3. **test_llmrelay_get_auth_port_is_abstract_factory**
-   - Verifies `AcademicBaseline` policy identifies `get_auth_port` as `Boundary`
+   - Verifies academic pruning params identify `get_auth_port` as `Boundary` (abstract factory)
 
 4. **test_llmrelay_caller_of_get_auth_port_cf_excludes_implementation**
    - Verifies callers don't traverse into concrete implementation (`JuhellmAuthAdapter`)

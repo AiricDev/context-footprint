@@ -24,7 +24,7 @@ cargo clippy -- -D warnings
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Unit Tests (65)                      │
-│  domain/, adapters/policy, doc_scorer, scip, ...       │
+│  domain/, adapters/doc_scorer, scip, ...               │
 │  Fast, isolated, test internal logic                   │
 └─────────────────────────────────────────────────────────┘
                            │
@@ -61,16 +61,9 @@ Located in `#[cfg(test)]` modules within source files. Can access private functi
 - Dynamic expansion: SharedStateWrite, CallIn edges
 - Policy impact on results
 
-**AcademicBaseline Policy** (`src/adapters/policy/academic.rs` - 9 tests)
-- Boundary detection: external nodes, well-documented functions, abstract types
-- Transparency: poorly documented functions, concrete types, variables
-- Special edge handling: SharedStateWrite (always transparent), CallIn (depends on signature)
-- Documentation threshold impact
-
-**StrictPolicy** (`src/adapters/policy/strict.rs` - 10 tests)
-- External nodes always boundary; abstract types boundary only when doc_score ≥ threshold (0.8)
-- Functions and variables always transparent (vs Academic)
-- SharedStateWrite and CallIn edge handling; doc_threshold configurable
+**Pruning / Policy** (`src/domain/policy.rs` - 2 tests)
+- PruningParams default and academic vs strict mode
+- Full pruning logic lives in domain; CfSolver takes PruningParams (doc_threshold + treat_typed_documented_function_as_boundary)
 
 ### Adapters Layer
 
@@ -83,11 +76,6 @@ Located in `#[cfg(test)]` modules within source files. Can access private functi
 - Single-line and multi-line span extraction
 - Boundary conditions and empty spans
 - Out-of-range handling
-
-**SimpleDocScorer** (`src/adapters/doc_scorer/simple.rs` - 3 tests)
-- No doc → 0.0
-- Empty doc → 0.0
-- Valid doc → 1.0
 
 **SCIP Adapter** (`src/adapters/scip/adapter.rs` - 3 tests)
 - Load nonexistent file returns error
@@ -298,7 +286,7 @@ cargo tarpaulin --out Html
 ```
 
 **Coverage target**: 85%+ (domain ≥85%, policies ≥80%, adapters ≥70%).  
-**Current coverage**: ~80% (tarpaulin with all tests; HeuristicDocScorer and StrictPolicy at or near 100%).
+**Current coverage**: ~80% (tarpaulin with all tests; HeuristicDocScorer at or near 100%).
 
 ## Current Test Statistics
 

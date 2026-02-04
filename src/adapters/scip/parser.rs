@@ -167,11 +167,15 @@ mod tests {
             Some("x".to_string())
         );
         assert_eq!(
-            parameter_name_from_symbol("scip-python python airelay 0.1.0 `app.adapters.billing.arq_billing_adapter`/ArqBillingAdapter#emit_usage().(self)"),
+            parameter_name_from_symbol(
+                "scip-python python airelay 0.1.0 `app.adapters.billing.arq_billing_adapter`/ArqBillingAdapter#emit_usage().(self)"
+            ),
             Some("self".to_string())
         );
         assert_eq!(
-            parameter_name_from_symbol("scip-python python airelay 0.1.0 `app.adapters.billing.arq_billing_adapter`/ArqBillingAdapter#emit_usage().(event)"),
+            parameter_name_from_symbol(
+                "scip-python python airelay 0.1.0 `app.adapters.billing.arq_billing_adapter`/ArqBillingAdapter#emit_usage().(event)"
+            ),
             Some("event".to_string())
         );
         assert_eq!(parameter_name_from_symbol("foo()."), None);

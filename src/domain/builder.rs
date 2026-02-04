@@ -8,8 +8,8 @@ use crate::domain::policy::{DocumentationScorer, NodeInfo, NodeType, SizeFunctio
 use crate::domain::ports::SourceReader;
 use crate::domain::semantic::{
     Mutability, ReferenceRole, SemanticData, SourceSpan as SemanticSpan, SymbolDefinition,
-    SymbolDetails, SymbolId, SymbolKind, VariableKind as SemanticVarKind, Visibility,
-    is_node_kind, is_type_kind, resolve_to_node_symbol, should_skip_kind,
+    SymbolDetails, SymbolId, SymbolKind, VariableKind as SemanticVarKind, Visibility, is_node_kind,
+    is_type_kind, resolve_to_node_symbol, should_skip_kind,
 };
 use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeKind, TypeRegistry};
 use anyhow::Result;
@@ -61,9 +61,11 @@ impl GraphBuilder {
                 let node_id = graph.graph.node_count() as u32;
                 let doc_texts = def.documentation.clone();
                 let span = convert_span(&def.span);
-                let context_size = self
-                    .size_function
-                    .compute(&source_code, &convert_span_for_size(&def.span), &doc_texts);
+                let context_size = self.size_function.compute(
+                    &source_code,
+                    &convert_span_for_size(&def.span),
+                    &doc_texts,
+                );
                 let doc_text = doc_texts.first().map(|s| s.as_str());
 
                 let language = document
@@ -113,8 +115,11 @@ impl GraphBuilder {
         for document in &semantic_data.documents {
             for reference in &document.references {
                 // Resolve source symbol to nearest node
-                let source_node_sym =
-                    resolve_to_node_symbol(&reference.enclosing_symbol, &node_symbols, &enclosing_map);
+                let source_node_sym = resolve_to_node_symbol(
+                    &reference.enclosing_symbol,
+                    &node_symbols,
+                    &enclosing_map,
+                );
 
                 // Resolve target symbol to nearest node or type
                 let target_node_sym =
@@ -225,9 +230,10 @@ impl GraphBuilder {
         // 2. CallIn edges: Callee -> Caller for underspecified functions
         let all_node_symbols: Vec<SymbolId> = graph.symbol_to_node.keys().cloned().collect();
         for callee_symbol in all_node_symbols {
-            if let (Some(callee_idx), Some(caller_indices)) =
-                (graph.get_node_by_symbol(&callee_symbol), callers.get(&callee_symbol))
-            {
+            if let (Some(callee_idx), Some(caller_indices)) = (
+                graph.get_node_by_symbol(&callee_symbol),
+                callers.get(&callee_symbol),
+            ) {
                 // Check if function is underspecified
                 let is_underspecified = self.is_function_underspecified(&callee_symbol, &graph);
 
@@ -261,16 +267,11 @@ impl GraphBuilder {
     }
 
     /// Check if a function is underspecified (incomplete signature)
-    fn is_function_underspecified(
-        &self,
-        symbol: &str,
-        graph: &ContextGraph,
-    ) -> bool {
+    fn is_function_underspecified(&self, symbol: &str, graph: &ContextGraph) -> bool {
         if let Some(node_idx) = graph.get_node_by_symbol(symbol) {
             if let Some(Node::Function(func)) = graph.graph.node_weight(node_idx) {
                 // Underspecified: missing return type or any parameter type
-                return func.return_type.is_none()
-                    || func.typed_param_count() < func.param_count();
+                return func.return_type.is_none() || func.typed_param_count() < func.param_count();
             }
         }
         false

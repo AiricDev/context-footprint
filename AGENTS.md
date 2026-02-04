@@ -34,7 +34,7 @@ Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
 
 **Constraints**:
 - Domain depends only on `std` + `petgraph`
-- Adapters implement domain traits (`PruningPolicy`, `SourceReader`, etc.)
+- Adapters implement domain traits (`SourceReader`, etc.)
 
 ---
 
@@ -56,20 +56,21 @@ Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
 
 ---
 
-### ADR-003: Policy Pattern for Pruning Logic
+### ADR-003: Pruning Logic Fully in Domain
 
-**Decision**: Pruning decisions abstracted behind `PruningPolicy` trait
+**Decision**: Pruning logic lives entirely in domain; no policy trait. Only `doc_threshold` and a mode flag are configurable.
 
 **Rationale**:
-- Research experiments require different boundary definitions
-- "Good abstraction" criteria varies by use case (CI vs audit vs metrics)
-- Core traversal algorithm (`CfSolver`) remains stable
+- "Good abstraction" rules (external → boundary, variable → transparent, abstract factory, sig+doc) are core algorithm
+- `doc_threshold` (with doc_scorer supplying `doc_score`) gives enough flexibility
+- CfSolver takes `PruningParams { doc_threshold, treat_typed_documented_function_as_boundary }`; engine maps `PolicyKind` → params
 
-**Current Policies**:
-- `AcademicBaseline`: Doc presence + type completeness (fast, heuristic)
-- `StrictPolicy`: Aggressive pruning (minimal context footprint)
+**Domain layer** (`src/domain/policy.rs`):
+- `PruningParams`: doc_threshold + treat_typed_documented_function_as_boundary (Academic vs Strict)
+- `evaluate(params, source, target, edge_kind, graph)`: full pruning algorithm
+- `is_abstract_factory()`: abstract-factory detection (always boundary)
 
-**Extension Point**: Implement `PruningPolicy::evaluate()` for custom strategies
+**No adapters** for policy; engine uses `PruningParams::academic(0.5)` or `PruningParams::strict(0.8)` from `PolicyKind`.
 
 ---
 
@@ -94,7 +95,8 @@ Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
 | `Node` | Code unit (Function/Variable/Type) with metrics | `src/domain/node.rs` |
 | `EdgeKind` | Dependency type (Call/Read/Write/ParamType/etc.) | `src/domain/edge.rs` |
 | `CfSolver` | BFS traversal with conditional pruning | `src/domain/solver.rs` |
-| `PruningPolicy` | Trait: decide if node is boundary or transparent | `src/domain/policy.rs` |
+| `PruningParams` | doc_threshold + treat_typed_documented_function_as_boundary; CfSolver parameter | `src/domain/policy.rs` |
+| `evaluate` | Core pruning algorithm (domain) | `src/domain/policy.rs` |
 | `SemanticData` | SCIP-agnostic semantic model | `src/domain/semantic.rs` |
 
 ### Critical Node Attributes
@@ -175,12 +177,12 @@ cargo clippy --all-targets -- -D warnings  # No warnings
 **Adapters grouped by concern** (not by implementation):
 ```
 src/adapters/
-  ├─ policy/          (not policy_implementations/)
-  │   ├─ academic.rs
-  │   └─ strict.rs
   ├─ scip/
-  └─ doc_scorer/
+  ├─ doc_scorer/
+  ├─ size_function/
+  └─ test_detector/
 ```
+(Pruning is domain-only; no policy adapters.)
 
 ### Testing Helpers
 
@@ -194,15 +196,14 @@ src/adapters/
 
 1. Update enums in `src/domain/node.rs` or `src/domain/edge.rs`
 2. Modify `src/domain/builder.rs` creation logic
-3. Update policies in `src/adapters/policy/*.rs`
+3. Update pruning logic in `src/domain/policy.rs` if needed
 4. Add tests
 
-### Adding New Pruning Policy
+### Changing Pruning Behaviour
 
-1. Create `src/adapters/policy/<name>.rs`
-2. Implement `PruningPolicy` trait + `Default`
-3. Add unit tests in same file
-4. Export in `src/adapters/policy/mod.rs`
+- **Domain**: Adjust `PruningParams` (doc_threshold, treat_typed_documented_function_as_boundary) or extend `evaluate()` in `src/domain/policy.rs`.
+- **Engine**: Map new `PolicyKind` variants to `PruningParams` in `pruning_params()` (e.g. `PolicyKind::Custom => PruningParams { doc_threshold: 0.7, ... }`).
+- **Doc quality**: Use a different `DocumentationScorer` adapter; `doc_score` on nodes drives boundary decisions via doc_threshold.
 
 ### Adding New Language Support
 

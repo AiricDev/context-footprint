@@ -222,6 +222,7 @@ fn test_llmrelay_get_auth_port_is_abstract_factory() {
         is_generator: false,
         visibility: context_footprint::domain::node::Visibility::Public,
         return_types: vec![],
+        is_interface_method: false,
     });
 
     let decision = evaluate(

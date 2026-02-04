@@ -61,11 +61,28 @@ impl GraphBuilder {
                 let node_id = graph.graph.node_count() as u32;
                 let doc_texts = def.documentation.clone();
                 let span = convert_span(&def.span);
-                let context_size = self.size_function.compute(
-                    &source_code,
-                    &convert_span_for_size(&def.span),
-                    &doc_texts,
-                );
+
+                // Check if this is an interface/abstract method
+                let is_interface_method =
+                    if matches!(def.kind, SymbolKind::Method | SymbolKind::Constructor) {
+                        is_enclosed_by_abstract_type(&def.enclosing_symbol, &semantic_data)
+                    } else {
+                        false
+                    };
+
+                // For interface methods, only compute context_size for signature (not implementation body)
+                let context_size = if is_interface_method {
+                    let signature_span = extract_signature_span(&def.span, &source_code);
+                    self.size_function
+                        .compute(&source_code, &signature_span, &doc_texts)
+                } else {
+                    self.size_function.compute(
+                        &source_code,
+                        &convert_span_for_size(&def.span),
+                        &doc_texts,
+                    )
+                };
+
                 let doc_text = doc_texts.first().map(|s| s.as_str());
 
                 let language = document
@@ -101,7 +118,7 @@ impl GraphBuilder {
                         document.relative_path.clone(),
                     );
 
-                    let node = create_node_from_definition(core, def)?;
+                    let node = create_node_from_definition(core, def, is_interface_method)?;
                     graph.add_node(def.symbol_id.clone(), node);
                 }
             }
@@ -134,37 +151,39 @@ impl GraphBuilder {
                     // Handle Call edges
                     if reference.role == ReferenceRole::Call
                         && let Some(target_sym) = &target_node_sym
-                            && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
-                                && source_idx != target_idx {
-                                    graph.add_edge(source_idx, target_idx, EdgeKind::Call);
-                                    callers
-                                        .entry(reference.target_symbol.clone())
-                                        .or_default()
-                                        .push(source_idx);
-                                }
+                        && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
+                        && source_idx != target_idx
+                    {
+                        graph.add_edge(source_idx, target_idx, EdgeKind::Call);
+                        callers
+                            .entry(reference.target_symbol.clone())
+                            .or_default()
+                            .push(source_idx);
+                    }
 
                     // Handle Read/Write edges for variable references
                     if matches!(reference.role, ReferenceRole::Read | ReferenceRole::Write) {
                         // Target might be a variable (node) or a type (in type_registry)
                         if let Some(target_sym) = &target_node_sym
                             && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
-                                && source_idx != target_idx {
-                                    let edge_kind = if reference.role == ReferenceRole::Write {
-                                        EdgeKind::Write
-                                    } else {
-                                        EdgeKind::Read
-                                    };
-                                    graph.add_edge(source_idx, target_idx, edge_kind);
+                            && source_idx != target_idx
+                        {
+                            let edge_kind = if reference.role == ReferenceRole::Write {
+                                EdgeKind::Write
+                            } else {
+                                EdgeKind::Read
+                            };
+                            graph.add_edge(source_idx, target_idx, edge_kind);
 
-                                    if reference.role == ReferenceRole::Write {
-                                        state_writers
-                                            .entry(reference.target_symbol.clone())
-                                            .or_default()
-                                            .push(source_idx);
-                                    } else {
-                                        readers.push((source_idx, reference.target_symbol.clone()));
-                                    }
-                                }
+                            if reference.role == ReferenceRole::Write {
+                                state_writers
+                                    .entry(reference.target_symbol.clone())
+                                    .or_default()
+                                    .push(source_idx);
+                            } else {
+                                readers.push((source_idx, reference.target_symbol.clone()));
+                            }
+                        }
                     }
                 }
             }
@@ -192,9 +211,10 @@ impl GraphBuilder {
                             if let Some(Node::Variable(var_node)) =
                                 graph.graph.node_weight_mut(node_idx)
                                 && let Some(ref type_id) = var_details.var_type
-                                    && type_registry.contains(type_id) {
-                                        var_node.var_type = Some(type_id.clone());
-                                    }
+                                && type_registry.contains(type_id)
+                            {
+                                var_node.var_type = Some(type_id.clone());
+                            }
                         }
                         _ => {}
                     }
@@ -208,14 +228,13 @@ impl GraphBuilder {
             // Check if variable is mutable
             let is_mutable = self.is_variable_mutable(&var_symbol, &semantic_data);
 
-            if is_mutable
-                && let Some(writers) = state_writers.get(&var_symbol) {
-                    for &writer_idx in writers {
-                        if reader_idx != writer_idx {
-                            graph.add_edge(reader_idx, writer_idx, EdgeKind::SharedStateWrite);
-                        }
+            if is_mutable && let Some(writers) = state_writers.get(&var_symbol) {
+                for &writer_idx in writers {
+                    if reader_idx != writer_idx {
+                        graph.add_edge(reader_idx, writer_idx, EdgeKind::SharedStateWrite);
                     }
                 }
+            }
         }
 
         // 2. CallIn edges: Callee -> Caller for underspecified functions
@@ -247,9 +266,10 @@ impl GraphBuilder {
         for doc in &semantic_data.documents {
             for def in &doc.definitions {
                 if def.symbol_id == symbol
-                    && let SymbolDetails::Variable(var_details) = &def.details {
-                        return matches!(var_details.mutability, Mutability::Mutable);
-                    }
+                    && let SymbolDetails::Variable(var_details) = &def.details
+                {
+                    return matches!(var_details.mutability, Mutability::Mutable);
+                }
             }
         }
         // Default to mutable for safety
@@ -259,22 +279,23 @@ impl GraphBuilder {
     /// Check if a function is underspecified (incomplete signature)
     fn is_function_underspecified(&self, symbol: &str, graph: &ContextGraph) -> bool {
         if let Some(node_idx) = graph.get_node_by_symbol(symbol)
-            && let Some(Node::Function(func)) = graph.graph.node_weight(node_idx) {
-                // Underspecified: missing return type or any parameter type
-                // Note: Some functions naturally return void (empty return_types), so we only check if return_types is explicitly known.
-                // However, without type inference, we might rely on at least one return type being present if it's not void.
-                // For now, we follow the previous logic: if we don't know the return type, it's underspecified.
-                // But in many languages void is implicit.
-                // Let's assume emptiness means "unknown" or "void", which is tricky.
-                // The previous logic `func.return_type.is_none()` meant "we don't have info".
-                // Now `func.return_types` being empty could mean "void" or "unknown".
-                // For safety in CallIn expansion, let's assume we need FULL signature.
-                // If the language is strongly typed, void is a type.
-                // If untyped, we might have empty return_types.
+            && let Some(Node::Function(func)) = graph.graph.node_weight(node_idx)
+        {
+            // Underspecified: missing return type or any parameter type
+            // Note: Some functions naturally return void (empty return_types), so we only check if return_types is explicitly known.
+            // However, without type inference, we might rely on at least one return type being present if it's not void.
+            // For now, we follow the previous logic: if we don't know the return type, it's underspecified.
+            // But in many languages void is implicit.
+            // Let's assume emptiness means "unknown" or "void", which is tricky.
+            // The previous logic `func.return_type.is_none()` meant "we don't have info".
+            // Now `func.return_types` being empty could mean "void" or "unknown".
+            // For safety in CallIn expansion, let's assume we need FULL signature.
+            // If the language is strongly typed, void is a type.
+            // If untyped, we might have empty return_types.
 
-                // Keep consistent with `is_signature_complete()`:
-                return !func.is_signature_complete();
-            }
+            // Keep consistent with `is_signature_complete()`:
+            return !func.is_signature_complete();
+        }
         false
     }
 }
@@ -330,7 +351,11 @@ fn extract_signature(def: &SymbolDefinition) -> Option<String> {
 }
 
 /// Create a graph node from symbol definition
-fn create_node_from_definition(core: NodeCore, def: &SymbolDefinition) -> Result<Node> {
+fn create_node_from_definition(
+    core: NodeCore,
+    def: &SymbolDefinition,
+    is_interface_method: bool,
+) -> Result<Node> {
     match &def.details {
         SymbolDetails::Function(func_details) => {
             let parameters: Vec<crate::domain::node::Parameter> = func_details
@@ -349,6 +374,7 @@ fn create_node_from_definition(core: NodeCore, def: &SymbolDefinition) -> Result
                 is_generator: func_details.modifiers.is_generator,
                 visibility: convert_visibility(&func_details.modifiers.visibility),
                 return_types: func_details.return_types.clone(),
+                is_interface_method,
             }))
         }
         SymbolDetails::Variable(var_details) => {
@@ -407,10 +433,8 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
         type_kind = match type_details.kind {
             crate::domain::semantic::TypeKind::Class => TypeKind::Class,
             crate::domain::semantic::TypeKind::Interface => TypeKind::Interface,
-            crate::domain::semantic::TypeKind::Protocol => TypeKind::Protocol,
             crate::domain::semantic::TypeKind::Struct => TypeKind::Struct,
             crate::domain::semantic::TypeKind::Enum => TypeKind::Enum,
-            crate::domain::semantic::TypeKind::Trait => TypeKind::Protocol,
             crate::domain::semantic::TypeKind::TypeAlias => TypeKind::TypeAlias,
             _ => TypeKind::Class,
         };
@@ -420,7 +444,7 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
         // Infer from symbol kind if details not available
         match def.kind {
             SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Protocol => {
-                type_kind = TypeKind::Protocol;
+                type_kind = TypeKind::Interface;
                 is_abstract = true;
             }
             SymbolKind::Struct => type_kind = TypeKind::Struct,
@@ -438,6 +462,75 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
         },
         context_size,
         doc_score,
+    }
+}
+
+/// Check if a symbol is enclosed by an abstract type (Interface/Protocol/Trait/Abstract Class)
+fn is_enclosed_by_abstract_type(
+    enclosing_symbol: &Option<SymbolId>,
+    semantic_data: &SemanticData,
+) -> bool {
+    let Some(parent_id) = enclosing_symbol else {
+        return false;
+    };
+
+    // Search in document definitions
+    for doc in &semantic_data.documents {
+        for def in &doc.definitions {
+            if &def.symbol_id == parent_id
+                && let SymbolDetails::Type(type_details) = &def.details
+            {
+                return type_details.is_abstract;
+            }
+        }
+    }
+
+    // Search in external_symbols
+    for def in &semantic_data.external_symbols {
+        if &def.symbol_id == parent_id
+            && let SymbolDetails::Type(type_details) = &def.details
+        {
+            return type_details.is_abstract;
+        }
+    }
+
+    false
+}
+
+/// Extract only the signature portion of a method span (first line to colon/semicolon)
+/// For interface methods, we only want to count the signature, not any implementation body
+fn extract_signature_span(span: &SemanticSpan, source_code: &str) -> SourceSpan {
+    let lines: Vec<&str> = source_code.lines().collect();
+    let start_line = span.start_line as usize;
+
+    if start_line >= lines.len() {
+        // Fallback: use original span
+        return SourceSpan {
+            start_line: span.start_line,
+            start_column: span.start_column,
+            end_line: span.end_line,
+            end_column: span.end_column,
+        };
+    }
+
+    // Find first colon or semicolon (Python/TypeScript signature end marker)
+    for (i, line) in lines.iter().enumerate().skip(start_line) {
+        if line.contains(':') || line.contains(';') {
+            return SourceSpan {
+                start_line: span.start_line,
+                start_column: span.start_column,
+                end_line: i as u32,
+                end_column: line.len() as u32,
+            };
+        }
+    }
+
+    // Fallback: use original span
+    SourceSpan {
+        start_line: span.start_line,
+        start_column: span.start_column,
+        end_line: span.end_line,
+        end_column: span.end_column,
     }
 }
 
@@ -488,5 +581,78 @@ mod tests {
         let info = create_type_info(&def, 100, 0.8);
         assert_eq!(info.definition.type_kind, TypeKind::Class);
         assert!(!info.definition.is_abstract);
+    }
+
+    #[test]
+    fn test_is_enclosed_by_abstract_type_with_protocol() {
+        use crate::domain::semantic::{DocumentSemantics, TypeDetails};
+
+        let protocol_id = "MyProtocol#";
+        let semantic_data = SemanticData {
+            project_root: "/test".to_string(),
+            documents: vec![DocumentSemantics {
+                relative_path: "test.py".to_string(),
+                language: "python".to_string(),
+                definitions: vec![SymbolDefinition {
+                    symbol_id: protocol_id.to_string(),
+                    kind: SymbolKind::Protocol,
+                    name: "MyProtocol".to_string(),
+                    display_name: "MyProtocol".to_string(),
+                    location: SourceLocation {
+                        file_path: "test.py".to_string(),
+                        line: 0,
+                        column: 0,
+                    },
+                    span: SemanticSpan {
+                        start_line: 0,
+                        start_column: 0,
+                        end_line: 5,
+                        end_column: 0,
+                    },
+                    enclosing_symbol: None,
+                    is_external: false,
+                    documentation: vec![],
+                    details: SymbolDetails::Type(TypeDetails {
+                        kind: crate::domain::semantic::TypeKind::Interface,
+                        is_abstract: true,
+                        is_final: false,
+                        visibility: Visibility::Public,
+                        type_params: vec![],
+                        implements: vec![],
+                        inherits: vec![],
+                        fields: vec![],
+                    }),
+                }],
+                references: vec![],
+            }],
+            external_symbols: vec![],
+        };
+
+        assert!(is_enclosed_by_abstract_type(
+            &Some(protocol_id.to_string()),
+            &semantic_data
+        ));
+        assert!(!is_enclosed_by_abstract_type(&None, &semantic_data));
+        assert!(!is_enclosed_by_abstract_type(
+            &Some("NonExistent#".to_string()),
+            &semantic_data
+        ));
+    }
+
+    #[test]
+    fn test_extract_signature_span_python() {
+        let source = "    def method(self, x: int) -> str:\n        return str(x)\n        pass\n";
+        let span = SemanticSpan {
+            start_line: 0,
+            start_column: 4,
+            end_line: 2,
+            end_column: 12,
+        };
+
+        let sig_span = extract_signature_span(&span, source);
+
+        // Should stop at the first line with colon
+        assert_eq!(sig_span.start_line, 0);
+        assert_eq!(sig_span.end_line, 0);
     }
 }

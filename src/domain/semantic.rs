@@ -15,7 +15,6 @@ use std::collections::HashMap;
 /// ============================================================================
 /// Top-level container
 /// ============================================================================
-
 /// Project-level semantic data
 #[derive(Debug, Clone, Serialize)]
 pub struct SemanticData {
@@ -48,7 +47,6 @@ pub struct DocumentSemantics {
 /// ============================================================================
 /// Symbol Definition (GraphBuilder decides which become Nodes vs Types)
 /// ============================================================================
-
 /// Symbol definition - Unified representation of all definable entities
 #[derive(Debug, Clone, Serialize)]
 pub struct SymbolDefinition {
@@ -167,7 +165,6 @@ pub struct FunctionDetails {
     pub modifiers: FunctionModifiers,
 }
 
-
 /// Parameter information
 #[derive(Default, Debug, Clone, Serialize)]
 pub struct ParameterInfo {
@@ -177,7 +174,6 @@ pub struct ParameterInfo {
     pub has_default: bool,
     pub is_variadic: bool,
 }
-
 
 /// Type parameter (generic) information
 #[derive(Debug, Clone, Serialize)]
@@ -287,15 +283,14 @@ impl Default for TypeDetails {
     }
 }
 
-/// Type kind
+/// Type kind - language-agnostic classification
+/// Maps language-specific concepts to unified types (e.g., Protocol/Trait -> Interface)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TypeKind {
     Class,
-    Interface,
-    Protocol,
+    Interface, // Java/Go/TypeScript Interface, Python/Swift Protocol, Rust Trait
     Struct,
     Enum,
-    Trait,
     TypeAlias,
     Union,        // Union types
     Intersection, // Intersection types

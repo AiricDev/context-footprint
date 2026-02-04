@@ -99,10 +99,8 @@ pub fn type_def(
     let kind = match type_kind {
         TypeKind::Class => SymbolKind::Class,
         TypeKind::Interface => SymbolKind::Interface,
-        TypeKind::Protocol => SymbolKind::Protocol,
         TypeKind::Struct => SymbolKind::Struct,
         TypeKind::Enum => SymbolKind::Enum,
-        TypeKind::Trait => SymbolKind::Trait,
         TypeKind::TypeAlias => SymbolKind::TypeAlias,
         _ => SymbolKind::Class,
     };

@@ -278,6 +278,7 @@ mod tests {
             is_generator: false,
             visibility: Visibility::Public,
             return_types: vec![],
+            is_interface_method: false,
         })
     }
 
@@ -309,6 +310,7 @@ mod tests {
             is_generator: false,
             visibility: Visibility::Public,
             return_types: vec!["int#".to_string()],
+            is_interface_method: false,
         })
     }
 

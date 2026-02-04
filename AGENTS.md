@@ -106,7 +106,10 @@ Every node has:
 - **`doc_score`**: Documentation quality (0.0-1.0, used by policies)
 - **`is_external`**: Third-party library flag (always acts as boundary)
 
-Type-specific attributes (e.g., `typed_param_count` for functions) drive policy decisions.
+Function-specific attributes:
+- **`is_interface_method`**: Flag indicating method is defined in Interface/Protocol/Trait/Abstract Class (only signature, no implementation)
+- **`typed_param_count`**: Number of parameters with type annotations (drives signature completeness check)
+- **`has_return_type`**: Whether return type is specified
 
 ### Dynamic Expansion Edges
 
@@ -116,7 +119,7 @@ Two special edge types added in Pass 3:
 
 ## 🧪 Testing Conventions
 
-**Strategy**: Test pyramid (55 tests: 44 unit, 9 integration, 2 E2E)
+**Strategy**: Test pyramid (140 tests total: 100 unit, 34 integration, 6 E2E)
 
 **Details**: See [`docs/testing.md`](docs/testing.md) for comprehensive guide.
 

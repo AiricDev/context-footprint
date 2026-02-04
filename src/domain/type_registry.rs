@@ -5,12 +5,11 @@
 
 use std::collections::HashMap;
 
-/// Type kind
+/// Type kind - language-agnostic classification for abstract types
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
     Class,
-    Interface, // Java, Go, TypeScript
-    Protocol,  // Python, Swift
+    Interface, // Java/Go/TypeScript Interface, Python/Swift Protocol, Rust Trait
     Struct,
     Enum,
     TypeAlias,    // type UserId = string

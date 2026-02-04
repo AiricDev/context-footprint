@@ -75,6 +75,11 @@ pub struct FunctionNode {
     // The actual type information is in TypeRegistry
     pub parameters: Vec<Parameter>,
     pub return_types: Vec<String>, // TypeId (symbol) of return types
+
+    // Interface/abstract method flag
+    // True if this method is defined in an Interface/Protocol/Trait/Abstract Class
+    // Such methods have no implementation body, only signature + documentation
+    pub is_interface_method: bool,
 }
 
 impl FunctionNode {

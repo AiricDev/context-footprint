@@ -73,18 +73,22 @@ pub fn is_abstract_factory(
     // Check if ANY return type is an abstract factory type
     for return_type_id in &f.return_types {
         if let Some(type_info) = type_registry.get(return_type_id)
-            && type_info.definition.is_abstract && type_info.doc_score >= doc_threshold {
-                return true;
-            }
+            && type_info.definition.is_abstract
+            && type_info.doc_score >= doc_threshold
+        {
+            return true;
+        }
     }
     false
 }
 
 fn call_in_source_decision(params: &PruningParams, source: &Node) -> PruningDecision {
     if let Node::Function(f) = source
-        && f.is_signature_complete() && f.core.doc_score >= params.doc_threshold {
-            return PruningDecision::Boundary;
-        }
+        && f.is_signature_complete()
+        && f.core.doc_score >= params.doc_threshold
+    {
+        return PruningDecision::Boundary;
+    }
     PruningDecision::Transparent
 }
 
@@ -125,6 +129,15 @@ pub fn evaluate(
             }
         }
         Node::Function(f) => {
+            // Interface/abstract methods: boundary if signature complete and documented
+            if f.is_interface_method {
+                if f.is_signature_complete() && f.core.doc_score >= params.doc_threshold {
+                    return PruningDecision::Boundary;
+                }
+                // Undocumented interface method is a leaky abstraction
+                return PruningDecision::Transparent;
+            }
+
             if is_abstract_factory(target, &graph.type_registry, params.doc_threshold) {
                 return PruningDecision::Boundary;
             }
@@ -198,6 +211,7 @@ mod tests {
             is_generator: false,
             visibility: Visibility::Public,
             return_types: vec!["int#".to_string()],
+            is_interface_method: false,
         })
     }
 

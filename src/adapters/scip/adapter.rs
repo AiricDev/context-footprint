@@ -363,15 +363,16 @@ fn extract_variable_details(sym_info: &scip::SymbolInformation) -> VariableDetai
 /// Extract type details
 fn extract_type_details(sym_info: &scip::SymbolInformation) -> TypeDetails {
     // SCIP kind values: Interface = 21, Enum = 11, Struct = 49, Trait = 53
+    // Trait/Protocol are unified as Interface in the domain model
     let kind = match sym_info.kind {
-        21 => TypeKind::Interface,
+        21 => TypeKind::Interface, // SCIP Interface
+        53 => TypeKind::Interface, // SCIP Trait -> unified as Interface
         11 => TypeKind::Enum,
         49 => TypeKind::Struct,
-        53 => TypeKind::Trait,
         _ => TypeKind::Class,
     };
 
-    let is_abstract = kind == TypeKind::Interface || kind == TypeKind::Trait;
+    let is_abstract = kind == TypeKind::Interface;
 
     let mut details = TypeDetails {
         kind,
@@ -405,30 +406,31 @@ fn parse_signature(sig: &str) -> (Vec<ParameterInfo>, Option<SymbolId>) {
 
     // Simple heuristic parsing - look for patterns like "(a: Type, b: Type) -> ReturnType"
     if let Some(params_start) = sig.find('(')
-        && let Some(params_end) = sig.find(')') {
-            let params_str = &sig[params_start + 1..params_end];
-            for param in params_str.split(',') {
-                let param = param.trim();
-                if param.is_empty() {
-                    continue;
-                }
-
-                let (name, param_type) = if let Some(colon_pos) = param.find(':') {
-                    let name = param[..colon_pos].trim().to_string();
-                    let type_str = param[colon_pos + 1..].trim().to_string();
-                    (name, Some(type_str))
-                } else {
-                    (param.to_string(), None)
-                };
-
-                params.push(ParameterInfo {
-                    name,
-                    param_type,
-                    has_default: param.contains('='),
-                    is_variadic: param.contains("..."),
-                });
+        && let Some(params_end) = sig.find(')')
+    {
+        let params_str = &sig[params_start + 1..params_end];
+        for param in params_str.split(',') {
+            let param = param.trim();
+            if param.is_empty() {
+                continue;
             }
+
+            let (name, param_type) = if let Some(colon_pos) = param.find(':') {
+                let name = param[..colon_pos].trim().to_string();
+                let type_str = param[colon_pos + 1..].trim().to_string();
+                (name, Some(type_str))
+            } else {
+                (param.to_string(), None)
+            };
+
+            params.push(ParameterInfo {
+                name,
+                param_type,
+                has_default: param.contains('='),
+                is_variadic: param.contains("..."),
+            });
         }
+    }
 
     // Look for return type arrow
     if let Some(arrow_pos) = sig.find("->") {

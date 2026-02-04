@@ -1,196 +1,379 @@
-//! SemanticData - Intermediate representation of code semantics
+//! SemanticData - Language-agnostic semantic model for CF graph construction
 //!
-//! Responsibility: Provide language-agnostic semantic information as a contract
-//! between Adapters and GraphBuilder.
+//! # Design Principles
 //!
-//! Principles:
-//! 1. Only describe "what is", not "how to build the graph"
-//! 2. Preserve raw reference information, let GraphBuilder infer Edge types
-//! 3. Explicitly express core concepts that are common across languages
-//!    (mutability, visibility, etc.)
+//! 1. **Graph-centric**: Designed from CF algorithm needs, not indexer format (SCIP/Pyright)
+//! 2. **Language-agnostic**: Abstracts away language differences - builder never checks language
+//! 3. **Adapter contract**: Each field has precise semantics that adapter MUST implement correctly
+//! 4. **Three symbol types**: Function, Variable, Type (no locals, no standalone parameters)
+//! 5. **Declared types only**: No type inference required from adapter (DI abstraction preserved)
+//!
+//! # Symbol Organization
+//!
+//! - **Functions**: Standalone functions, methods, constructors
+//!   - Methods use `enclosing_symbol` to point to their Type (static relationship)
+//! - **Variables**: Global variables and class/struct fields only
+//!   - Fields use `scope=Field` and `enclosing_symbol` to point to their Type
+//!   - Local variables are NOT extracted (filtered at adapter layer)
+//! - **Types**: Classes, interfaces, structs, enums, etc.
+//!   - Methods are separate Function definitions (not embedded in Type)
+//!   - Fields are referenced in `TypeDetails.fields` and have corresponding Variable definitions
+//!
+//! # References and Access Patterns
+//!
+//! References capture usage relationships with context:
+//! - **Direct access**: `foo()`, `global_var` → `receiver=None`
+//! - **Instance access**: `self.method()`, `obj.field` → `receiver=Some("self" or "obj")`
+//! - **Static access**: `Class.static_method()` → depends on language representation
 
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
 /// ============================================================================
-/// Top-level container
+/// Core Types
 /// ============================================================================
-/// Project-level semantic data
-#[derive(Debug, Clone, Serialize)]
+
+/// Symbol identifier - Globally unique within project
+///
+/// **Adapter Contract**:
+/// - Must be globally unique across all files
+/// - Should be deterministic (same symbol → same ID across runs)
+/// - Format is adapter-specific but must support equality comparison
+/// - Recommended: hierarchical format like "pkg.module.Class.method" or SCIP format
+/// - For builtin types (int, str, etc.): use language-standard names
+pub type SymbolId = String;
+
+/// Type reference - Points to a Type symbol or builtin type
+///
+/// **Adapter Contract**:
+/// - For user-defined types: use the SymbolId of the Type definition
+/// - For builtin types (int, str, List, etc.): use standardized names
+/// - For generic types: include type parameters (e.g., "List[int]" or "List<T>")
+/// - For union types: adapter can use single ref or create synthetic union type
+pub type TypeRef = SymbolId;
+
+/// ============================================================================
+/// Top-level Container
+/// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticData {
-    /// Project root directory
+    /// Project root directory (absolute path)
+    ///
+    /// **Adapter Contract**:
+    /// - Must be an absolute path to the project root
+    /// - All `DocumentSemantics.relative_path` are relative to this root
     pub project_root: String,
 
-    /// Semantic information for all documents (files)
+    /// Semantic information for all source files in the project
+    ///
+    /// **Adapter Contract**:
+    /// - Include all project source files (exclude test files if configured)
+    /// - Each document contains definitions and references for that file
+    /// - No duplicate files
     pub documents: Vec<DocumentSemantics>,
 
-    /// External symbols (stdlib/third-party)
+    /// External symbols (stdlib/third-party dependencies)
+    ///
+    /// **Adapter Contract**:
+    /// - Include ONLY symbols that are actually referenced by project code
+    /// - For each external symbol, provide sufficient information for CF boundary decisions:
+    ///   * Functions: signature completeness (parameters with types, return type)
+    ///   * Variables: type and mutability
+    ///   * Types: is_abstract flag for DI/interface detection
+    /// - `is_external=true` for all symbols here
+    /// - For stdlib types (int, str, List, etc.): provide canonical definitions
     pub external_symbols: Vec<SymbolDefinition>,
 }
 
-/// Semantic information for a single file
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentSemantics {
     /// Relative path from project root
+    ///
+    /// **Adapter Contract**:
+    /// - Use forward slashes (/) even on Windows
+    /// - Must be relative to `SemanticData.project_root`
+    /// - Should match actual file path for source code reading
     pub relative_path: String,
 
-    /// Programming language (e.g., "python", "rust", "java")
+    /// Programming language identifier
+    ///
+    /// **Adapter Contract**:
+    /// - Use lowercase names: "python", "typescript", "rust", "java", etc.
+    /// - Used by DocumentationScorer for language-specific heuristics
+    /// - Must be consistent across all documents of the same language
     pub language: String,
 
     /// Symbol definitions in this file
+    ///
+    /// **Adapter Contract**:
+    /// - Include: Functions, Methods, Constructors, Global Variables, Fields, Types
+    /// - Exclude: Local variables, parameters (embedded in FunctionDetails)
+    /// - For methods: set `enclosing_symbol` to the Type symbol
+    /// - For fields: set `scope=Field` and `enclosing_symbol` to the Type symbol
+    /// - Ensure `span` covers the entire definition for accurate context_size
     pub definitions: Vec<SymbolDefinition>,
 
-    /// Symbol references in this file
+    /// Symbol references (for edge construction)
+    ///
+    /// **Adapter Contract**:
+    /// - Include all function calls, variable reads/writes, type annotations
+    /// - Set `receiver` for member access (self.field, obj.method)
+    /// - For ambiguous cases (dynamic dispatch), use declared type of receiver
+    /// - TypeAnnotation references don't create graph edges but populate type info
     pub references: Vec<SymbolReference>,
 }
 
 /// ============================================================================
-/// Symbol Definition (GraphBuilder decides which become Nodes vs Types)
+/// Symbol Definition
 /// ============================================================================
-/// Symbol definition - Unified representation of all definable entities
-#[derive(Debug, Clone, Serialize)]
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolDefinition {
-    /// Globally unique identifier (Adapter generates, format flexible)
+    /// Globally unique identifier
+    ///
+    /// **Adapter Contract**: See `SymbolId` documentation
     pub symbol_id: SymbolId,
 
-    /// Symbol kind classification
+    /// Symbol classification (Function, Variable, or Type)
+    ///
+    /// **Adapter Contract**:
+    /// - Choose based on primary purpose in code graph:
+    ///   * Function: executable units (functions, methods, constructors)
+    ///   * Variable: data storage (global vars, class fields)
+    ///   * Type: type definitions (classes, interfaces, structs, enums)
     pub kind: SymbolKind,
 
-    /// Short name (without path)
+    /// Short name (without module/package path)
+    ///
+    /// **Adapter Contract**:
+    /// - For methods: just method name (not "Class.method")
+    /// - For operators: use canonical name (e.g., "__add__", "operator+")
+    /// - Should match the identifier in source code
     pub name: String,
 
-    /// Display name (may include signature, e.g., "foo(x: int) -> str")
+    /// Display name (may include signature or decorations)
+    ///
+    /// **Adapter Contract**:
+    /// - For functions: may include signature (e.g., "foo(x: int) -> str")
+    /// - For variables: usually same as `name`
+    /// - Used for human-readable output, not semantic matching
     pub display_name: String,
 
-    /// Definition location
+    /// Definition location (file + line/column)
+    ///
+    /// **Adapter Contract**:
+    /// - Points to the start of the symbol definition
+    /// - `file_path` must match `DocumentSemantics.relative_path`
+    /// - Line/column are 0-indexed
     pub location: SourceLocation,
 
-    /// Source span for context size calculation
-    /// For functions, should include the entire function body
+    /// Source span (for context_size calculation)
+    ///
+    /// **Adapter Contract** (CRITICAL for accurate CF):
+    /// - **Functions**: ENTIRE function body including signature
+    ///   * For interface/abstract methods: signature only (no body)
+    ///   * Include decorators that affect behavior
+    /// - **Variables**: declaration line (including initializer if present)
+    /// - **Types**: full type definition including:
+    ///   * Class header (class Name(Base):)
+    ///   * All field declarations
+    ///   * EXCLUDE method bodies (methods are separate definitions)
+    /// - Lines are 0-indexed
+    /// - end_line/end_column are exclusive (span does NOT include that position)
     pub span: SourceSpan,
 
-    /// Enclosing scope (parent symbol)
+    /// Enclosing scope symbol
+    ///
+    /// **Adapter Contract**:
+    /// - **Methods**: MUST point to the Type symbol that defines this method
+    /// - **Fields**: MUST point to the Type symbol that owns this field
+    /// - **Nested functions**: point to the enclosing Function (if language supports)
+    /// - **Top-level symbols**: None
+    /// - **Static relationship only**: reflects where symbol is defined, not how it's accessed
     pub enclosing_symbol: Option<SymbolId>,
 
     /// Whether this is an external dependency
+    ///
+    /// **Adapter Contract**:
+    /// - `true`: stdlib or third-party library symbol
+    /// - `false`: project code
+    /// - External symbols act as CF boundaries (traversal stops but includes them)
+    /// - Affects CF calculation: external dependencies should be well-documented
     pub is_external: bool,
 
     /// Documentation strings (for doc_score calculation)
+    ///
+    /// **Adapter Contract**:
+    /// - Extract all documentation comments/docstrings
+    /// - Order: most relevant first (e.g., primary docstring before inline comments)
+    /// - Include full text (DocumentationScorer will parse)
+    /// - For functions: include parameter descriptions, return descriptions
+    /// - Empty vec if no documentation found
     pub documentation: Vec<String>,
 
-    /// Symbol-specific details (selected based on kind)
+    /// Symbol-specific details (selected based on `kind`)
+    ///
+    /// **Adapter Contract**:
+    /// - Must match `kind`: Function→Function, Variable→Variable, Type→Type
     pub details: SymbolDetails,
 }
 
-pub type SymbolId = String;
-
-/// Symbol kind - Language-agnostic classification
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Symbol kind - Three types only
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolKind {
-    // Types that may become Graph Nodes
+    /// Functions, methods, constructors
+    /// Methods have enclosing_symbol pointing to their Type
     Function,
-    Method,
-    Constructor,
 
-    Variable, // Global/module-level variables
-    Field,    // Class/struct fields
-    Constant,
+    /// Global variables and class/struct fields
+    /// Fields have enclosing_symbol pointing to their Type
+    /// Local variables are NOT extracted
+    Variable,
 
-    // Types that may become TypeRegistry entries
-    Class,
-    Interface,
-    Struct,
-    Enum,
-    Trait,
-    Protocol,
-    TypeAlias,
-
-    // Types that usually don't create Nodes (but info preserved for GraphBuilder)
-    Parameter,     // Function parameters
-    TypeParameter, // Generic parameters T
-
-    // Others
-    Module,
-    Namespace,
-    Package,
-
-    Unknown,
+    /// Type definitions: Class, Interface, Struct, Enum, etc.
+    /// Methods are separate Function symbols, not embedded in Type
+    Type,
 }
 
 /// Symbol-specific details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SymbolDetails {
     Function(FunctionDetails),
     Variable(VariableDetails),
     Type(TypeDetails),
-    None,
 }
 
-impl SymbolDetails {
-    pub fn as_function(&self) -> Option<&FunctionDetails> {
-        match self {
-            SymbolDetails::Function(f) => Some(f),
-            _ => None,
-        }
-    }
+/// ============================================================================
+/// Function Details
+/// ============================================================================
 
-    pub fn as_variable(&self) -> Option<&VariableDetails> {
-        match self {
-            SymbolDetails::Variable(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    pub fn as_type(&self) -> Option<&TypeDetails> {
-        match self {
-            SymbolDetails::Type(t) => Some(t),
-            _ => None,
-        }
-    }
-}
-
-/// Function details
-#[derive(Default, Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDetails {
     /// Parameters (in definition order)
-    pub parameters: Vec<ParameterInfo>,
+    ///
+    /// **Adapter Contract**:
+    /// - Include all parameters except `self`/`this`/`cls` (language-specific receiver)
+    /// - Maintain declaration order
+    /// - For each parameter, extract declared type from annotation if present
+    /// - Set `param_type=None` if no type annotation (untyped parameter)
+    /// - **NO type inference required**: only extract explicit annotations
+    pub parameters: Vec<Parameter>,
 
-    /// Return types (symbol IDs of type definitions)
-    pub return_types: Vec<SymbolId>,
+    /// Return type references (declared types only)
+    ///
+    /// **Adapter Contract**:
+    /// - Extract from explicit return type annotation
+    /// - Empty vec if:
+    ///   * No return type annotation (untyped function)
+    ///   * Function returns void/None (language-dependent: some have explicit void type)
+    /// - For union returns (`int | str`, `Result<T, E>`):
+    ///   * Option 1: Multiple entries (e.g., ["int", "str"])
+    ///   * Option 2: Single synthetic union type (e.g., ["int|str"])
+    ///   * Adapter choice, but must be consistent
+    /// - **NO type inference**: only explicit annotations
+    pub return_types: Vec<TypeRef>,
 
     /// Generic type parameters
-    pub type_params: Vec<TypeParamInfo>,
+    ///
+    /// **Adapter Contract**:
+    /// - Extract generic parameters (e.g., `<T>`, `[T]`, `::<T>`)
+    /// - Include bounds/constraints (e.g., `T: Display`, `T extends Base`)
+    /// - For unbounded generics, `bounds` is empty vec
+    pub type_params: Vec<TypeParam>,
 
-    /// Function modifiers
+    /// Function modifiers and attributes
     pub modifiers: FunctionModifiers,
 }
 
-/// Parameter information
-#[derive(Default, Debug, Clone, Serialize)]
-pub struct ParameterInfo {
+impl Default for FunctionDetails {
+    fn default() -> Self {
+        Self {
+            parameters: Vec::new(),
+            return_types: Vec::new(),
+            type_params: Vec::new(),
+            modifiers: FunctionModifiers::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Parameter {
     pub name: String,
-    /// Parameter type (symbol ID of type definition)
-    pub param_type: Option<SymbolId>,
+
+    /// Declared parameter type (from annotation)
+    ///
+    /// **Adapter Contract**:
+    /// - Extract from explicit type annotation only
+    /// - `None` if no annotation (untyped parameter)
+    /// - **NO type inference from usage**: DI abstraction is preserved
+    ///   * Example: `def f(reader: Reader)` → param_type = "Reader"
+    ///   * Even if all callers pass `FileReader`, keep type as "Reader"
+    ///   * This preserves interface abstraction in CF calculation
+    /// - For generic types: use instantiated type if available (e.g., "List[int]")
+    pub param_type: Option<TypeRef>,
+
+    /// Whether parameter has a default value
+    ///
+    /// **Adapter Contract**:
+    /// - `true` if parameter has default value in signature
+    /// - Used for API boundary detection (default params are part of public API)
     pub has_default: bool,
+
+    /// Whether this is variadic (*args, ...rest, etc.)
+    ///
+    /// **Adapter Contract**:
+    /// - `true` for variadic parameters (Python *args, TS ...rest, etc.)
+    /// - For variadic params, `param_type` is the element type (if annotated)
     pub is_variadic: bool,
 }
 
-/// Type parameter (generic) information
-#[derive(Debug, Clone, Serialize)]
-pub struct TypeParamInfo {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeParam {
     pub name: String,
-    /// Constraints (e.g., T: Clone)
-    pub bounds: Vec<SymbolId>,
+
+    /// Type constraints (e.g., `T extends Base` → bounds = [Base])
+    pub bounds: Vec<TypeRef>,
 }
 
-/// Function modifiers
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionModifiers {
+    /// Whether function is async/awaitable
+    ///
+    /// **Adapter Contract**:
+    /// - `true` for: async/await functions, coroutines, Promises, Futures
+    /// - Affects: behavioral complexity (async functions are more complex)
     pub is_async: bool,
+
+    /// Whether function is a generator/iterator
+    ///
+    /// **Adapter Contract**:
+    /// - `true` for: Python generators (yield), JS generators, Rust iterators
+    /// - Affects: behavioral complexity
     pub is_generator: bool,
+
+    /// Whether function is static/class method
+    ///
+    /// **Adapter Contract**:
+    /// - `true` for: static methods, class methods (not instance methods)
+    /// - For static methods, `enclosing_symbol` still points to Type
+    /// - Affects: access pattern analysis
     pub is_static: bool,
+
+    /// Whether this is an abstract/interface method (signature only, no implementation)
+    ///
+    /// **Adapter Contract** (CRITICAL for CF boundary detection):
+    /// - `true` if:
+    ///   * Method in Interface/Protocol/Trait/Abstract Class with no body
+    ///   * Python: `@abstractmethod` or Protocol method
+    ///   * Java: interface method or abstract method
+    ///   * Rust: trait method without default impl
+    ///   * TypeScript: interface method
+    /// - `false` if method has implementation body
+    /// - When `true`, `span` should cover signature only (not body)
+    /// - Abstract methods with good docs are CF boundaries
     pub is_abstract: bool,
-    pub is_constructor: bool,
+
     pub visibility: Visibility,
 }
 
@@ -201,23 +384,54 @@ impl Default for FunctionModifiers {
             is_generator: false,
             is_static: false,
             is_abstract: false,
-            is_constructor: false,
-            visibility: Visibility::Unspecified,
+            visibility: Visibility::Public,
         }
     }
 }
 
-/// Variable details
-#[derive(Debug, Clone, Serialize)]
-pub struct VariableDetails {
-    /// Variable type (symbol ID of type definition)
-    pub var_type: Option<SymbolId>,
+/// ============================================================================
+/// Variable Details
+/// ============================================================================
 
-    /// Mutability (key attribute! GraphBuilder uses for Expansion judgment)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VariableDetails {
+    /// Declared variable type
+    ///
+    /// **Adapter Contract**:
+    /// - Extract from explicit type annotation
+    /// - `None` if no annotation (untyped variable)
+    /// - For fields: extract from class-level type annotation
+    /// - **NO type inference from assignment**: keep declared type
+    ///   * Example: `x: Base = Derived()` → var_type = "Base" (not "Derived")
+    ///   * Preserves abstraction in DI scenarios
+    pub var_type: Option<TypeRef>,
+
+    /// Mutability (CRITICAL for SharedStateWrite edge detection)
+    ///
+    /// **Adapter Contract**:
+    /// - **Const**: compile-time constant, immutable value
+    ///   * Python: typing.Final at module level with literal value
+    ///   * Java: `static final`
+    ///   * Rust: `const`
+    /// - **Immutable**: runtime immutable, cannot be reassigned
+    ///   * Java: `final`
+    ///   * Rust: `let` (non-mut)
+    ///   * Python: typing.Final (runtime)
+    ///   * TypeScript: `readonly`
+    /// - **Mutable**: can be reassigned or mutated
+    ///   * Default if no immutability marker
+    ///   * Rust: `let mut`, `static mut`
+    /// - **When in doubt, use Mutable** (conservative for CF)
+    /// - Only Mutable variables trigger SharedStateWrite expansion
     pub mutability: Mutability,
 
-    /// Variable kind
-    pub variable_kind: VariableKind,
+    /// Variable scope (Global or Field only)
+    ///
+    /// **Adapter Contract**:
+    /// - **Global**: module-level, package-level, or namespace-level variable
+    /// - **Field**: class/struct field (must have `enclosing_symbol` pointing to Type)
+    /// - **Local variables MUST NOT be extracted** (filtered at adapter)
+    pub scope: VariableScope,
 
     pub visibility: Visibility,
 }
@@ -227,45 +441,106 @@ impl Default for VariableDetails {
         Self {
             var_type: None,
             mutability: Mutability::Mutable,
-            variable_kind: VariableKind::Global,
-            visibility: Visibility::Unspecified,
+            scope: VariableScope::Global,
+            visibility: Visibility::Public,
         }
     }
 }
 
-/// Mutability - Used by GraphBuilder to determine SharedStateWrite Expansion
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mutability {
-    Const,     // Compile-time constant
-    Immutable, // Runtime immutable (e.g., Java final, Rust let)
-    Mutable,   // Mutable (triggers SharedStateWrite Expansion)
+    /// Compile-time constant (e.g., `const`, `final static`)
+    Const,
+
+    /// Runtime immutable (e.g., `final` in Java, `let` in Rust)
+    Immutable,
+
+    /// Mutable (triggers SharedStateWrite expansion in CF)
+    Mutable,
 }
 
-/// Variable kind
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum VariableKind {
-    Global,     // Module-level global variables
-    ClassField, // Class/struct fields
-    Local,      // Local variables (GraphBuilder may ignore)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VariableScope {
+    /// Module/global scope variable
+    Global,
+
+    /// Class/struct field
+    /// Must have enclosing_symbol pointing to Type
+    Field,
 }
 
-/// Type details
-#[derive(Debug, Clone, Serialize)]
+/// ============================================================================
+/// Type Details
+/// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeDetails {
+    /// Type classification
+    ///
+    /// **Adapter Contract**:
+    /// - Map language-specific concepts:
+    ///   * Interface: Java interface, Python Protocol, TS interface, Rust trait
+    ///   * Class: Python class, Java class, TS class, Rust struct (with impl)
+    ///   * Struct: Rust struct, C struct
+    ///   * Enum: Rust enum, Java enum, TS enum
+    /// - Choose based on primary purpose
     pub kind: TypeKind,
+
+    /// Whether this is an abstract type (CRITICAL for CF boundary detection)
+    ///
+    /// **Adapter Contract**:
+    /// - `true` if:
+    ///   * Python: Protocol, ABC with @abstractmethod
+    ///   * Java: interface, abstract class
+    ///   * Rust: trait
+    ///   * TypeScript: interface, abstract class
+    /// - `false` if concrete class/struct with full implementation
+    /// - Used for:
+    ///   1. Determining if methods should have `is_abstract=true`
+    ///   2. Abstract factory detection (function returning abstract type is boundary)
+    ///   3. DI interface detection
     pub is_abstract: bool,
+
+    /// Whether type is final/sealed (cannot be inherited)
+    ///
+    /// **Adapter Contract**:
+    /// - `true` for: Java `final` class, Python `@final`, Rust non-pub struct
+    /// - Affects: boundary decisions (final types are complete, no subclass expansion)
     pub is_final: bool,
+
     pub visibility: Visibility,
 
-    /// Type parameters (generics)
-    pub type_params: Vec<TypeParamInfo>,
+    /// Generic type parameters
+    ///
+    /// **Adapter Contract**:
+    /// - Extract type parameters from type definition
+    /// - Example: `class List<T>` → type_params = [TypeParam { name: "T", bounds: [] }]
+    pub type_params: Vec<TypeParam>,
 
-    /// Member fields
-    pub fields: Vec<FieldInfo>,
+    /// Fields (data members)
+    ///
+    /// **Adapter Contract**:
+    /// - Include all class/struct fields (instance and static)
+    /// - Each field here should have a corresponding Variable definition:
+    ///   * Variable with `kind=Variable`, `scope=Field`, `enclosing_symbol=this_type`
+    ///   * Field.symbol_id = Variable.symbol_id
+    /// - **Methods are NOT fields**: they are separate Function definitions
+    /// - Extract field type from annotation if present
+    pub fields: Vec<Field>,
 
-    /// Implementation/inheritance relationships (symbol IDs of other types)
-    pub implements: Vec<SymbolId>,
-    pub inherits: Vec<SymbolId>,
+    /// Type hierarchy - inheritance relationships
+    ///
+    /// **Adapter Contract**:
+    /// - **inherits**: base classes, superclasses
+    ///   * Python: `class A(B, C)` → inherits = ["B", "C"]
+    ///   * Java: `class A extends B` → inherits = ["B"]
+    /// - **implements**: interfaces, protocols, traits
+    ///   * Python: use Protocol in inherits (no separate implements)
+    ///   * Java: `class A implements I1, I2` → implements = ["I1", "I2"]
+    ///   * Rust: trait impls are tracked separately (not in Type definition)
+    /// - References to Type symbols (not builtin types typically)
+    pub inherits: Vec<TypeRef>,
+    pub implements: Vec<TypeRef>,
 }
 
 impl Default for TypeDetails {
@@ -274,216 +549,352 @@ impl Default for TypeDetails {
             kind: TypeKind::Class,
             is_abstract: false,
             is_final: false,
-            visibility: Visibility::Unspecified,
+            visibility: Visibility::Public,
             type_params: Vec::new(),
             fields: Vec::new(),
-            implements: Vec::new(),
             inherits: Vec::new(),
+            implements: Vec::new(),
         }
     }
 }
 
-/// Type kind - language-agnostic classification
-/// Maps language-specific concepts to unified types (e.g., Protocol/Trait -> Interface)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeKind {
     Class,
-    Interface, // Java/Go/TypeScript Interface, Python/Swift Protocol, Rust Trait
+    Interface, // Java Interface, Python Protocol, TypeScript Interface, Rust Trait
     Struct,
     Enum,
     TypeAlias,
-    Union,        // Union types
-    Intersection, // Intersection types
+    Union,        // Union types (e.g., `int | str`)
+    Intersection, // Intersection types (e.g., `A & B`)
 }
 
-/// Field information (for class/struct fields)
-#[derive(Debug, Clone, Serialize)]
-pub struct FieldInfo {
+/// Field information
+/// Note: Fields also exist as Variable definitions (with scope=Field)
+/// This struct provides type-level view of the field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Field {
     pub name: String,
-    pub field_type: Option<SymbolId>,
+
+    /// Field type reference
+    pub field_type: Option<TypeRef>,
+
     pub mutability: Mutability,
     pub visibility: Visibility,
+
+    /// Symbol ID of the corresponding Variable definition
+    /// Allows linking field declaration to its Variable node
+    pub symbol_id: SymbolId,
 }
 
-/// Visibility
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// ============================================================================
+/// Common Attributes
+/// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Visibility {
+    /// Public visibility (accessible from anywhere)
+    ///
+    /// **Adapter Contract**:
+    /// - Python: no leading underscore, or explicitly public
+    /// - Java: `public`
+    /// - Rust: `pub`
+    /// - TypeScript: `public` or default for exported symbols
     Public,
+
+    /// Private visibility (accessible only within defining scope)
+    ///
+    /// **Adapter Contract**:
+    /// - Python: leading underscore `_name` or `__name`
+    /// - Java: `private`
+    /// - Rust: no `pub` keyword
+    /// - TypeScript: `private`
     Private,
+
+    /// Protected visibility (accessible in subclasses)
+    ///
+    /// **Adapter Contract**:
+    /// - Java: `protected`
+    /// - TypeScript: `protected`
+    /// - Python: single underscore by convention (also map to Private)
     Protected,
+
+    /// Internal/package visibility
+    ///
+    /// **Adapter Contract**:
+    /// - Java: package-private (no modifier)
+    /// - Rust: `pub(crate)`
+    /// - Kotlin: `internal`
     Internal,
-    Unspecified,
 }
 
 /// ============================================================================
-/// Symbol Reference (Raw info, GraphBuilder infers Edge types)
+/// Symbol References (for edge construction)
 /// ============================================================================
 
-/// Symbol reference - Represents "symbol used at location"
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolReference {
-    /// Referenced symbol
+    /// Referenced symbol ID
+    ///
+    /// **Adapter Contract**:
+    /// - Must match a `symbol_id` in definitions or external_symbols
+    /// - If target cannot be resolved (dynamic access, reflection):
+    ///   * For now: omit the reference (unresolved)
+    ///   * Future: may support synthetic "unresolved" symbols
     pub target_symbol: SymbolId,
 
-    /// Reference location (file + line/column)
+    /// Location where reference occurs
     pub location: SourceLocation,
 
-    /// Context containing this reference (function/method that contains it)
+    /// Enclosing context (Function or module containing this reference)
+    ///
+    /// **Adapter Contract**:
+    /// - For references inside functions: symbol_id of the Function
+    /// - For references at module/file level: use module symbol or file-level synthetic symbol
+    /// - Must be a Function or Module symbol
     pub enclosing_symbol: SymbolId,
 
-    /// Reference role (Adapter reports as accurately as possible)
+    /// Reference role (determines edge type in graph)
     pub role: ReferenceRole,
 
-    /// Additional context (optional)
-    pub context: Option<ReferenceContext>,
+    /// Receiver for member access (distinguishes static vs instance access)
+    ///
+    /// **Adapter Contract**:
+    /// - `None`: Direct access (function call, global variable)
+    ///   * Example: `foo()`, `GLOBAL_VAR`
+    /// - `Some(receiver_name)`: Member access through a variable/parameter
+    ///   * Instance method: `self.method()` → receiver = "self"
+    ///   * Instance field: `self.field` → receiver = "self"
+    ///   * Object method: `obj.method()` → receiver = "obj"
+    ///   * Object field: `obj.field` → receiver = "obj"
+    /// - For static member access: depends on language
+    ///   * Python: `Class.method()` → usually `receiver=None`, `target_symbol=Class.method`
+    ///   * Java: `Class.staticMethod()` → `receiver=None`
+    /// - **receiver is the name of the variable/parameter**, not its type
+    /// - Builder will resolve receiver type via symbol lookup
+    pub receiver: Option<String>,
 }
 
-/// Reference role - Adapter reports based on language semantics
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReferenceRole {
-    // Control flow related
-    Call, // Function call (GraphBuilder -> Call edge)
+    /// Function call → Call edge in graph
+    ///
+    /// **Adapter Contract**:
+    /// - Use for: function calls, method calls, constructor calls
+    /// - `target_symbol`: the Function symbol being called
+    /// - For method calls: set `receiver` to indicate instance/static access
+    /// - Example: `obj.method()` → role=Call, receiver=Some("obj"), target=method_symbol
+    Call,
 
-    // Data flow related
-    Read,  // Variable read (GraphBuilder -> Read edge)
-    Write, // Variable write (GraphBuilder -> Write edge)
+    /// Variable read → Read edge in graph
+    ///
+    /// **Adapter Contract**:
+    /// - Use for: reading variable value (not assignment)
+    /// - `target_symbol`: the Variable symbol being read
+    /// - For field access: set `receiver`
+    /// - Example: `x = obj.field` → role=Read, receiver=Some("obj"), target=field_symbol
+    /// - For immutable variables, Read edges don't cause expansion
+    Read,
 
-    // Type related
-    TypeAnnotation,    // Type annotation (e.g., parameter type, return type)
-    TypeInstantiation, // Type instantiation (e.g., new Class())
+    /// Variable write → Write edge in graph
+    ///
+    /// **Adapter Contract**:
+    /// - Use for: assignment, mutation
+    /// - `target_symbol`: the Variable symbol being written
+    /// - For field write: set `receiver`
+    /// - Example: `obj.field = 1` → role=Write, receiver=Some("obj"), target=field_symbol
+    /// - For mutable shared state, Write triggers SharedStateWrite expansion
+    Write,
 
-    // Other
-    Import,          // Import statement
-    AttributeAccess, // Attribute access (e.g., obj.field)
-    Documentation,   // Mentioned in documentation (usually ignored)
-}
+    /// Type annotation (does NOT create graph edges)
+    ///
+    /// **Adapter Contract**:
+    /// - Use for: parameter types, return types, variable type annotations
+    /// - `target_symbol`: the Type symbol used in annotation
+    /// - These references are used to validate type references but don't create edges
+    /// - Types live in TypeRegistry, not graph
+    TypeAnnotation,
 
-/// Reference context (optional additional information)
-#[derive(Debug, Clone, Serialize)]
-pub enum ReferenceContext {
-    /// Function call context
-    CallArgument {
-        arg_index: usize,
-        param_name: Option<String>,
-    },
-    /// Binary operator context
-    BinaryOp { op: String },
+    /// Type instantiation (may create Call edge to constructor)
+    ///
+    /// **Adapter Contract**:
+    /// - Use for: `new Class()`, `Class()` (Python), etc.
+    /// - `target_symbol`: the Type symbol being instantiated
+    /// - Builder may convert to Call edge if constructor exists
+    TypeInstantiation,
+
+    /// Import statement (generally ignored by builder)
+    ///
+    /// **Adapter Contract**:
+    /// - Use for: import statements
+    /// - Actual usage creates separate references (Call, Read, etc.)
+    /// - May be used for dependency analysis, not CF calculation
+    Import,
+
+    /// Decorator/annotation application
+    ///
+    /// **Adapter Contract**:
+    /// - Use for: Python decorators, Java annotations, TS decorators
+    /// - `is_behavioral=true`: decorator changes behavior (e.g., @cached, @wraps)
+    ///   * Creates Annotates edge (understanding decorated requires understanding decorator)
+    /// - `is_behavioral=false`: decorator is metadata only (e.g., @deprecated)
+    ///   * May not create edge
+    /// - `target_symbol`: the decorator Function
+    /// - `enclosing_symbol`: the decorated Function
+    Decorator { is_behavioral: bool },
 }
 
 /// ============================================================================
-/// Common structures
+/// Source Location
 /// ============================================================================
 
-/// Source location
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Source location (single point in source code)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLocation {
-    pub file_path: String, // Relative path
-    pub line: u32,         // 0-based
-    pub column: u32,       // 0-based
+    /// Relative path from project root
+    ///
+    /// **Adapter Contract**:
+    /// - Must match `DocumentSemantics.relative_path`
+    /// - Use forward slashes (/)
+    pub file_path: String,
+
+    /// 0-based line number
+    ///
+    /// **Adapter Contract**:
+    /// - First line of file is line 0
+    /// - Must match line numbering used in `SourceSpan`
+    pub line: u32,
+
+    /// 0-based column offset
+    ///
+    /// **Adapter Contract**:
+    /// - First column is 0
+    /// - Typically byte offset or character offset (be consistent)
+    pub column: u32,
 }
 
-/// Source span
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Source span (range in source code)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSpan {
+    /// 0-based start line (inclusive)
     pub start_line: u32,
+
+    /// 0-based start column (inclusive)
     pub start_column: u32,
+
+    /// 0-based end line (exclusive)
+    ///
+    /// **Adapter Contract**:
+    /// - End position is EXCLUSIVE (does not include this line/column)
+    /// - For single-line span: end_line = start_line + 1 or end_column marks end
     pub end_line: u32,
+
+    /// 0-based end column (exclusive)
     pub end_column: u32,
 }
 
 /// ============================================================================
-/// Helper functions
+/// Helper Functions
 /// ============================================================================
 
-/// Check if a symbol kind typically becomes a graph node
-pub fn is_node_kind(kind: &SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Function
-            | SymbolKind::Method
-            | SymbolKind::Constructor
-            | SymbolKind::Variable
-            | SymbolKind::Field
-            | SymbolKind::Constant
-    )
-}
-
-/// Check if a symbol kind typically becomes a type registry entry
-pub fn is_type_kind(kind: &SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Class
-            | SymbolKind::Interface
-            | SymbolKind::Struct
-            | SymbolKind::Enum
-            | SymbolKind::Trait
-            | SymbolKind::Protocol
-            | SymbolKind::TypeAlias
-    )
-}
-
-/// Check if a symbol kind should be skipped (not node, not type)
-pub fn should_skip_kind(kind: &SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Parameter | SymbolKind::TypeParameter | SymbolKind::Unknown
-    ) || matches!(
-        kind,
-        SymbolKind::Module | SymbolKind::Namespace | SymbolKind::Package
-    )
-}
-
-/// Get all symbol definitions from all documents
-pub fn collect_all_definitions(data: &SemanticData) -> Vec<&SymbolDefinition> {
-    let mut result: Vec<&SymbolDefinition> = Vec::new();
-
-    // Collect from documents
-    for doc in &data.documents {
-        for def in &doc.definitions {
-            result.push(def);
-        }
+impl SemanticData {
+    /// Get all symbol definitions (from both documents and external symbols)
+    pub fn all_definitions(&self) -> impl Iterator<Item = &SymbolDefinition> {
+        self.documents
+            .iter()
+            .flat_map(|doc| doc.definitions.iter())
+            .chain(self.external_symbols.iter())
     }
 
-    // Include external symbols
-    for ext in &data.external_symbols {
-        result.push(ext);
-    }
+    /// Build enclosing map (symbol_id → parent_symbol_id)
+    pub fn build_enclosing_map(&self) -> HashMap<SymbolId, SymbolId> {
+        let mut map = HashMap::new();
 
-    result
-}
-
-/// Build a map from symbol_id to its enclosing symbol_id
-pub fn build_enclosing_map(data: &SemanticData) -> HashMap<SymbolId, SymbolId> {
-    let mut map = HashMap::new();
-
-    for doc in &data.documents {
-        for def in &doc.definitions {
-            if let Some(ref parent) = def.enclosing_symbol {
+        for def in self.all_definitions() {
+            if let Some(parent) = &def.enclosing_symbol {
                 map.insert(def.symbol_id.clone(), parent.clone());
             }
         }
+
+        map
     }
 
-    map
+    /// Find definition by symbol ID
+    pub fn find_definition(&self, symbol_id: &str) -> Option<&SymbolDefinition> {
+        self.all_definitions()
+            .find(|def| def.symbol_id == symbol_id)
+    }
 }
 
-/// Resolve a symbol to the nearest ancestor that is a node
-pub fn resolve_to_node_symbol(
-    symbol: &str,
-    node_symbols: &std::collections::HashSet<SymbolId>,
-    enclosing_map: &HashMap<SymbolId, SymbolId>,
-) -> Option<SymbolId> {
-    let mut current = symbol.to_string();
-
-    loop {
-        if node_symbols.contains(&current) {
-            return Some(current);
+impl SymbolDefinition {
+    /// Check if this is a method (Function with Type enclosing)
+    pub fn is_method(&self) -> bool {
+        if self.kind != SymbolKind::Function {
+            return false;
         }
 
-        match enclosing_map.get(&current) {
-            Some(parent) => current = parent.clone(),
-            None => return None,
+        self.enclosing_symbol.is_some()
+    }
+
+    /// Check if this is a field (Variable with Type enclosing)
+    pub fn is_field(&self) -> bool {
+        if self.kind != SymbolKind::Variable {
+            return false;
         }
+
+        matches!(
+            &self.details,
+            SymbolDetails::Variable(var) if var.scope == VariableScope::Field
+        )
+    }
+
+    /// Get function details (convenience accessor)
+    pub fn as_function(&self) -> Option<&FunctionDetails> {
+        match &self.details {
+            SymbolDetails::Function(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Get variable details (convenience accessor)
+    pub fn as_variable(&self) -> Option<&VariableDetails> {
+        match &self.details {
+            SymbolDetails::Variable(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Get type details (convenience accessor)
+    pub fn as_type(&self) -> Option<&TypeDetails> {
+        match &self.details {
+            SymbolDetails::Type(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+impl FunctionDetails {
+    /// Count parameters with type annotations
+    pub fn typed_param_count(&self) -> usize {
+        self.parameters
+            .iter()
+            .filter(|p| p.param_type.is_some())
+            .count()
+    }
+
+    /// Total parameter count
+    pub fn param_count(&self) -> usize {
+        self.parameters.len()
+    }
+
+    /// Check if function has return type annotation
+    pub fn has_return_type(&self) -> bool {
+        !self.return_types.is_empty()
+    }
+
+    /// Check if signature is complete (all params typed + has return type)
+    pub fn is_signature_complete(&self) -> bool {
+        self.typed_param_count() == self.param_count() && self.has_return_type()
     }
 }
 
@@ -491,71 +902,149 @@ pub fn resolve_to_node_symbol(
 mod tests {
     use super::*;
 
-    fn create_test_definition(symbol_id: &str, kind: SymbolKind) -> SymbolDefinition {
-        SymbolDefinition {
-            symbol_id: symbol_id.to_string(),
-            kind,
-            name: symbol_id.to_string(),
-            display_name: symbol_id.to_string(),
+    #[test]
+    fn test_is_method() {
+        let mut def = SymbolDefinition {
+            symbol_id: "Class.method".into(),
+            kind: SymbolKind::Function,
+            name: "method".into(),
+            display_name: "method()".into(),
             location: SourceLocation {
-                file_path: "test.py".to_string(),
+                file_path: "test.py".into(),
                 line: 0,
                 column: 0,
             },
             span: SourceSpan {
                 start_line: 0,
                 start_column: 0,
-                end_line: 10,
+                end_line: 5,
                 end_column: 0,
             },
-            enclosing_symbol: None,
+            enclosing_symbol: Some("Class".into()),
             is_external: false,
             documentation: vec![],
-            details: SymbolDetails::None,
-        }
+            details: SymbolDetails::Function(FunctionDetails::default()),
+        };
+
+        assert!(def.is_method());
+
+        def.enclosing_symbol = None;
+        assert!(!def.is_method());
     }
 
     #[test]
-    fn test_is_node_kind() {
-        assert!(is_node_kind(&SymbolKind::Function));
-        assert!(is_node_kind(&SymbolKind::Method));
-        assert!(is_node_kind(&SymbolKind::Variable));
-        assert!(!is_node_kind(&SymbolKind::Class));
-        assert!(!is_node_kind(&SymbolKind::Parameter));
+    fn test_is_field() {
+        let def = SymbolDefinition {
+            symbol_id: "Class.field".into(),
+            kind: SymbolKind::Variable,
+            name: "field".into(),
+            display_name: "field".into(),
+            location: SourceLocation {
+                file_path: "test.py".into(),
+                line: 0,
+                column: 0,
+            },
+            span: SourceSpan {
+                start_line: 0,
+                start_column: 0,
+                end_line: 1,
+                end_column: 0,
+            },
+            enclosing_symbol: Some("Class".into()),
+            is_external: false,
+            documentation: vec![],
+            details: SymbolDetails::Variable(VariableDetails {
+                scope: VariableScope::Field,
+                ..Default::default()
+            }),
+        };
+
+        assert!(def.is_field());
     }
 
     #[test]
-    fn test_is_type_kind() {
-        assert!(is_type_kind(&SymbolKind::Class));
-        assert!(is_type_kind(&SymbolKind::Interface));
-        assert!(!is_type_kind(&SymbolKind::Function));
-        assert!(!is_type_kind(&SymbolKind::Variable));
+    fn test_function_signature_completeness() {
+        let mut func = FunctionDetails::default();
+
+        // No params, no return type
+        assert!(!func.is_signature_complete());
+
+        // Add return type
+        func.return_types.push("int".into());
+        assert!(func.is_signature_complete());
+
+        // Add untyped param
+        func.parameters.push(Parameter {
+            name: "x".into(),
+            param_type: None,
+            has_default: false,
+            is_variadic: false,
+        });
+        assert!(!func.is_signature_complete());
+
+        // Type the param
+        func.parameters[0].param_type = Some("str".into());
+        assert!(func.is_signature_complete());
     }
 
     #[test]
-    fn test_resolve_to_node_symbol() {
-        let mut node_symbols = std::collections::HashSet::new();
-        node_symbols.insert("pkg::func()".to_string());
+    fn test_build_enclosing_map() {
+        let data = SemanticData {
+            project_root: "/test".into(),
+            documents: vec![DocumentSemantics {
+                relative_path: "test.py".into(),
+                language: "python".into(),
+                definitions: vec![
+                    SymbolDefinition {
+                        symbol_id: "Class".into(),
+                        kind: SymbolKind::Type,
+                        name: "Class".into(),
+                        display_name: "Class".into(),
+                        location: SourceLocation {
+                            file_path: "test.py".into(),
+                            line: 0,
+                            column: 0,
+                        },
+                        span: SourceSpan {
+                            start_line: 0,
+                            start_column: 0,
+                            end_line: 10,
+                            end_column: 0,
+                        },
+                        enclosing_symbol: None,
+                        is_external: false,
+                        documentation: vec![],
+                        details: SymbolDetails::Type(TypeDetails::default()),
+                    },
+                    SymbolDefinition {
+                        symbol_id: "Class.method".into(),
+                        kind: SymbolKind::Function,
+                        name: "method".into(),
+                        display_name: "method()".into(),
+                        location: SourceLocation {
+                            file_path: "test.py".into(),
+                            line: 2,
+                            column: 4,
+                        },
+                        span: SourceSpan {
+                            start_line: 2,
+                            start_column: 4,
+                            end_line: 5,
+                            end_column: 0,
+                        },
+                        enclosing_symbol: Some("Class".into()),
+                        is_external: false,
+                        documentation: vec![],
+                        details: SymbolDetails::Function(FunctionDetails::default()),
+                    },
+                ],
+                references: vec![],
+            }],
+            external_symbols: vec![],
+        };
 
-        let mut enclosing_map = HashMap::new();
-        enclosing_map.insert("pkg::func().local".to_string(), "pkg::func()".to_string());
-
-        // Direct node
-        assert_eq!(
-            resolve_to_node_symbol("pkg::func()", &node_symbols, &enclosing_map),
-            Some("pkg::func()".to_string())
-        );
-
-        // Child of node
-        assert_eq!(
-            resolve_to_node_symbol("pkg::func().local", &node_symbols, &enclosing_map),
-            Some("pkg::func()".to_string())
-        );
-
-        // Unknown symbol
-        assert_eq!(
-            resolve_to_node_symbol("unknown", &node_symbols, &enclosing_map),
-            None
-        );
+        let map = data.build_enclosing_map();
+        assert_eq!(map.get("Class.method"), Some(&"Class".to_string()));
+        assert_eq!(map.get("Class"), None);
     }
 }

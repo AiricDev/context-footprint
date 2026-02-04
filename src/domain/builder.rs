@@ -8,8 +8,7 @@ use crate::domain::policy::{DocumentationScorer, NodeInfo, NodeType, SizeFunctio
 use crate::domain::ports::SourceReader;
 use crate::domain::semantic::{
     Mutability, ReferenceRole, SemanticData, SourceSpan as SemanticSpan, SymbolDefinition,
-    SymbolDetails, SymbolId, SymbolKind, VariableKind as SemanticVarKind, Visibility, is_node_kind,
-    is_type_kind, resolve_to_node_symbol, should_skip_kind,
+    SymbolDetails, SymbolId, SymbolKind, VariableScope as SemanticVarScope, Visibility,
 };
 use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeKind, TypeRegistry};
 use anyhow::Result;
@@ -43,7 +42,7 @@ impl GraphBuilder {
         let mut type_registry = TypeRegistry::new();
 
         // Pre-compute enclosing map for symbol resolution
-        let enclosing_map = crate::domain::semantic::build_enclosing_map(&semantic_data);
+        let enclosing_map = semantic_data.build_enclosing_map();
 
         // Collect all node candidate symbols
         let mut node_symbols: HashSet<SymbolId> = HashSet::new();
@@ -54,21 +53,21 @@ impl GraphBuilder {
             let source_code = source_reader.read(&source_path)?;
 
             for def in &document.definitions {
-                if should_skip_kind(&def.kind) {
-                    continue;
-                }
-
                 let node_id = graph.graph.node_count() as u32;
                 let doc_texts = def.documentation.clone();
                 let span = convert_span(&def.span);
 
                 // Check if this is an interface/abstract method
-                let is_interface_method =
-                    if matches!(def.kind, SymbolKind::Method | SymbolKind::Constructor) {
-                        is_enclosed_by_abstract_type(&def.enclosing_symbol, &semantic_data)
+                // Now we check is_abstract directly from FunctionModifiers
+                let is_interface_method = if def.kind == SymbolKind::Function {
+                    if let Some(func_details) = def.as_function() {
+                        func_details.modifiers.is_abstract
                     } else {
                         false
-                    };
+                    }
+                } else {
+                    false
+                };
 
                 // For interface methods, only compute context_size for signature (not implementation body)
                 let context_size = if is_interface_method {
@@ -99,27 +98,30 @@ impl GraphBuilder {
                 };
                 let doc_score = self.doc_scorer.score(&node_info, doc_text);
 
-                if is_type_kind(&def.kind) {
-                    // Register in TypeRegistry
-                    let type_info = create_type_info(def, context_size, doc_score);
-                    type_registry.register(def.symbol_id.clone(), type_info);
-                } else if is_node_kind(&def.kind) {
-                    // Create graph node
-                    node_symbols.insert(def.symbol_id.clone());
+                match def.kind {
+                    SymbolKind::Type => {
+                        // Register in TypeRegistry
+                        let type_info = create_type_info(def, context_size, doc_score);
+                        type_registry.register(def.symbol_id.clone(), type_info);
+                    }
+                    SymbolKind::Function | SymbolKind::Variable => {
+                        // Create graph node
+                        node_symbols.insert(def.symbol_id.clone());
 
-                    let core = NodeCore::new(
-                        node_id,
-                        def.name.clone(),
-                        def.enclosing_symbol.clone(),
-                        context_size,
-                        span,
-                        doc_score,
-                        def.is_external,
-                        document.relative_path.clone(),
-                    );
+                        let core = NodeCore::new(
+                            node_id,
+                            def.name.clone(),
+                            def.enclosing_symbol.clone(),
+                            context_size,
+                            span,
+                            doc_score,
+                            def.is_external,
+                            document.relative_path.clone(),
+                        );
 
-                    let node = create_node_from_definition(core, def, is_interface_method)?;
-                    graph.add_node(def.symbol_id.clone(), node);
+                        let node = create_node_from_definition(core, def, is_interface_method)?;
+                        graph.add_node(def.symbol_id.clone(), node);
+                    }
                 }
             }
         }
@@ -132,7 +134,7 @@ impl GraphBuilder {
         for document in &semantic_data.documents {
             for reference in &document.references {
                 // Resolve source symbol to nearest node
-                let source_node_sym = resolve_to_node_symbol(
+                let source_node_sym = Self::resolve_to_node_symbol(
                     &reference.enclosing_symbol,
                     &node_symbols,
                     &enclosing_map,
@@ -140,7 +142,7 @@ impl GraphBuilder {
 
                 // Resolve target symbol to nearest node or type
                 let target_node_sym =
-                    resolve_to_node_symbol(&reference.target_symbol, &node_symbols, &enclosing_map);
+                    Self::resolve_to_node_symbol(&reference.target_symbol, &node_symbols, &enclosing_map);
 
                 if let Some(source_sym) = source_node_sym {
                     let source_idx = match graph.get_node_by_symbol(&source_sym) {
@@ -281,22 +283,30 @@ impl GraphBuilder {
         if let Some(node_idx) = graph.get_node_by_symbol(symbol)
             && let Some(Node::Function(func)) = graph.graph.node_weight(node_idx)
         {
-            // Underspecified: missing return type or any parameter type
-            // Note: Some functions naturally return void (empty return_types), so we only check if return_types is explicitly known.
-            // However, without type inference, we might rely on at least one return type being present if it's not void.
-            // For now, we follow the previous logic: if we don't know the return type, it's underspecified.
-            // But in many languages void is implicit.
-            // Let's assume emptiness means "unknown" or "void", which is tricky.
-            // The previous logic `func.return_type.is_none()` meant "we don't have info".
-            // Now `func.return_types` being empty could mean "void" or "unknown".
-            // For safety in CallIn expansion, let's assume we need FULL signature.
-            // If the language is strongly typed, void is a type.
-            // If untyped, we might have empty return_types.
-
-            // Keep consistent with `is_signature_complete()`:
+            // Use is_signature_complete() from FunctionNode
             return !func.is_signature_complete();
         }
         false
+    }
+
+    /// Resolve a symbol to the nearest ancestor that is a node
+    fn resolve_to_node_symbol(
+        symbol: &str,
+        node_symbols: &HashSet<SymbolId>,
+        enclosing_map: &HashMap<SymbolId, SymbolId>,
+    ) -> Option<SymbolId> {
+        let mut current = symbol.to_string();
+
+        loop {
+            if node_symbols.contains(&current) {
+                return Some(current);
+            }
+
+            match enclosing_map.get(&current) {
+                Some(parent) => current = parent.clone(),
+                None => return None,
+            }
+        }
     }
 }
 
@@ -323,8 +333,9 @@ fn convert_span_for_size(span: &SemanticSpan) -> crate::domain::node::SourceSpan
 /// Infer node type from symbol kind
 fn infer_node_type_from_kind(kind: &SymbolKind) -> NodeType {
     match kind {
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Constructor => NodeType::Function,
-        _ => NodeType::Variable,
+        SymbolKind::Function => NodeType::Function,
+        SymbolKind::Variable => NodeType::Variable,
+        SymbolKind::Type => NodeType::Variable, // Should not happen, but default to Variable
     }
 }
 
@@ -378,10 +389,9 @@ fn create_node_from_definition(
             }))
         }
         SymbolDetails::Variable(var_details) => {
-            let variable_kind = match var_details.variable_kind {
-                SemanticVarKind::Global => VariableKind::Global,
-                SemanticVarKind::ClassField => VariableKind::ClassField,
-                SemanticVarKind::Local => VariableKind::Local,
+            let variable_kind = match var_details.scope {
+                SemanticVarScope::Global => VariableKind::Global,
+                SemanticVarScope::Field => VariableKind::ClassField,
             };
 
             Ok(Node::Variable(VariableNode {
@@ -391,14 +401,9 @@ fn create_node_from_definition(
                 variable_kind,
             }))
         }
-        _ => {
-            // For other kinds, create a simple variable node
-            Ok(Node::Variable(VariableNode {
-                core,
-                var_type: None,
-                mutability: NodeMutability::Mutable,
-                variable_kind: VariableKind::Global,
-            }))
+        SymbolDetails::Type(_) => {
+            // Types should not become nodes, this is an error case
+            anyhow::bail!("Type symbol should not be converted to node: {}", def.symbol_id)
         }
     }
 }
@@ -410,7 +415,6 @@ fn convert_visibility(vis: &Visibility) -> NodeVisibility {
         Visibility::Private => NodeVisibility::Private,
         Visibility::Protected => NodeVisibility::Protected,
         Visibility::Internal => NodeVisibility::Internal,
-        Visibility::Unspecified => NodeVisibility::Public,
     }
 }
 
@@ -440,18 +444,6 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
         };
         is_abstract = type_details.is_abstract;
         type_param_count = type_details.type_params.len() as u32;
-    } else {
-        // Infer from symbol kind if details not available
-        match def.kind {
-            SymbolKind::Interface | SymbolKind::Trait | SymbolKind::Protocol => {
-                type_kind = TypeKind::Interface;
-                is_abstract = true;
-            }
-            SymbolKind::Struct => type_kind = TypeKind::Struct,
-            SymbolKind::Enum => type_kind = TypeKind::Enum,
-            SymbolKind::TypeAlias => type_kind = TypeKind::TypeAlias,
-            _ => {}
-        }
     }
 
     TypeInfo {
@@ -595,7 +587,7 @@ mod tests {
                 language: "python".to_string(),
                 definitions: vec![SymbolDefinition {
                     symbol_id: protocol_id.to_string(),
-                    kind: SymbolKind::Protocol,
+                    kind: SymbolKind::Type,
                     name: "MyProtocol".to_string(),
                     display_name: "MyProtocol".to_string(),
                     location: SourceLocation {

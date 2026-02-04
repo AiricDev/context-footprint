@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use context_footprint::app::engine::ContextEngine;
 use context_footprint::cli;
 use context_footprint::server;
@@ -90,6 +91,17 @@ enum Commands {
 
     /// Debug: print SemanticData built from SCIP index as JSON (for manual inspection)
     DebugSemanticData {},
+    
+    /// Build graph from SemanticData JSON file (output from extract_python_semantics.py)
+    BuildFromJson {
+        /// Path to SemanticData JSON file
+        #[arg(required = true)]
+        json_path: PathBuf,
+        
+        /// Symbol to compute CF for (optional, for testing)
+        #[arg(long)]
+        symbol: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -105,6 +117,9 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::DebugSemanticData {} => {
             return cli::debug_semantic_data(&cli.scip_path);
+        }
+        Commands::BuildFromJson { json_path, symbol } => {
+            return cli::build_from_json(json_path, symbol.as_deref());
         }
         _ => {}
     }
@@ -124,6 +139,10 @@ async fn main() -> Result<()> {
     println!();
 
     match &cli.command {
+        Commands::BuildFromJson { .. } => {
+            // Already handled above, this path unreachable
+            unreachable!()
+        }
         Commands::Compute { symbols } => {
             cli::compute_cf_for_symbols(&engine, symbols)?;
         }

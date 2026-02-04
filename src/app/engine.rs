@@ -1,6 +1,6 @@
 use crate::adapters::doc_scorer::heuristic::HeuristicDocScorer;
 use crate::adapters::fs::reader::FileSourceReader;
-use crate::adapters::scip::adapter::ScipDataSourceAdapter;
+// use crate::adapters::scip::adapter::ScipDataSourceAdapter;
 use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
 use crate::adapters::test_detector::UniversalTestDetector;
 use crate::app::dto::*;
@@ -57,6 +57,24 @@ impl ContextEngine {
     }
 
     fn load_from_scip_internal(
+        _scip_path: PathBuf,
+        _project_root_override: Option<PathBuf>,
+    ) -> Result<Self> {
+        anyhow::bail!("SCIP adapter temporarily disabled. Use build-from-json CLI command with extract_python_semantics.py")
+        
+        // Old implementation moved to _old_scip_impl below
+    }
+    
+    #[allow(dead_code, unused_variables)]
+    fn _old_scip_impl(
+        _scip_path: PathBuf,
+        _project_root_override: Option<PathBuf>,
+    ) -> Result<Self> {
+        unimplemented!("SCIP loading disabled during migration")
+    }
+    
+    /* Old SCIP implementation preserved for future migration:
+    fn _old_scip_impl_real(
         scip_path: PathBuf,
         project_root_override: Option<PathBuf>,
     ) -> Result<Self> {
@@ -97,6 +115,7 @@ impl ContextEngine {
             })),
         })
     }
+    */
 
     /// Construct an engine from an already-built graph.
     ///

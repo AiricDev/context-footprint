@@ -404,8 +404,8 @@ fn parse_signature(sig: &str) -> (Vec<ParameterInfo>, Option<SymbolId>) {
     let mut return_type = None;
 
     // Simple heuristic parsing - look for patterns like "(a: Type, b: Type) -> ReturnType"
-    if let Some(params_start) = sig.find('(') {
-        if let Some(params_end) = sig.find(')') {
+    if let Some(params_start) = sig.find('(')
+        && let Some(params_end) = sig.find(')') {
             let params_str = &sig[params_start + 1..params_end];
             for param in params_str.split(',') {
                 let param = param.trim();
@@ -429,7 +429,6 @@ fn parse_signature(sig: &str) -> (Vec<ParameterInfo>, Option<SymbolId>) {
                 });
             }
         }
-    }
 
     // Look for return type arrow
     if let Some(arrow_pos) = sig.find("->") {

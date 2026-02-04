@@ -1,6 +1,6 @@
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::NodeId;
-use crate::domain::policy::{evaluate, PruningParams};
+use crate::domain::policy::{PruningParams, evaluate};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -102,8 +102,7 @@ impl CfSolver {
             for (neighbor, edge_kind) in neighbors {
                 let neighbor_node = graph.node(neighbor);
                 let neighbor_id = neighbor_node.core().id;
-                let decision =
-                    evaluate(params, current_node, neighbor_node, edge_kind, graph);
+                let decision = evaluate(params, current_node, neighbor_node, edge_kind, graph);
 
                 if matches!(
                     decision,
@@ -217,8 +216,7 @@ impl CfSolver {
                 }
 
                 let neighbor_node = graph.node(neighbor);
-                let decision =
-                    evaluate(params, current_node, neighbor_node, edge_kind, graph);
+                let decision = evaluate(params, current_node, neighbor_node, edge_kind, graph);
 
                 if matches!(
                     decision,

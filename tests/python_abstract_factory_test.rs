@@ -9,7 +9,9 @@ use context_footprint::adapters::scip::adapter::ScipDataSourceAdapter;
 use context_footprint::domain::builder::GraphBuilder;
 use context_footprint::domain::edge::EdgeKind;
 use context_footprint::domain::node::Node;
-use context_footprint::domain::policy::{evaluate, DocumentationScorer, PruningParams, SizeFunction};
+use context_footprint::domain::policy::{
+    DocumentationScorer, PruningParams, SizeFunction, evaluate,
+};
 use context_footprint::domain::ports::{SemanticDataSource, SourceReader};
 use context_footprint::domain::solver::CfSolver;
 use std::path::Path;
@@ -160,11 +162,11 @@ fn test_llmrelay_get_auth_port_has_return_type_edge() {
     };
 
     assert!(
-        f.return_type.as_deref() == Some(auth_port_type_id),
-        "get_auth_port should have return_type = AuthPort, got {:?}",
-        f.return_type
+        f.return_types.first().map(String::as_str) == Some(auth_port_type_id),
+        "get_auth_port should have return_types containing AuthPort, got {:?}",
+        f.return_types
     );
-    println!("✓ get_auth_port has return_type set to AuthPort");
+    println!("✓ get_auth_port has return_types set to AuthPort");
 }
 
 #[test]
@@ -219,11 +221,17 @@ fn test_llmrelay_get_auth_port_is_abstract_factory() {
         is_async: false,
         is_generator: false,
         visibility: context_footprint::domain::node::Visibility::Public,
-        return_type: None,
+        return_types: vec![],
+        throws: vec![],
     });
 
-    let decision =
-        evaluate(&params, &dummy_caller, get_auth_port_node, &EdgeKind::Call, &graph);
+    let decision = evaluate(
+        &params,
+        &dummy_caller,
+        get_auth_port_node,
+        &EdgeKind::Call,
+        &graph,
+    );
 
     println!("Policy decision for get_auth_port: {:?}", decision);
 

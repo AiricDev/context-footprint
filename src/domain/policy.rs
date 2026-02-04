@@ -31,7 +31,6 @@ pub struct PruningParams {
     pub treat_exception_as_boundary_breach: bool,
 }
 
-
 impl Default for PruningParams {
     fn default() -> Self {
         Self::academic(0.5)
@@ -56,7 +55,7 @@ impl PruningParams {
             treat_exception_as_boundary_breach: false,
         }
     }
-    
+
     pub fn with_exception_breach(mut self, treat_exception_as_boundary_breach: bool) -> Self {
         self.treat_exception_as_boundary_breach = treat_exception_as_boundary_breach;
         self
@@ -80,24 +79,22 @@ pub fn is_abstract_factory(
     if f.return_types.is_empty() {
         return false;
     }
-    
+
     // Check if ANY return type is an abstract factory type
     for return_type_id in &f.return_types {
-        if let Some(type_info) = type_registry.get(return_type_id) {
-            if type_info.definition.is_abstract && type_info.doc_score >= doc_threshold {
+        if let Some(type_info) = type_registry.get(return_type_id)
+            && type_info.definition.is_abstract && type_info.doc_score >= doc_threshold {
                 return true;
             }
-        }
     }
     false
 }
 
 fn call_in_source_decision(params: &PruningParams, source: &Node) -> PruningDecision {
-    if let Node::Function(f) = source {
-        if f.is_signature_complete() && f.core.doc_score >= params.doc_threshold {
+    if let Node::Function(f) = source
+        && f.is_signature_complete() && f.core.doc_score >= params.doc_threshold {
             return PruningDecision::Boundary;
         }
-    }
     PruningDecision::Transparent
 }
 
@@ -124,7 +121,19 @@ pub fn evaluate(
 
     // 3. Node type dispatch
     match target {
-        Node::Variable(_) => PruningDecision::Transparent,
+        Node::Variable(v) => {
+            // For Read edges: immutable values are boundaries (behavior is fully determined)
+            // mutable variables trigger expansion (need to find all writers)
+            // For Write edges: always transparent (writing to any variable is an action)
+            match edge_kind {
+                EdgeKind::Write => PruningDecision::Transparent,
+                EdgeKind::Read | _ => match v.mutability {
+                    crate::domain::node::Mutability::Const
+                    | crate::domain::node::Mutability::Immutable => PruningDecision::Boundary,
+                    crate::domain::node::Mutability::Mutable => PruningDecision::Transparent,
+                },
+            }
+        }
         Node::Function(f) => {
             // If configured, exceptions cause boundary breach (leakiness)
             if params.treat_exception_as_boundary_breach && !f.throws.is_empty() {
@@ -237,7 +246,7 @@ mod tests {
             PruningDecision::Transparent
         ));
     }
-    
+
     #[test]
     fn test_exception_breach() {
         let graph = ContextGraph::new();
@@ -248,12 +257,107 @@ mod tests {
         }
         let source = test_node(0.0);
         let edge = EdgeKind::Call;
-        
+
         let params = PruningParams::default().with_exception_breach(true);
-        
+
         assert!(matches!(
             evaluate(&params, &source, &target_node, &edge, &graph),
             PruningDecision::Transparent
         ));
+    }
+
+    // Helper to create variable nodes for testing
+    fn test_variable_node(mutability: crate::domain::node::Mutability) -> Node {
+        let core = NodeCore::new(
+            1,
+            "test_var".to_string(),
+            None,
+            5,
+            SourceSpan {
+                start_line: 0,
+                start_column: 0,
+                end_line: 1,
+                end_column: 10,
+            },
+            0.5,
+            false,
+            "test.py".to_string(),
+        );
+        Node::Variable(crate::domain::node::VariableNode {
+            core,
+            var_type: Some("int#".to_string()),
+            mutability,
+            variable_kind: crate::domain::node::VariableKind::Global,
+        })
+    }
+
+    #[test]
+    fn test_variable_immutable_is_boundary_on_read() {
+        let graph = ContextGraph::new();
+        let source = test_node(0.0);
+        let target = test_variable_node(crate::domain::node::Mutability::Immutable);
+        let edge = EdgeKind::Read;
+        let params = PruningParams::default();
+
+        // Immutable variable should be a boundary on Read
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Boundary
+        ));
+    }
+
+    #[test]
+    fn test_variable_const_is_boundary_on_read() {
+        let graph = ContextGraph::new();
+        let source = test_node(0.0);
+        let target = test_variable_node(crate::domain::node::Mutability::Const);
+        let edge = EdgeKind::Read;
+        let params = PruningParams::default();
+
+        // Const variable should be a boundary on Read
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Boundary
+        ));
+    }
+
+    #[test]
+    fn test_variable_mutable_is_transparent_on_read() {
+        let graph = ContextGraph::new();
+        let source = test_node(0.0);
+        let target = test_variable_node(crate::domain::node::Mutability::Mutable);
+        let edge = EdgeKind::Read;
+        let params = PruningParams::default();
+
+        // Mutable variable should be transparent on Read (triggers expansion)
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Transparent
+        ));
+    }
+
+    #[test]
+    fn test_variable_any_mutability_is_transparent_on_write() {
+        let graph = ContextGraph::new();
+        let source = test_node(0.0);
+        let params = PruningParams::default();
+
+        // All variable types should be transparent on Write
+        for mutability in [
+            crate::domain::node::Mutability::Const,
+            crate::domain::node::Mutability::Immutable,
+            crate::domain::node::Mutability::Mutable,
+        ] {
+            let target = test_variable_node(mutability.clone());
+            let edge = EdgeKind::Write;
+            assert!(
+                matches!(
+                    evaluate(&params, &source, &target, &edge, &graph),
+                    PruningDecision::Transparent
+                ),
+                "Variable with {:?} should be transparent on Write",
+                mutability
+            );
+        }
     }
 }

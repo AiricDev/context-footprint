@@ -75,7 +75,7 @@ pub struct FunctionNode {
     // The actual type information is in TypeRegistry
     pub parameters: Vec<Parameter>,
     pub return_types: Vec<String>, // TypeId (symbol) of return types
-    pub throws: Vec<String>, // TypeId (symbol) of exception types
+    pub throws: Vec<String>,       // TypeId (symbol) of exception types
 }
 
 impl FunctionNode {

@@ -21,7 +21,7 @@ fn build_graph_with_simple_scorer(
 ) -> context_footprint::domain::graph::ContextGraph {
     let reader = source_reader_for_semantic_data(&semantic_data, DUMMY_SOURCE);
     let size_fn = Box::new(MockSizeFunction::new());
-    let doc_scorer = Box::new(HeuristicDocScorer::new());
+    let doc_scorer = Box::new(MockDocScorer::strict()); // 1.0 for any non-empty doc
     let builder = GraphBuilder::new(size_fn, doc_scorer);
     builder.build(semantic_data, &reader).unwrap()
 }
@@ -48,8 +48,7 @@ fn test_academic_vs_strict_different_cf() {
 
     let start_idx = graph.get_node_by_symbol("sym::chain_a").unwrap();
     let graph_arc = Arc::new(graph);
-    let mut solver_academic =
-        CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
+    let mut solver_academic = CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
     let mut solver_strict = CfSolver::new(graph_arc, PruningParams::strict(0.8));
 
     let cf_academic = solver_academic.compute_cf(&[start_idx], None);

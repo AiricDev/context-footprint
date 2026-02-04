@@ -31,6 +31,7 @@ pub fn function_def(
     parameters: Vec<ParameterInfo>,
     return_type: Option<String>,
 ) -> SymbolDefinition {
+    let return_types = return_type.map(|s| vec![s]).unwrap_or_default();
     SymbolDefinition {
         symbol_id: symbol_id.to_string(),
         kind: SymbolKind::Function,
@@ -48,7 +49,7 @@ pub fn function_def(
         documentation,
         details: SymbolDetails::Function(FunctionDetails {
             parameters,
-            return_type,
+            return_types,
             throws: vec![],
             type_params: vec![],
             modifiers: FunctionModifiers {

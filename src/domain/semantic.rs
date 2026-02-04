@@ -152,7 +152,7 @@ impl SymbolDetails {
 }
 
 /// Function details
-#[derive(Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct FunctionDetails {
     /// Parameters (in definition order)
     pub parameters: Vec<ParameterInfo>,
@@ -170,20 +170,9 @@ pub struct FunctionDetails {
     pub modifiers: FunctionModifiers,
 }
 
-impl Default for FunctionDetails {
-    fn default() -> Self {
-        Self {
-            parameters: Vec::new(),
-            return_types: Vec::new(),
-            throws: Vec::new(),
-            type_params: Vec::new(),
-            modifiers: FunctionModifiers::default(),
-        }
-    }
-}
 
 /// Parameter information
-#[derive(Debug, Clone, Serialize)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct ParameterInfo {
     pub name: String,
     /// Parameter type (symbol ID of type definition)
@@ -192,16 +181,6 @@ pub struct ParameterInfo {
     pub is_variadic: bool,
 }
 
-impl Default for ParameterInfo {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            param_type: None,
-            has_default: false,
-            is_variadic: false,
-        }
-    }
-}
 
 /// Type parameter (generic) information
 #[derive(Debug, Clone, Serialize)]

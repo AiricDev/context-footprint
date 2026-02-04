@@ -132,26 +132,23 @@ impl GraphBuilder {
                     };
 
                     // Handle Call edges
-                    if reference.role == ReferenceRole::Call {
-                        if let Some(target_sym) = &target_node_sym {
-                            if let Some(target_idx) = graph.get_node_by_symbol(target_sym) {
-                                if source_idx != target_idx {
+                    if reference.role == ReferenceRole::Call
+                        && let Some(target_sym) = &target_node_sym
+                            && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
+                                && source_idx != target_idx {
                                     graph.add_edge(source_idx, target_idx, EdgeKind::Call);
                                     callers
                                         .entry(reference.target_symbol.clone())
                                         .or_default()
                                         .push(source_idx);
                                 }
-                            }
-                        }
-                    }
 
                     // Handle Read/Write edges for variable references
                     if matches!(reference.role, ReferenceRole::Read | ReferenceRole::Write) {
                         // Target might be a variable (node) or a type (in type_registry)
-                        if let Some(target_sym) = &target_node_sym {
-                            if let Some(target_idx) = graph.get_node_by_symbol(target_sym) {
-                                if source_idx != target_idx {
+                        if let Some(target_sym) = &target_node_sym
+                            && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
+                                && source_idx != target_idx {
                                     let edge_kind = if reference.role == ReferenceRole::Write {
                                         EdgeKind::Write
                                     } else {
@@ -168,8 +165,6 @@ impl GraphBuilder {
                                         readers.push((source_idx, reference.target_symbol.clone()));
                                     }
                                 }
-                            }
-                        }
                     }
                 }
             }
@@ -202,13 +197,10 @@ impl GraphBuilder {
                         SymbolDetails::Variable(var_details) => {
                             if let Some(Node::Variable(var_node)) =
                                 graph.graph.node_weight_mut(node_idx)
-                            {
-                                if let Some(ref type_id) = var_details.var_type {
-                                    if type_registry.contains(type_id) {
+                                && let Some(ref type_id) = var_details.var_type
+                                    && type_registry.contains(type_id) {
                                         var_node.var_type = Some(type_id.clone());
                                     }
-                                }
-                            }
                         }
                         _ => {}
                     }
@@ -222,15 +214,14 @@ impl GraphBuilder {
             // Check if variable is mutable
             let is_mutable = self.is_variable_mutable(&var_symbol, &semantic_data);
 
-            if is_mutable {
-                if let Some(writers) = state_writers.get(&var_symbol) {
+            if is_mutable
+                && let Some(writers) = state_writers.get(&var_symbol) {
                     for &writer_idx in writers {
                         if reader_idx != writer_idx {
                             graph.add_edge(reader_idx, writer_idx, EdgeKind::SharedStateWrite);
                         }
                     }
                 }
-            }
         }
 
         // 2. CallIn edges: Callee -> Caller for underspecified functions
@@ -261,11 +252,10 @@ impl GraphBuilder {
     fn is_variable_mutable(&self, symbol: &str, semantic_data: &SemanticData) -> bool {
         for doc in &semantic_data.documents {
             for def in &doc.definitions {
-                if def.symbol_id == symbol {
-                    if let SymbolDetails::Variable(var_details) = &def.details {
+                if def.symbol_id == symbol
+                    && let SymbolDetails::Variable(var_details) = &def.details {
                         return matches!(var_details.mutability, Mutability::Mutable);
                     }
-                }
             }
         }
         // Default to mutable for safety
@@ -274,8 +264,8 @@ impl GraphBuilder {
 
     /// Check if a function is underspecified (incomplete signature)
     fn is_function_underspecified(&self, symbol: &str, graph: &ContextGraph) -> bool {
-        if let Some(node_idx) = graph.get_node_by_symbol(symbol) {
-            if let Some(Node::Function(func)) = graph.graph.node_weight(node_idx) {
+        if let Some(node_idx) = graph.get_node_by_symbol(symbol)
+            && let Some(Node::Function(func)) = graph.graph.node_weight(node_idx) {
                 // Underspecified: missing return type or any parameter type
                 // Note: Some functions naturally return void (empty return_types), so we only check if return_types is explicitly known.
                 // However, without type inference, we might rely on at least one return type being present if it's not void.
@@ -287,11 +277,10 @@ impl GraphBuilder {
                 // For safety in CallIn expansion, let's assume we need FULL signature.
                 // If the language is strongly typed, void is a type.
                 // If untyped, we might have empty return_types.
-                
+
                 // Keep consistent with `is_signature_complete()`:
                 return !func.is_signature_complete();
             }
-        }
         false
     }
 }

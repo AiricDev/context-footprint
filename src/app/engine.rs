@@ -507,7 +507,8 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type: None,
+            return_types: vec![],
+            throws: vec![],
         });
 
         let v1 = Node::Variable(VariableNode {

@@ -26,6 +26,9 @@ pub struct PruningParams {
     /// If true (Academic): internal function is Boundary when sig complete and doc_score >= doc_threshold.
     /// If false (Strict): only abstract factory is Boundary for internal functions.
     pub treat_typed_documented_function_as_boundary: bool,
+    /// If true: function that throws checked exceptions (or returns errors) is considered "leaky" (Transparent),
+    /// effectively penalizing it even if it's well-documented.
+    pub treat_exception_as_boundary_breach: bool,
 }
 
 
@@ -41,6 +44,7 @@ impl PruningParams {
         Self {
             doc_threshold,
             treat_typed_documented_function_as_boundary: true,
+            treat_exception_as_boundary_breach: false,
         }
     }
 
@@ -49,7 +53,13 @@ impl PruningParams {
         Self {
             doc_threshold,
             treat_typed_documented_function_as_boundary: false,
+            treat_exception_as_boundary_breach: false,
         }
+    }
+    
+    pub fn with_exception_breach(mut self, treat_exception_as_boundary_breach: bool) -> Self {
+        self.treat_exception_as_boundary_breach = treat_exception_as_boundary_breach;
+        self
     }
 }
 
@@ -67,13 +77,19 @@ pub fn is_abstract_factory(
     let Node::Function(f) = function_node else {
         return false;
     };
-    let Some(return_type_id) = f.return_type_id() else {
+    if f.return_types.is_empty() {
         return false;
-    };
-    let Some(type_info) = type_registry.get(return_type_id) else {
-        return false;
-    };
-    type_info.definition.is_abstract && type_info.doc_score >= doc_threshold
+    }
+    
+    // Check if ANY return type is an abstract factory type
+    for return_type_id in &f.return_types {
+        if let Some(type_info) = type_registry.get(return_type_id) {
+            if type_info.definition.is_abstract && type_info.doc_score >= doc_threshold {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn call_in_source_decision(params: &PruningParams, source: &Node) -> PruningDecision {
@@ -110,6 +126,11 @@ pub fn evaluate(
     match target {
         Node::Variable(_) => PruningDecision::Transparent,
         Node::Function(f) => {
+            // If configured, exceptions cause boundary breach (leakiness)
+            if params.treat_exception_as_boundary_breach && !f.throws.is_empty() {
+                return PruningDecision::Transparent;
+            }
+
             if is_abstract_factory(target, &graph.type_registry, params.doc_threshold) {
                 return PruningDecision::Boundary;
             }
@@ -182,7 +203,8 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type: Some("int#".to_string()),
+            return_types: vec![Some("int#".to_string()).unwrap()],
+            throws: vec![],
         })
     }
 
@@ -191,6 +213,7 @@ mod tests {
         let p = PruningParams::default();
         assert!((p.doc_threshold - 0.5).abs() < 1e-5);
         assert!(p.treat_typed_documented_function_as_boundary);
+        assert!(!p.treat_exception_as_boundary_breach);
     }
 
     #[test]
@@ -203,6 +226,7 @@ mod tests {
         let strict = PruningParams {
             doc_threshold: 0.5,
             treat_typed_documented_function_as_boundary: false,
+            treat_exception_as_boundary_breach: false,
         };
         assert!(matches!(
             evaluate(&academic, &source, &target, &edge, &graph),
@@ -210,6 +234,25 @@ mod tests {
         ));
         assert!(matches!(
             evaluate(&strict, &source, &target, &edge, &graph),
+            PruningDecision::Transparent
+        ));
+    }
+    
+    #[test]
+    fn test_exception_breach() {
+        let graph = ContextGraph::new();
+        let mut target_node = test_node(0.8);
+        // Add exception
+        if let Node::Function(f) = &mut target_node {
+            f.throws.push("Error#".to_string());
+        }
+        let source = test_node(0.0);
+        let edge = EdgeKind::Call;
+        
+        let params = PruningParams::default().with_exception_breach(true);
+        
+        assert!(matches!(
+            evaluate(&params, &source, &target_node, &edge, &graph),
             PruningDecision::Transparent
         ));
     }

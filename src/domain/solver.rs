@@ -279,7 +279,8 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type: None,
+            return_types: vec![],
+            throws: vec![],
         })
     }
 
@@ -310,7 +311,8 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type: Some("int#".to_string()),
+            return_types: vec!["int#".to_string()],
+            throws: vec![],
         })
     }
 

@@ -157,8 +157,8 @@ pub struct FunctionDetails {
     /// Parameters (in definition order)
     pub parameters: Vec<ParameterInfo>,
 
-    /// Return type (symbol ID of type definition)
-    pub return_type: Option<SymbolId>,
+    /// Return types (symbol IDs of type definitions)
+    pub return_types: Vec<SymbolId>,
 
     /// Exception types that may be thrown
     pub throws: Vec<SymbolId>,
@@ -174,7 +174,7 @@ impl Default for FunctionDetails {
     fn default() -> Self {
         Self {
             parameters: Vec::new(),
-            return_type: None,
+            return_types: Vec::new(),
             throws: Vec::new(),
             type_params: Vec::new(),
             modifiers: FunctionModifiers::default(),

@@ -205,7 +205,8 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: Visibility::Public,
-            return_type: None,
+            return_types: vec![],
+            throws: vec![],
         });
         let idx = g.add_node("sym/f().".into(), f);
         g.add_edge(idx, idx, EdgeKind::Call);

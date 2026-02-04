@@ -326,7 +326,7 @@ fn extract_function_details(
         let (params, return_type) = parse_signature(&sig_doc.text);
         details.parameters = params;
         if let Some(ret) = return_type {
-            details.return_type = Some(ret);
+            details.return_types = vec![ret];
         }
     }
 
@@ -335,8 +335,8 @@ fn extract_function_details(
         if rel.is_type_definition {
             // This might be return type or parameter type
             // For now, use first type definition as return type if not already set
-            if details.return_type.is_none() {
-                details.return_type = Some(rel.symbol.clone());
+            if details.return_types.is_empty() {
+                details.return_types = vec![rel.symbol.clone()];
             }
         }
     }

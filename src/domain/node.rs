@@ -74,7 +74,8 @@ pub struct FunctionNode {
     // Signature - type references are stored as TypeIds (symbols)
     // The actual type information is in TypeRegistry
     pub parameters: Vec<Parameter>,
-    pub return_type: Option<String>, // TypeId (symbol) of return type
+    pub return_types: Vec<String>, // TypeId (symbol) of return types
+    pub throws: Vec<String>, // TypeId (symbol) of exception types
 }
 
 impl FunctionNode {
@@ -93,7 +94,7 @@ impl FunctionNode {
 
     /// Has return type annotation
     pub fn has_return_type(&self) -> bool {
-        self.return_type.is_some()
+        !self.return_types.is_empty()
     }
 
     /// Check if function signature is complete (all params typed + has return type)
@@ -101,9 +102,9 @@ impl FunctionNode {
         self.typed_param_count() == self.param_count() && self.has_return_type()
     }
 
-    /// Get return type ID if present
-    pub fn return_type_id(&self) -> Option<&str> {
-        self.return_type.as_deref()
+    /// Get return type IDs
+    pub fn return_type_ids(&self) -> &[String] {
+        &self.return_types
     }
 }
 

@@ -184,10 +184,16 @@ impl GraphBuilder {
                             if let Some(Node::Function(func_node)) =
                                 graph.graph.node_weight_mut(node_idx)
                             {
-                                // Set return type
-                                if let Some(ref type_id) = func_details.return_type {
+                                // Set return types
+                                for type_id in &func_details.return_types {
                                     if type_registry.contains(type_id) {
-                                        func_node.return_type = Some(type_id.clone());
+                                        func_node.return_types.push(type_id.clone());
+                                    }
+                                }
+                                // Set throws types
+                                for type_id in &func_details.throws {
+                                    if type_registry.contains(type_id) {
+                                        func_node.throws.push(type_id.clone());
                                     }
                                 }
                                 // Note: Parameters are already set in create_node_from_definition
@@ -271,7 +277,19 @@ impl GraphBuilder {
         if let Some(node_idx) = graph.get_node_by_symbol(symbol) {
             if let Some(Node::Function(func)) = graph.graph.node_weight(node_idx) {
                 // Underspecified: missing return type or any parameter type
-                return func.return_type.is_none() || func.typed_param_count() < func.param_count();
+                // Note: Some functions naturally return void (empty return_types), so we only check if return_types is explicitly known.
+                // However, without type inference, we might rely on at least one return type being present if it's not void.
+                // For now, we follow the previous logic: if we don't know the return type, it's underspecified.
+                // But in many languages void is implicit.
+                // Let's assume emptiness means "unknown" or "void", which is tricky.
+                // The previous logic `func.return_type.is_none()` meant "we don't have info".
+                // Now `func.return_types` being empty could mean "void" or "unknown".
+                // For safety in CallIn expansion, let's assume we need FULL signature.
+                // If the language is strongly typed, void is a type.
+                // If untyped, we might have empty return_types.
+                
+                // Keep consistent with `is_signature_complete()`:
+                return !func.is_signature_complete();
             }
         }
         false
@@ -321,7 +339,7 @@ fn extract_signature(def: &SymbolDefinition) -> Option<String> {
                     }
                 })
                 .collect();
-            let sig = format!("({}) -> {:?}", params.join(", "), func.return_type);
+            let sig = format!("({}) -> {:?}", params.join(", "), func.return_types);
             Some(sig)
         }
         _ => None,
@@ -347,7 +365,8 @@ fn create_node_from_definition(core: NodeCore, def: &SymbolDefinition) -> Result
                 is_async: func_details.modifiers.is_async,
                 is_generator: func_details.modifiers.is_generator,
                 visibility: convert_visibility(&func_details.modifiers.visibility),
-                return_type: func_details.return_type.clone(),
+                return_types: func_details.return_types.clone(),
+                throws: func_details.throws.clone(),
             }))
         }
         SymbolDetails::Variable(var_details) => {

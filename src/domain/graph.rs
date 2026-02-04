@@ -91,7 +91,8 @@ mod tests {
             is_async: false,
             is_generator: false,
             visibility: crate::domain::node::Visibility::Public,
-            return_type: None,
+            return_types: vec![],
+            throws: vec![],
         })
     }
 

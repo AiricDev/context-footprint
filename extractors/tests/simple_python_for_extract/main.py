@@ -11,7 +11,7 @@ class Reader(Protocol):
         ...
 
 
-class FileReader:
+class FileReader(Reader):
     """Concrete file reader implementation."""
     
     def __init__(self, encoding: str = "utf-8"):
@@ -59,3 +59,30 @@ def process_file(reader: Reader, path: str) -> int:
 # Global configuration
 MAX_SIZE = 1024 * 1024
 _debug_mode = False
+
+
+# Test for scope-aware type resolution
+class Config:
+    """Global Config class."""
+    value: str = "global"
+
+
+def get_config() -> Config:
+    """Return global Config instance.
+    
+    Returns:
+        Config instance with global scope
+    """
+    return Config()
+
+
+def use_aliased_type(data: Reader) -> Reader:
+    """Function using aliased type.
+    
+    Args:
+        data: A Reader instance (aliased as DataSource via import)
+        
+    Returns:
+        Same Reader instance
+    """
+    return data

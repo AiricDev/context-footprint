@@ -110,6 +110,20 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.strictEqual(reader.details.Type.kind, "Interface");
       assert.strictEqual(reader.details.Type.is_abstract, true);
     });
+
+    it("should extract FileReader's implementation of Reader Protocol", () => {
+      const fileReader = mainDoc.definitions.find(
+        (d): d is TypeSymbol => isTypeSymbol(d) && d.name === "FileReader"
+      )!;
+
+      // FileReader implements Reader (Protocol)
+      const implementsList = fileReader.details.Type.implements;
+      assert.ok(implementsList.length > 0, "FileReader should have implements array");
+      assert.ok(
+        implementsList.includes("main.Reader#Type"),
+        "FileReader should implement Reader Protocol"
+      );
+    });
   });
 
   describe("Function/Method definition validation", () => {
@@ -141,7 +155,7 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.ok(["Public", "Private", "Protected", "Internal"].includes(funcDetails.modifiers.visibility));
     });
 
-    it("should extract process_file parameters correctly", () => {
+    it("should extract process_file parameters correctly with fully qualified type symbol_ids", () => {
       const processFile = mainDoc.definitions.find(
         (d): d is FunctionSymbol => isFunctionSymbol(d) && d.name === "process_file"
       )!;
@@ -150,13 +164,13 @@ describe("Integration Tests for extract-semantics CLI", () => {
       // process_file(reader: Reader, path: str) -> int
       assert.strictEqual(params.length, 2, "process_file should have 2 parameters");
       
-      // First parameter: reader
+      // First parameter: reader - should use fully qualified symbol_id for user-defined types
       assert.strictEqual(params[0].name, "reader");
-      assert.strictEqual(params[0].param_type, "Reader", "reader parameter should have type Reader");
+      assert.strictEqual(params[0].param_type, "main.Reader#Type", "reader parameter should have fully qualified type symbol_id");
       assert.strictEqual(params[0].has_default, false);
       assert.strictEqual(params[0].is_variadic, false);
       
-      // Second parameter: path
+      // Second parameter: path - builtin types can use simple names
       assert.strictEqual(params[1].name, "path");
       assert.strictEqual(params[1].param_type, "str", "path parameter should have type str");
       assert.strictEqual(params[1].has_default, false);
@@ -195,7 +209,7 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.strictEqual(params.length, 1, "__init__ should have 1 parameter (excluding self)");
       
       assert.strictEqual(params[0].name, "encoding");
-      assert.strictEqual(params[0].param_type, "str", "encoding parameter should have type str");
+      assert.strictEqual(params[0].param_type, "str", "encoding parameter should have type str (builtin)");
       assert.strictEqual(params[0].has_default, true, "encoding has default value");
       assert.strictEqual(params[0].is_variadic, false);
     });
@@ -454,6 +468,136 @@ describe("Integration Tests for extract-semantics CLI", () => {
 
       assert.ok(refsWithReceiver.length > 0,
         "Should have references with 'self' as receiver for member access");
+    });
+
+    it("should NOT have Call references at class/function definition sites", () => {
+      // Class and function definitions should NOT generate Call references
+      // The definition itself is not a "call" - it's a declaration
+      const definitionLines = new Map<number, string>();
+      for (const def of mainDoc.definitions) {
+        definitionLines.set(def.location.line, def.symbol_id);
+      }
+
+      const badCallRefs = mainDoc.references.filter((ref) => {
+        if (ref.role !== "Call") return false;
+        // Check if this Call reference is at a definition site for that same symbol
+        const defAtLine = definitionLines.get(ref.location.line);
+        return defAtLine === ref.target_symbol;
+      });
+
+      assert.strictEqual(badCallRefs.length, 0,
+        `Should not have Call references at definition sites: ${JSON.stringify(badCallRefs.map(r => ({
+          target: r.target_symbol,
+          line: r.location.line,
+          col: r.location.column
+        })))}`);
+    });
+
+    it("should use TypeAnnotation role for type annotations in function signatures", () => {
+      // process_file(reader: Reader, path: str) -> int
+      // The "Reader" type annotation should be TypeAnnotation, not Read
+      const processFileRefs = mainDoc.references.filter(
+        (r) => r.enclosing_symbol === "main.process_file#Function"
+      );
+
+      // Find reference to Reader type in process_file
+      const readerTypeRef = processFileRefs.find(
+        (r) => r.target_symbol === "main.Reader#Type" && 
+               r.location.line === 43 // def process_file line
+      );
+
+      if (readerTypeRef) {
+        assert.strictEqual(readerTypeRef.role, "TypeAnnotation",
+          "Type annotation in function parameter should have TypeAnnotation role, not Read");
+      }
+    });
+
+    it("should use TypeAnnotation role for return type annotations", () => {
+      // def get_config() -> Config:
+      const getConfigRefs = mainDoc.references.filter(
+        (r) => r.enclosing_symbol === "main.get_config#Function" &&
+               r.target_symbol === "main.Config#Type"
+      );
+
+      // The return type annotation reference
+      const returnTypeRef = getConfigRefs.find(
+        (r) => r.location.line === 69 // def get_config line
+      );
+
+      if (returnTypeRef) {
+        assert.strictEqual(returnTypeRef.role, "TypeAnnotation",
+          "Return type annotation should have TypeAnnotation role");
+      }
+    });
+
+    it("should have Call reference target method symbol, not the class type", () => {
+      // reader.read(path) should reference main.Reader.read#Function, not main.Reader#Type
+      const methodCallRef = mainDoc.references.find(
+        (r) => r.role === "Call" && 
+               r.receiver === "reader" &&
+               r.enclosing_symbol === "main.process_file#Function"
+      );
+
+      if (methodCallRef) {
+        // The target should be the method, not the type
+        assert.ok(
+          methodCallRef.target_symbol.includes("read#Function"),
+          `Method call should target the method symbol (got ${methodCallRef.target_symbol})`
+        );
+      }
+    });
+
+    it("should have field access references target the field Variable, not the class Type", () => {
+      // self._cache, self.encoding should reference the field Variable symbols
+      const selfFieldRefs = mainDoc.references.filter(
+        (r) => r.receiver === "self" && 
+               (r.role === "Read" || r.role === "Write")
+      );
+
+      for (const ref of selfFieldRefs) {
+        // Field access should target Variable symbols, not Type symbols
+        assert.ok(
+          ref.target_symbol.endsWith("#Variable"),
+          `Field access should target Variable symbol, not Type (got ${ref.target_symbol})`
+        );
+      }
+    });
+
+    it("should have Write references for field assignments in __init__", () => {
+      // self.encoding = encoding and self._cache = {} should generate Write references
+      const initRefs = mainDoc.references.filter(
+        (r) => r.enclosing_symbol === "main.FileReader.__init__#Function"
+      );
+      
+      const encodingWrite = initRefs.find(
+        (r) => r.target_symbol === "main.FileReader.encoding#Variable" && r.role === "Write"
+      );
+      const cacheWrite = initRefs.find(
+        (r) => r.target_symbol === "main.FileReader._cache#Variable" && r.role === "Write"
+      );
+      
+      assert.ok(encodingWrite, "Should have Write reference for self.encoding assignment");
+      assert.ok(cacheWrite, "Should have Write reference for self._cache assignment");
+    });
+
+    it("should NOT have TypeAnnotation references for parameter/return types (already in definitions)", () => {
+      // Parameter types and return types are already captured in FunctionDetails
+      // They should NOT appear as TypeAnnotation references
+      const typeAnnotationRefs = mainDoc.references.filter(
+        (r) => r.role === "TypeAnnotation"
+      );
+      
+      // Type annotations should only be for inheritance (class Foo(Bar)) 
+      // not for function signatures
+      for (const ref of typeAnnotationRefs) {
+        // Check that enclosing_symbol is a Type (class inheritance context), not a Function
+        const enclosingDef = mainDoc.definitions.find(d => d.symbol_id === ref.enclosing_symbol);
+        assert.ok(
+          enclosingDef?.kind === "Type",
+          `TypeAnnotation should only be for class inheritance, not function signatures. ` +
+          `Found TypeAnnotation in ${ref.enclosing_symbol} at line ${ref.location.line}`
+        );
+      }
     });
   });
 

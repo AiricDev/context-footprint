@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import pLimit from "p-limit";
 import {
   DocumentSymbol,
   Location,
@@ -33,6 +34,10 @@ import {
 
 const pyrightLangServer = require.resolve("pyright/langserver.index.js");
 
+// Concurrency limits for LSP requests
+const LSP_CONCURRENCY = 10;
+const FILE_READ_CONCURRENCY = 50;
+
 interface SymbolRecord {
   symbolId: string;
   uri: string;
@@ -57,18 +62,31 @@ interface SymbolInfo {
 
 export class PythonExtractor extends ExtractorBase {
   private fileContents = new Map<string, string>();
+  private fileLines = new Map<string, string[]>(); // Cached line arrays
   private symbolIndex: SymbolRecord[] = [];
+  private symbolIndexByUri = new Map<string, SymbolRecord[]>(); // Index by URI for fast lookup
   private definitions: SymbolDefinition[] = [];
   private references: SymbolReference[] = [];
-  private fileContents = new Map<string, string>();
-  private symbolIndex: SymbolRecord[] = [];
-  private definitions: SymbolDefinition[] = [];
-  private references: SymbolReference[] = [];
-  // Cache hover by "uri#line,col" for reliable lookup
   private hoverCache = new Map<string, Hover>();
+  private protocolClasses = new Set<string>();
 
   constructor(options: ExtractOptions) {
     super(options);
+  }
+
+  private log(message: string, alwaysShow = false): void {
+    if (alwaysShow || this.options.verbose) {
+      console.error(message);
+    }
+  }
+
+  private progress(current: number, total: number, label: string): void {
+    const percent = Math.round((current / total) * 100);
+    const bar = "█".repeat(Math.floor(percent / 5)) + "░".repeat(20 - Math.floor(percent / 5));
+    process.stderr.write(`\r[${bar}] ${percent}% ${label} (${current}/${total})`);
+    if (current === total) {
+      process.stderr.write("\n");
+    }
   }
 
   protected getLspOptions(): LspClientOptions {
@@ -80,33 +98,162 @@ export class PythonExtractor extends ExtractorBase {
   }
 
   protected async collectSemanticData(): Promise<SemanticData> {
+    this.log("Discovering files...", true);
     const files = await discoverFiles({
       cwd: this.options.projectRoot,
       patterns: ["**/*.py"],
       ignore: ["**/tests/**", "**/__pycache__/**", "**/.venv/**", "**/venv/**", ...(this.options.exclude ?? [])]
     });
+    this.log(`Found ${files.length} Python files`, true);
 
+    this.log("Reading files...", true);
+    await this.readFiles(files);
+
+    this.log("Opening documents in LSP...", true);
     await this.openDocuments(files);
 
-    for (const file of files) {
-      const uri = toUri(file);
-      const docSymbols = await this.fetchDocumentSymbols(uri);
-      // Build hierarchy from flat list using ranges
-      const hierarchy = this.buildHierarchyFromFlatList(docSymbols);
-      // Pre-fetch hover info for all symbols in the file
-      await this.prefetchHoverInfo(uri, hierarchy);
-      this.processDocumentSymbols(file, uri, hierarchy, []);
-    }
+    this.log("Collecting symbols...", true);
+    await this.collectSymbols(files);
 
+    this.log("Collecting references...", true);
     await this.collectReferences();
 
     const documents = this.groupByDocument();
+    this.log(`Extraction complete: ${this.definitions.length} definitions, ${this.references.length} references`, true);
 
     return {
       project_root: this.options.projectRoot,
       documents,
       external_symbols: []
     };
+  }
+
+  private async readFiles(files: string[]): Promise<void> {
+    const limit = pLimit(FILE_READ_CONCURRENCY);
+    let completed = 0;
+
+    await Promise.all(
+      files.map((file) =>
+        limit(async () => {
+          const content = await fs.promises.readFile(file, "utf8");
+          this.fileContents.set(file, content);
+          this.fileLines.set(file, content.split(/\r?\n/));
+          this.parseProtocolClasses(file, content);
+          completed++;
+          this.progress(completed, files.length, "Reading files");
+        })
+      )
+    );
+  }
+
+  private async collectSymbols(files: string[]): Promise<void> {
+    const limit = pLimit(LSP_CONCURRENCY);
+    let completed = 0;
+
+    // First pass: fetch document symbols for all files
+    const symbolsByFile = new Map<string, DocumentSymbol[]>();
+    await Promise.all(
+      files.map((file) =>
+        limit(async () => {
+          const uri = toUri(file);
+          const docSymbols = await this.fetchDocumentSymbols(uri);
+          const hierarchy = this.buildHierarchyFromFlatList(docSymbols);
+          symbolsByFile.set(file, hierarchy);
+          completed++;
+          this.progress(completed, files.length, "Fetching symbols");
+        })
+      )
+    );
+
+    // Second pass: fetch hover info in parallel
+    this.log("Fetching hover info...", true);
+    const hoverTasks: Array<() => Promise<void>> = [];
+    for (const [file, hierarchy] of symbolsByFile) {
+      const uri = toUri(file);
+      this.collectHoverTasks(uri, hierarchy, [], hoverTasks);
+    }
+
+    completed = 0;
+    const totalHovers = hoverTasks.length;
+    await Promise.all(
+      hoverTasks.map((task) =>
+        limit(async () => {
+          await task();
+          completed++;
+          if (completed % 100 === 0 || completed === totalHovers) {
+            this.progress(completed, totalHovers, "Fetching hover info");
+          }
+        })
+      )
+    );
+
+    // Third pass: process symbols (synchronous, builds definitions)
+    this.log("Processing symbols...", true);
+    completed = 0;
+    const totalFiles = symbolsByFile.size;
+    for (const [file, hierarchy] of symbolsByFile) {
+      const uri = toUri(file);
+      this.processDocumentSymbols(file, uri, hierarchy, []);
+      completed++;
+      if (completed % 10 === 0 || completed === totalFiles) {
+        this.progress(completed, totalFiles, "Processing symbols");
+      }
+    }
+
+    // Build URI index for fast enclosing symbol lookup
+    for (const record of this.symbolIndex) {
+      const records = this.symbolIndexByUri.get(record.uri) ?? [];
+      records.push(record);
+      this.symbolIndexByUri.set(record.uri, records);
+    }
+  }
+
+  private collectHoverTasks(
+    uri: string,
+    symbols: DocumentSymbol[],
+    parents: DocumentSymbol[],
+    tasks: Array<() => Promise<void>>
+  ): void {
+    const filePath = fileURLToPath(uri);
+    const lines = this.fileLines.get(filePath) ?? [];
+
+    for (const symbol of symbols) {
+      const nameChain = [...parents.map((p) => p.name), symbol.name];
+      const cacheKey = `${uri}#${nameChain.join(".")}`;
+
+      if (!this.hoverCache.has(cacheKey)) {
+        tasks.push(async () => {
+          try {
+            let position = symbol.selectionRange?.start ?? symbol.range.start;
+
+            if (
+              symbol.selectionRange?.start.line === symbol.range.start.line &&
+              symbol.selectionRange?.start.character === symbol.range.start.character
+            ) {
+              const lineText = lines[symbol.range.start.line] ?? "";
+              const namePos = lineText.indexOf(symbol.name, symbol.range.start.character);
+              if (namePos >= 0) {
+                position = { line: symbol.range.start.line, character: namePos };
+              }
+            }
+
+            const hover = await this.client!.sendRequest<Hover>("textDocument/hover", {
+              textDocument: { uri },
+              position
+            });
+            if (hover) {
+              this.hoverCache.set(cacheKey, hover);
+            }
+          } catch {
+            // Ignore hover errors
+          }
+        });
+      }
+
+      if (symbol.children) {
+        this.collectHoverTasks(uri, symbol.children, [...parents, symbol], tasks);
+      }
+    }
   }
 
   private buildHierarchyFromFlatList(symbols: DocumentSymbol[]): DocumentSymbol[] {
@@ -153,17 +300,38 @@ export class PythonExtractor extends ExtractorBase {
   }
 
   private async openDocuments(files: string[]): Promise<void> {
-    for (const file of files) {
-      const content = fs.readFileSync(file, "utf8");
-      this.fileContents.set(file, content);
-      const uri = toUri(file);
-      const item: TextDocumentItem = {
-        uri,
-        languageId: "python",
-        version: 1,
-        text: content
-      };
-      await this.client!.sendNotification("textDocument/didOpen", { textDocument: item });
+    const limit = pLimit(LSP_CONCURRENCY);
+    let completed = 0;
+
+    await Promise.all(
+      files.map((file) =>
+        limit(async () => {
+          const content = this.fileContents.get(file)!;
+          const uri = toUri(file);
+          const item: TextDocumentItem = {
+            uri,
+            languageId: "python",
+            version: 1,
+            text: content
+          };
+          await this.client!.sendNotification("textDocument/didOpen", { textDocument: item });
+          completed++;
+          this.progress(completed, files.length, "Opening documents");
+        })
+      )
+    );
+  }
+
+  private parseProtocolClasses(filePath: string, content: string): void {
+    // Match class definitions that inherit from Protocol
+    const classRegex = /^class\s+(\w+)\s*\(\s*Protocol\s*\)/gm;
+    let match;
+    while ((match = classRegex.exec(content)) !== null) {
+      const moduleName = relativePath(this.options.projectRoot, filePath)
+        .replace(/\.py$/, "")
+        .replace(/[\\/]/g, ".");
+      const symbolId = `${moduleName}.${match[1]}#Type`;
+      this.protocolClasses.add(symbolId);
     }
   }
 
@@ -190,32 +358,6 @@ export class PythonExtractor extends ExtractorBase {
       }));
     }
     return response.documentSymbols ?? [];
-  }
-
-  private async prefetchHoverInfo(uri: string, symbols: DocumentSymbol[], parents: DocumentSymbol[] = []): Promise<void> {
-    for (const symbol of symbols) {
-      // Build full path for this symbol
-      const nameChain = [...parents.map(p => p.name), symbol.name];
-      const cacheKey = `${uri}#${nameChain.join(".")}`;
-      
-      if (!this.hoverCache.has(cacheKey)) {
-        try {
-          const hover = await this.client!.sendRequest<Hover>("textDocument/hover", {
-            textDocument: { uri },
-            position: symbol.selectionRange?.start ?? symbol.range.start
-          });
-          if (hover) {
-            this.hoverCache.set(cacheKey, hover);
-          }
-        } catch {
-          // Ignore hover errors
-        }
-      }
-      
-      if (symbol.children) {
-        await this.prefetchHoverInfo(uri, symbol.children, [...parents, symbol]);
-      }
-    }
   }
 
   private getHoverInfo(uri: string, nameChain: string[]): Hover | undefined {
@@ -332,20 +474,51 @@ export class PythonExtractor extends ExtractorBase {
   ): void {
     const typeDetails = (typeDef.details as { Type: TypeDetails }).Type;
     
-    for (const child of children) {
-      const kind = this.mapSymbolKind(child.kind);
-      if (kind === SymbolKind.Variable) {
-        // This is a field - create FieldInfo
-        const fieldSymbolId = this.createSymbolId(filePath, [typeRecord], child, kind);
-        typeDetails.fields.push({
-          name: child.name,
-          field_type: null,
-          mutability: Mutability.Mutable,
-          visibility: this.inferVisibility(child.name),
-          symbol_id: fieldSymbolId
-        });
+    // Only recurse into __init__ to find fields - other methods have parameters, not fields
+    const collectFieldsFromInit = (symbols: DocumentSymbol[]) => {
+      for (const child of symbols) {
+        const childKind = this.mapSymbolKind(child.kind);
+        
+        if (childKind === SymbolKind.Function && child.name === "__init__") {
+          // Look for fields inside __init__
+          if (child.children) {
+            for (const field of child.children) {
+              const fieldKind = this.mapSymbolKind(field.kind);
+              if (fieldKind === SymbolKind.Variable) {
+                // Skip parameters (those on the same line as the function)
+                if (field.range.start.line === child.selectionRange.start.line) {
+                  continue;
+                }
+                const fieldSymbolId = this.createSymbolId(filePath, [typeRecord], field, fieldKind);
+                if (!typeDetails.fields.some(f => f.symbol_id === fieldSymbolId)) {
+                  typeDetails.fields.push({
+                    name: field.name,
+                    field_type: null,
+                    mutability: Mutability.Mutable,
+                    visibility: this.inferVisibility(field.name),
+                    symbol_id: fieldSymbolId
+                  });
+                }
+              }
+            }
+          }
+        } else if (childKind === SymbolKind.Variable) {
+          // Direct class-level variables (rare in Python but possible)
+          const fieldSymbolId = this.createSymbolId(filePath, [typeRecord], child, childKind);
+          if (!typeDetails.fields.some(f => f.symbol_id === fieldSymbolId)) {
+            typeDetails.fields.push({
+              name: child.name,
+              field_type: null,
+              mutability: Mutability.Mutable,
+              visibility: this.inferVisibility(child.name),
+              symbol_id: fieldSymbolId
+            });
+          }
+        }
       }
-    }
+    };
+    
+    collectFieldsFromInit(children);
   }
 
   private mapSymbolKind(kind: LspSymbolKind): SymbolKind | null {
@@ -417,7 +590,10 @@ export class PythonExtractor extends ExtractorBase {
 
     if (kind === SymbolKind.Function) {
       const { parameters, returnTypes } = this.parseSignature(signature || symbol.detail || "");
-      const isAbstract = this.isAbstractFromHover(hover) || this.inferAbstractFromDetail(symbol.detail);
+      // Method is abstract if: @abstractmethod decorator, or part of a Protocol class
+      const isAbstract = this.isAbstractFromHover(hover) || 
+                         this.inferAbstractFromDetail(symbol.detail) ||
+                         this.isMethodOfProtocol(enclosingSymbol);
       
       const details: FunctionDetails = {
         parameters,
@@ -443,7 +619,7 @@ export class PythonExtractor extends ExtractorBase {
     }
 
     if (kind === SymbolKind.Type) {
-      const typeKind = this.inferTypeKind(symbol, hover);
+      const typeKind = this.inferTypeKind(symbolId, symbol, hover);
       const details: TypeDetails = {
         kind: typeKind,
         is_abstract: typeKind === TypeKind.Interface || this.isAbstractType(symbol),
@@ -521,16 +697,22 @@ export class PythonExtractor extends ExtractorBase {
           }
         }
       } else if (typeof hover.contents === "object" && "kind" in hover.contents) {
-        // MarkupContent
+        // MarkupContent (plaintext or markdown)
         const content = hover.contents as { kind: string; value: string };
         const value = content.value.trim();
         
-        // Pyright usually returns signature first, then docstring separated by newline
-        const parts = value.split(/\n\n+/);
+        // Pyright format: "(type) signature\n\nDocstring"
+        // or "(function) def name(...)\n\nDocstring"
+        // Split on double newline to separate signature from docs
+        const parts = value.split(/\n\n/);
         if (parts.length > 0) {
           signature = parts[0].trim();
+          // Everything after the first double-newline is documentation
           if (parts.length > 1) {
-            documentation.push(parts.slice(1).join("\n\n").trim());
+            const docText = parts.slice(1).join("\n\n").trim();
+            if (docText) {
+              documentation.push(docText);
+            }
           }
         }
       }
@@ -544,14 +726,25 @@ export class PythonExtractor extends ExtractorBase {
       return { parameters: [], returnTypes: [] };
     }
 
-    // Parse signature like: (reader: Reader, path: str) -> int
-    // or: def process_file(reader: Reader, path: str) -> int
+    // Pyright format can be multiline:
+    // "(function) def process_file(\n    reader: Reader,\n    path: str\n) -> int"
+    // or "(class) ClassName"
+    // or "(method) def read(self, path: str) -> str"
+    
+    // Normalize to single line by removing newlines and extra spaces
+    const normalizedSig = signature
+      .replace(/\r?\n/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    
+    // Remove type prefix like "(function) ", "(method) ", "(class) "
+    const cleanSig = normalizedSig.replace(/^\([^)]+\)\s*/, "");
     
     // Remove "def " prefix if present
-    const cleanSig = signature.replace(/^def\s+/, "");
+    const withoutDef = cleanSig.replace(/^def\s+/, "");
     
-    // Extract parameters from parentheses
-    const paramMatch = cleanSig.match(/\((.*?)\)(?:\s*->\s*(.+))?$/s);
+    // Extract parameters from parentheses - use greedy match for content
+    const paramMatch = withoutDef.match(/\(([^)]*)\)(?:\s*->\s*(.+))?$/);
     if (!paramMatch) {
       return { parameters: [], returnTypes: [] };
     }
@@ -568,20 +761,29 @@ export class PythonExtractor extends ExtractorBase {
       
       for (const param of paramParts) {
         const trimmed = param.trim();
-        if (!trimmed || trimmed === "self" || trimmed === "cls") {
+        if (!trimmed) {
           continue;
         }
 
+        // Check for variadic parameters
+        const isVariadic = trimmed.startsWith("*") || trimmed.startsWith("**");
+        const paramWithoutStars = trimmed.replace(/^\*+/, "");
+
         // Parse parameter: name: type = default or name: type or name = default or name
-        const match = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*(?::\s*([^=]+))?\s*(?:=\s*(.+))?$/);
+        const match = paramWithoutStars.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*(?::\s*([^=]+))?\s*(?:=\s*(.+))?$/);
         if (match) {
           const name = match[1];
+          
+          // Skip self/cls after extracting the name (handles typed forms like "self: Self@FileReader")
+          if (name === "self" || name === "cls") {
+            continue;
+          }
+          
           const paramType = match[2]?.trim() || null;
           const hasDefault = !!match[3];
-          const isVariadic = name.startsWith("*") || name.startsWith("**");
 
           parameters.push({
-            name: name.replace(/^\*+/, ""), // Remove * or ** prefix from name
+            name,
             param_type: paramType,
             has_default: hasDefault,
             is_variadic: isVariadic
@@ -631,7 +833,12 @@ export class PythonExtractor extends ExtractorBase {
     
     const { signature } = this.extractHoverInfo(hover);
     // In Pyright, abstract methods often show "@abstractmethod" or similar in hover
-    return signature.includes("@abstract") || signature.includes("Protocol");
+    return signature.includes("@abstract") || signature.includes("@abstractmethod");
+  }
+
+  private isMethodOfProtocol(enclosingSymbol: string | null): boolean {
+    // If the enclosing symbol is a Protocol class, the method is abstract
+    return enclosingSymbol !== null && this.protocolClasses.has(enclosingSymbol);
   }
 
   private inferAbstractFromDetail(detail?: string): boolean {
@@ -649,7 +856,12 @@ export class PythonExtractor extends ExtractorBase {
     };
   }
 
-  private inferTypeKind(symbol: DocumentSymbol, hover?: Hover): TypeKind {
+  private inferTypeKind(symbolId: string, symbol: DocumentSymbol, hover?: Hover): TypeKind {
+    // Check if this is a Protocol class (parsed from source)
+    if (this.protocolClasses.has(symbolId)) {
+      return TypeKind.Interface;
+    }
+    
     // Check hover info first
     if (hover) {
       const { signature } = this.extractHoverInfo(hover);
@@ -677,29 +889,133 @@ export class PythonExtractor extends ExtractorBase {
   }
 
   private async collectReferences(): Promise<void> {
+    // Build symbol lookup: name -> symbolId -> SymbolRecord
+    const symbolByName = new Map<string, SymbolRecord[]>();
     for (const record of this.symbolIndex) {
-      const position = record.selectionRange.start;
-      const locations = await this.fetchReferences(record.uri, position);
-      locations.forEach((loc) => {
-        const reference = this.createReference(record.symbolId, loc);
-        if (reference) {
-          this.references.push(reference);
+      const records = symbolByName.get(record.name) ?? [];
+      records.push(record);
+      symbolByName.set(record.name, records);
+    }
+
+    // Collect all identifier positions from all files
+    const identifierPositions: Array<{
+      uri: string;
+      filePath: string;
+      name: string;
+      position: Position;
+      range: Range;
+    }> = [];
+
+    for (const [filePath, lines] of this.fileLines) {
+      const uri = toUri(filePath);
+      for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+        const line = lines[lineNum];
+        // Match Python identifiers
+        const regex = /\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
+        let match;
+        while ((match = regex.exec(line)) !== null) {
+          const name = match[1];
+          // Only consider names that match known symbols
+          if (symbolByName.has(name)) {
+            identifierPositions.push({
+              uri,
+              filePath,
+              name,
+              position: { line: lineNum, character: match.index },
+              range: {
+                start: { line: lineNum, character: match.index },
+                end: { line: lineNum, character: match.index + name.length }
+              }
+            });
+          }
         }
-      });
+      }
+    }
+
+    this.log(`Found ${identifierPositions.length} potential references to resolve`, true);
+
+    // Resolve each identifier via definition request
+    const limit = pLimit(LSP_CONCURRENCY);
+    let completed = 0;
+    const total = identifierPositions.length;
+
+    this.progress(0, total, "Resolving references");
+
+    await Promise.all(
+      identifierPositions.map((pos) =>
+        limit(async () => {
+          try {
+            const definition = await this.fetchDefinition(pos.uri, pos.position);
+            if (definition) {
+              // Check if definition matches a known symbol
+              const targetRecord = this.findSymbolAtLocation(definition);
+              if (targetRecord) {
+                // Find enclosing symbol for this reference
+                const enclosing = this.findEnclosingSymbol({
+                  uri: pos.uri,
+                  range: pos.range
+                } as Location);
+
+                if (enclosing) {
+                  const lines = this.fileLines.get(pos.filePath) ?? [];
+                  this.references.push({
+                    target_symbol: targetRecord.symbolId,
+                    enclosing_symbol: enclosing.symbolId,
+                    role: this.inferReferenceRole(lines, pos.range),
+                    receiver: this.extractReceiver(lines, pos.range),
+                    location: {
+                      file_path: relativePath(this.options.projectRoot, pos.filePath),
+                      line: pos.range.start.line,
+                      column: pos.range.start.character
+                    }
+                  });
+                }
+              }
+            }
+          } catch {
+            // Ignore errors
+          }
+
+          completed++;
+          const updateInterval = Math.max(1, Math.floor(total / 100));
+          if (completed % updateInterval === 0 || completed === total || completed === 1) {
+            this.progress(completed, total, "Resolving references");
+          }
+        })
+      )
+    );
+  }
+
+  private async fetchDefinition(uri: string, position: Position): Promise<Location | null> {
+    try {
+      const result = await this.client!.sendRequest<Location | Location[] | null>(
+        "textDocument/definition",
+        { textDocument: { uri }, position }
+      );
+      if (Array.isArray(result)) {
+        return result[0] ?? null;
+      }
+      return result;
+    } catch {
+      return null;
     }
   }
 
-  private async fetchReferences(uri: string, position: Position): Promise<Location[]> {
-    try {
-      const result = await this.client!.sendRequest<Location[]>("textDocument/references", {
-        textDocument: { uri },
-        position,
-        context: { includeDeclaration: false }
-      });
-      return result ?? [];
-    } catch {
-      return [];
+  private findSymbolAtLocation(location: Location): SymbolRecord | undefined {
+    const candidates = this.symbolIndexByUri.get(location.uri);
+    if (!candidates) return undefined;
+
+    // Find symbol whose selectionRange contains the location
+    for (const record of candidates) {
+      if (
+        this.rangeContains(record.selectionRange, location.range.start) ||
+        (record.selectionRange.start.line === location.range.start.line &&
+          record.selectionRange.start.character === location.range.start.character)
+      ) {
+        return record;
+      }
     }
+    return undefined;
   }
 
   private createReference(targetSymbolId: string, location: Location): SymbolReference | null {
@@ -725,28 +1041,56 @@ export class PythonExtractor extends ExtractorBase {
   }
 
   private findEnclosingSymbol(location: Location): SymbolRecord | undefined {
+    // Use URI index for O(n) -> O(m) lookup where m << n
+    const candidates = this.symbolIndexByUri.get(location.uri);
+    if (!candidates) return undefined;
+
     // Find deepest symbol whose range contains location
-    return this.symbolIndex
-      .filter((record) => record.uri === location.uri && this.rangeContains(record.range, location.range.start))
-      .sort((a, b) => this.rangeSize(a.range) - this.rangeSize(b.range))[0];
+    let best: SymbolRecord | undefined;
+    let bestSize = Infinity;
+
+    for (const record of candidates) {
+      if (this.rangeContains(record.range, location.range.start)) {
+        const size = this.rangeSize(record.range);
+        if (size < bestSize) {
+          best = record;
+          bestSize = size;
+        }
+      }
+    }
+
+    return best;
   }
 
   private getFileLines(filePath: string): string[] {
-    const content = this.fileContents.get(filePath);
-    if (!content) return [];
-    return content.split(/\r?\n/);
+    // Use cached lines instead of splitting every time
+    return this.fileLines.get(filePath) ?? [];
   }
 
   private inferReferenceRole(lines: string[], range: Range): ReferenceRole {
     const line = lines[range.start.line] ?? "";
     const after = line.slice(range.end.character).trimStart();
+    
+    // Check for function call
     if (after.startsWith("(")) {
       return ReferenceRole.Call;
     }
-    const before = line.slice(0, range.start.character).trimEnd();
-    if (before.endsWith("=") || before.endsWith("+=") || before.endsWith("-=") || before.endsWith("*=") || before.endsWith("/=")) {
+    
+    // Check for assignment - the reference is being assigned to
+    // Patterns: "x = ", "x += ", "x[...] = ", "self.x = "
+    // After the reference, check for assignment operators
+    if (after.match(/^(?:\[[^\]]*\])?\s*(?:=|\+=|-=|\*=|\/=|%=|\|=|&=|\^=|>>=|<<=|\*\*=|\/\/=)/)) {
       return ReferenceRole.Write;
     }
+    
+    // Also check for augmented assignment where reference is before operator
+    const before = line.slice(0, range.start.character).trimEnd();
+    if (before.endsWith("=") || before.endsWith("+=") || before.endsWith("-=") || 
+        before.endsWith("*=") || before.endsWith("/=")) {
+      // This is the right-hand side of an assignment, so it's a Read
+      return ReferenceRole.Read;
+    }
+    
     return ReferenceRole.Read;
   }
 

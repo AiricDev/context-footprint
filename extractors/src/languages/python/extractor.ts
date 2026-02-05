@@ -18,7 +18,6 @@ import { LspClientOptions } from "../../core/lsp-client";
 import {
   FunctionDetails,
   FunctionModifiers,
-  Mutability,
   Parameter,
   ReferenceRole,
   SemanticData,
@@ -28,37 +27,27 @@ import {
   TypeDetails,
   TypeKind,
   VariableDetails,
-  VariableScope,
-  Visibility
+  VariableScope
 } from "../../core/types";
-
-const pyrightLangServer = require.resolve("pyright/langserver.index.js");
-
-// Concurrency limits for LSP requests
-const LSP_CONCURRENCY = 10;
-const FILE_READ_CONCURRENCY = 50;
-
-interface SymbolRecord {
-  symbolId: string;
-  uri: string;
-  range: Range;
-  selectionRange: Range;
-  kind: SymbolKind;
-  enclosingSymbol: string | null;
-  name: string;
-  detail?: string;
-  children?: DocumentSymbol[];
-}
-
-interface SymbolInfo {
-  name: string;
-  kind: SymbolKind;
-  detail?: string;
-  documentation: string[];
-  parameters: Parameter[];
-  returnTypes: string[];
-  isAbstract: boolean;
-}
+import { LSP_CONCURRENCY, FILE_READ_CONCURRENCY, pyrightLangServer } from "./constants";
+import type { SymbolRecord } from "./types";
+import {
+  splitParams,
+  rangeContains,
+  rangeSize,
+  inferVisibility,
+  inferMutability,
+  isBuiltinType,
+  simplifyLiteralType
+} from "./symbol-utils";
+import { extractHoverInfo, parseSignature } from "./hover";
+import {
+  inferReferenceRole,
+  extractReceiver,
+  findDefLine,
+  findClassLine,
+  isDecoratorForNestedDef
+} from "./reference-utils";
 
 export class PythonExtractor extends ExtractorBase {
   private fileContents = new Map<string, string>();
@@ -67,10 +56,14 @@ export class PythonExtractor extends ExtractorBase {
   private symbolIndexByUri = new Map<string, SymbolRecord[]>(); // Index by URI for fast lookup
   private definitions: SymbolDefinition[] = [];
   private references: SymbolReference[] = [];
+  private externalSymbols: SymbolDefinition[] = [];
+  private externalSymbolIds = new Set<string>();
   private hoverCache = new Map<string, Hover>();
   private protocolClasses = new Set<string>();
   // Map from function symbol ID to set of local type names defined within that function
   private localTypesByFunction = new Map<string, Set<string>>();
+  /** During collectReferences: only use these symbol IDs for enclosing lookup. */
+  private definitionSymbolIdsForEnclosing: Set<string> | null = null;
 
   constructor(options: ExtractOptions) {
     super(options);
@@ -126,7 +119,7 @@ export class PythonExtractor extends ExtractorBase {
     return {
       project_root: this.options.projectRoot,
       documents,
-      external_symbols: []
+      external_symbols: this.externalSymbols
     };
   }
 
@@ -241,14 +234,30 @@ export class PythonExtractor extends ExtractorBase {
           try {
             let position = symbol.selectionRange?.start ?? symbol.range.start;
 
+            // If selectionRange equals range start, we need to find the actual name position
+            // This is especially important for decorated functions where range starts at decorator
             if (
               symbol.selectionRange?.start.line === symbol.range.start.line &&
               symbol.selectionRange?.start.character === symbol.range.start.character
             ) {
-              const lineText = lines[symbol.range.start.line] ?? "";
-              const namePos = lineText.indexOf(symbol.name, symbol.range.start.character);
+              // For functions, find the "def" line first (handles decorators)
+              const isFunction = symbol.kind === LspSymbolKind.Function || symbol.kind === LspSymbolKind.Method;
+              let searchLine = symbol.range.start.line;
+              
+              if (isFunction) {
+                // Find the actual "def" line
+                for (let i = symbol.range.start.line; i < lines.length; i++) {
+                  if (lines[i].match(/^\s*(async\s+)?def\s+/)) {
+                    searchLine = i;
+                    break;
+                  }
+                }
+              }
+              
+              const lineText = lines[searchLine] ?? "";
+              const namePos = lineText.indexOf(symbol.name);
               if (namePos >= 0) {
-                position = { line: symbol.range.start.line, character: namePos };
+                position = { line: searchLine, character: namePos };
               }
             }
 
@@ -292,7 +301,7 @@ export class PythonExtractor extends ExtractorBase {
       // Pop stack until we find a parent that contains this symbol
       while (stack.length > 0) {
         const top = stack[stack.length - 1];
-        if (this.rangeContains(top.symbol.range, symbol.range.start)) {
+        if (rangeContains(top.symbol.range, symbol.range.start)) {
           break;
         }
         stack.pop();
@@ -536,6 +545,13 @@ export class PythonExtractor extends ExtractorBase {
         }
       }
 
+      // Skip nested functions inside another function (e.g. wrapper inside log_call)
+      // Annotation semantics: only top-level and method definitions are emitted
+      if (kind === SymbolKind.Function && parentFunction) {
+        const hasEnclosingType = parents.some((p) => p.kind === SymbolKind.Type);
+        if (!hasEnclosingType) continue;
+      }
+
       // Build proper symbol ID with full hierarchy
       // For class fields in __init__, exclude Function parents from the chain
       const symbolId = (kind === SymbolKind.Variable && isInInit)
@@ -597,13 +613,18 @@ export class PythonExtractor extends ExtractorBase {
     const typeDetails = (typeDef.details as { Type: TypeDetails }).Type;
     const uri = toUri(filePath);
     const currentModule = this.extractModuleName(filePath);
+    const lines = this.getFileLines(filePath);
     
-    // Helper to get field type from hover
-    const getFieldType = (parent: DocumentSymbol, field: DocumentSymbol): string | null => {
-      const nameChain = [typeRecord.name, parent.name, field.name];
+    // Helper to get field type - prefers declared type annotation over inferred
+    const getFieldType = (field: DocumentSymbol, nameChain: string[]): string | null => {
+      // First try to get declared type from source
+      const declaredType = this.extractDeclaredType(lines, field.selectionRange, currentModule);
+      if (declaredType) return declaredType;
+      
+      // Fall back to hover-based inference
       const hover = this.getHoverInfo(uri, nameChain);
       if (hover) {
-        const { signature } = this.extractHoverInfo(hover);
+        const { signature } = extractHoverInfo(hover);
         return this.extractVariableType(signature, currentModule);
       }
       return null;
@@ -626,12 +647,13 @@ export class PythonExtractor extends ExtractorBase {
                 }
                 const fieldSymbolId = this.createSymbolId(filePath, [typeRecord], field, fieldKind);
                 if (!typeDetails.fields.some(f => f.symbol_id === fieldSymbolId)) {
-                  const fieldType = getFieldType(child, field);
+                  const nameChain = [typeRecord.name, child.name, field.name];
+                  const fieldType = getFieldType(field, nameChain);
                   typeDetails.fields.push({
                     name: field.name,
                     field_type: fieldType || null,
-                    mutability: this.inferMutability(field),
-                    visibility: this.inferVisibility(field.name),
+                    mutability: inferMutability(field),
+                    visibility: inferVisibility(field.name),
                     symbol_id: fieldSymbolId
                   });
                 }
@@ -642,18 +664,13 @@ export class PythonExtractor extends ExtractorBase {
           // Direct class-level variables (rare in Python but possible)
           const fieldSymbolId = this.createSymbolId(filePath, [typeRecord], child, childKind);
           if (!typeDetails.fields.some(f => f.symbol_id === fieldSymbolId)) {
-            // For class-level variables, nameChain is [ClassName, varName]
-            const hover = this.getHoverInfo(uri, [typeRecord.name, child.name]);
-            let fieldType: string | null = null;
-            if (hover) {
-              const { signature } = this.extractHoverInfo(hover);
-              fieldType = this.extractVariableType(signature, currentModule);
-            }
+            const nameChain = [typeRecord.name, child.name];
+            const fieldType = getFieldType(child, nameChain);
             typeDetails.fields.push({
               name: child.name,
               field_type: fieldType || null,
-              mutability: this.inferMutability(child),
-              visibility: this.inferVisibility(child.name),
+              mutability: inferMutability(child),
+              visibility: inferVisibility(child.name),
               symbol_id: fieldSymbolId
             });
           }
@@ -733,14 +750,6 @@ export class PythonExtractor extends ExtractorBase {
     return `${baseName}#Variable`;
   }
 
-  private inferMutability(symbol: DocumentSymbol): Mutability {
-    // Pyright marks all-caps variables as Constant based on PEP 8 naming convention
-    if (symbol.kind === LspSymbolKind.Constant) {
-      return Mutability.Const;
-    }
-    return Mutability.Mutable;
-  }
-
   // Parse class inheritance from source code
   // Returns { inherits: [...], implements: [...] }
   private parseClassInheritance(
@@ -774,7 +783,7 @@ export class PythonExtractor extends ExtractorBase {
 
     // Parse base classes
     // Split by comma, handling potential generic types like List[str]
-    const bases = this.splitParams(baseList).map(b => b.trim()).filter(b => b);
+    const bases = splitParams(baseList).map(b => b.trim()).filter(b => b);
     
     const inherits: string[] = [];
     const implementsList: string[] = [];
@@ -831,7 +840,7 @@ export class PythonExtractor extends ExtractorBase {
       end_column: symbol.range.end.character
     };
 
-    const { documentation } = this.extractHoverInfo(hover);
+    const { documentation } = extractHoverInfo(hover);
     const typeKind = this.inferTypeKind(symbolId, symbol, hover);
     
     // Parse inheritance from source code
@@ -841,7 +850,7 @@ export class PythonExtractor extends ExtractorBase {
       kind: typeKind,
       is_abstract: typeKind === TypeKind.Interface || this.isAbstractType(symbol),
       is_final: false,
-      visibility: this.inferVisibility(symbol.name),
+      visibility: inferVisibility(symbol.name),
       type_params: [],
       fields: [],
       inherits: inheritance.inherits,
@@ -884,11 +893,11 @@ export class PythonExtractor extends ExtractorBase {
       end_column: symbol.range.end.character
     };
 
-    const { documentation, signature } = this.extractHoverInfo(hover);
+    const { documentation, signature } = extractHoverInfo(hover);
     
     // Parse signature to get raw type names
     const { parameters: rawParameters, returnTypes: rawReturnTypes } = 
-      this.parseSignature(signature || symbol.detail || "");
+      parseSignature(signature || symbol.detail || "");
     
     // Resolve type references to fully qualified symbol IDs
     // Pass the function's symbol ID to exclude locally shadowed types
@@ -961,15 +970,20 @@ export class PythonExtractor extends ExtractorBase {
       end_column: symbol.range.end.character
     };
 
-    const { documentation, signature } = this.extractHoverInfo(hover);
+    const { documentation, signature } = extractHoverInfo(hover);
     const currentModule = this.extractModuleName(filePath);
-    const varType = this.extractVariableType(signature, currentModule);
+    const lines = this.getFileLines(filePath);
+    
+    // Prefer declared type annotation from source code over inferred type from hover
+    const declaredType = this.extractDeclaredType(lines, symbol.selectionRange, currentModule);
+    const inferredType = this.extractVariableType(signature, currentModule);
+    const varType = declaredType || inferredType;
 
     const varDetails: VariableDetails = {
       var_type: varType || undefined,
-      mutability: this.inferMutability(symbol),
+      mutability: inferMutability(symbol),
       scope: enclosingSymbol ? VariableScope.Field : VariableScope.Global,
-      visibility: this.inferVisibility(symbol.name)
+      visibility: inferVisibility(symbol.name)
     };
 
     return {
@@ -995,7 +1009,7 @@ export class PythonExtractor extends ExtractorBase {
     excludedTypes: Set<string> = new Set()
   ): string {
     // For builtin types, return as-is
-    if (this.isBuiltinType(typeName)) {
+    if (isBuiltinType(typeName)) {
       return typeName;
     }
 
@@ -1037,76 +1051,26 @@ export class PythonExtractor extends ExtractorBase {
     return typeName;
   }
 
-  // Check if a type is a Python builtin
-  private isBuiltinType(typeName: string): boolean {
-    const builtins = new Set([
-      "int", "float", "complex", "bool", "str", "bytes", "bytearray",
-      "list", "tuple", "set", "frozenset", "dict", "None", "NoneType",
-      "object", "type", "range", "slice", "memoryview", "property",
-      "callable", "iterable", "iterator", "generator", "coroutine",
-      "any", "union", "optional", "literal", "final", "typeddict",
-      "self", "cls", "exception", "BaseException"
-    ]);
+  /**
+   * Extract declared type annotation from source code.
+   * Patterns: "name: Type" or "name: Type = value"
+   * Returns null if no explicit type annotation is found.
+   */
+  private extractDeclaredType(lines: string[], range: Range, currentModule: string): string | null {
+    const line = lines[range.start.line] ?? "";
+    // Look for pattern: name: Type or name: Type = value
+    // Match from the variable name position to find ": Type"
+    const afterName = line.slice(range.end.character);
     
-    // Remove generic parameters for checking
-    const baseType = typeName.split("[")[0].trim();
-    return builtins.has(baseType) || builtins.has(baseType.toLowerCase());
-  }
-
-  private extractHoverInfo(hover?: Hover): { documentation: string[]; signature: string } {
-    if (!hover) {
-      return { documentation: [], signature: "" };
-    }
-
-    const documentation: string[] = [];
-    let signature = "";
-
-    if (hover.contents) {
-      if (typeof hover.contents === "string") {
-        // Plain string content - usually just the signature
-        signature = hover.contents.trim();
-      } else if (Array.isArray(hover.contents)) {
-        // Array of MarkedString
-        for (const item of hover.contents) {
-          if (typeof item === "string") {
-            if (!signature) {
-              signature = item.trim();
-            } else {
-              documentation.push(item.trim());
-            }
-          } else if (item && typeof item === "object" && "value" in item) {
-            if (item.language === "python") {
-              if (!signature) {
-                signature = item.value.trim();
-              }
-            } else {
-              documentation.push(item.value.trim());
-            }
-          }
-        }
-      } else if (typeof hover.contents === "object" && "kind" in hover.contents) {
-        // MarkupContent (plaintext or markdown)
-        const content = hover.contents as { kind: string; value: string };
-        const value = content.value.trim();
-        
-        // Pyright format: "(type) signature\n\nDocstring"
-        // or "(function) def name(...)\n\nDocstring"
-        // Split on double newline to separate signature from docs
-        const parts = value.split(/\n\n/);
-        if (parts.length > 0) {
-          signature = parts[0].trim();
-          // Everything after the first double-newline is documentation
-          if (parts.length > 1) {
-            const docText = parts.slice(1).join("\n\n").trim();
-            if (docText) {
-              documentation.push(docText);
-            }
-          }
-        }
+    // Pattern: ": Type" possibly followed by "=" or end of statement
+    const typeMatch = afterName.match(/^\s*:\s*([^=]+?)(?:\s*=|$)/);
+    if (typeMatch) {
+      const rawType = typeMatch[1].trim();
+      if (rawType) {
+        return this.resolveTypeRef(rawType, currentModule);
       }
     }
-
-    return { documentation, signature };
+    return null;
   }
 
   /**
@@ -1123,134 +1087,25 @@ export class PythonExtractor extends ExtractorBase {
     const varMatch = normalized.match(/^\((?:variable|constant)\)\s+\w+:\s*(.+)$/);
     if (varMatch) {
       const rawType = varMatch[1].trim();
-      return this.resolveTypeRef(rawType, currentModule);
+      const resolved = this.resolveTypeRef(rawType, currentModule);
+      return simplifyLiteralType(resolved);
     }
 
     // Pattern: just "name: Type" (simpler case)
     const simpleMatch = normalized.match(/^\w+:\s*(.+)$/);
     if (simpleMatch) {
       const rawType = simpleMatch[1].trim();
-      return this.resolveTypeRef(rawType, currentModule);
+      const resolved = this.resolveTypeRef(rawType, currentModule);
+      return simplifyLiteralType(resolved);
     }
 
     return null;
   }
 
-  /**
-   * Parse function signature to extract parameters and return types.
-   * Returns raw type names - type resolution is done separately via LSP.
-   */
-  private parseSignature(signature: string): { parameters: Parameter[]; returnTypes: string[] } {
-    if (!signature) {
-      return { parameters: [], returnTypes: [] };
-    }
-
-    // Pyright format can be multiline:
-    // "(function) def process_file(\n    reader: Reader,\n    path: str\n) -> int"
-    // or "(class) ClassName"
-    // or "(method) def read(self, path: str) -> str"
-    
-    // Normalize to single line by removing newlines and extra spaces
-    const normalizedSig = signature
-      .replace(/\r?\n/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    
-    // Remove type prefix like "(function) ", "(method) ", "(class) "
-    const cleanSig = normalizedSig.replace(/^\([^)]+\)\s*/, "");
-    
-    // Remove "def " prefix if present
-    const withoutDef = cleanSig.replace(/^def\s+/, "");
-    
-    // Extract parameters from parentheses - use greedy match for content
-    const paramMatch = withoutDef.match(/\(([^)]*)\)(?:\s*->\s*(.+))?$/);
-    if (!paramMatch) {
-      return { parameters: [], returnTypes: [] };
-    }
-
-    const paramString = paramMatch[1];
-    const returnTypeStr = paramMatch[2]?.trim();
-
-    // Parse individual parameters
-    const parameters: Parameter[] = [];
-    if (paramString.trim()) {
-      // Handle nested parentheses in type annotations by simple split on comma
-      // This is a simplified parser - real Python signatures can be complex
-      const paramParts = this.splitParams(paramString);
-      
-      for (const param of paramParts) {
-        const trimmed = param.trim();
-        if (!trimmed) {
-          continue;
-        }
-
-        // Check for variadic parameters
-        const isVariadic = trimmed.startsWith("*") || trimmed.startsWith("**");
-        const paramWithoutStars = trimmed.replace(/^\*+/, "");
-
-        // Parse parameter: name: type = default or name: type or name = default or name
-        const match = paramWithoutStars.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*(?::\s*([^=]+))?\s*(?:=\s*(.+))?$/);
-        if (match) {
-          const name = match[1];
-          
-          // Skip self/cls after extracting the name (handles typed forms like "self: Self@FileReader")
-          if (name === "self" || name === "cls") {
-            continue;
-          }
-          
-          const paramType = match[2]?.trim() || null;
-          const hasDefault = !!match[3];
-
-          parameters.push({
-            name,
-            param_type: paramType,
-            has_default: hasDefault,
-            is_variadic: isVariadic
-          });
-        }
-      }
-    }
-
-    // Parse return types
-    const returnTypes: string[] = [];
-    if (returnTypeStr) {
-      returnTypes.push(returnTypeStr);
-    }
-
-    return { parameters, returnTypes };
-  }
-
-  private splitParams(paramString: string): string[] {
-    const result: string[] = [];
-    let current = "";
-    let depth = 0;
-    
-    for (const char of paramString) {
-      if (char === "(" || char === "[" || char === "{") {
-        depth++;
-        current += char;
-      } else if (char === ")" || char === "]" || char === "}") {
-        depth--;
-        current += char;
-      } else if (char === "," && depth === 0) {
-        result.push(current);
-        current = "";
-      } else {
-        current += char;
-      }
-    }
-    
-    if (current.trim()) {
-      result.push(current);
-    }
-    
-    return result;
-  }
-
   private isAbstractFromHover(hover?: Hover): boolean {
     if (!hover) return false;
     
-    const { signature } = this.extractHoverInfo(hover);
+    const { signature } = extractHoverInfo(hover);
     // In Pyright, abstract methods often show "@abstractmethod" or similar in hover
     return signature.includes("@abstract") || signature.includes("@abstractmethod");
   }
@@ -1271,7 +1126,7 @@ export class PythonExtractor extends ExtractorBase {
       is_generator: false,
       is_static: name.startsWith("__") && name.endsWith("__"),
       is_abstract: false, // Will be set by caller
-      visibility: this.inferVisibility(name)
+      visibility: inferVisibility(name)
     };
   }
 
@@ -1283,7 +1138,7 @@ export class PythonExtractor extends ExtractorBase {
     
     // Check hover info first
     if (hover) {
-      const { signature } = this.extractHoverInfo(hover);
+      const { signature } = extractHoverInfo(hover);
       if (signature.includes("Protocol") || signature.includes("protocol")) {
         return TypeKind.Interface;
       }
@@ -1301,16 +1156,15 @@ export class PythonExtractor extends ExtractorBase {
     return symbol.detail?.includes("Protocol") ?? false;
   }
 
-  private inferVisibility(name: string): Visibility {
-    if (name.startsWith("__") && !name.endsWith("__")) return Visibility.Private;
-    if (name.startsWith("_")) return Visibility.Private;
-    return Visibility.Public;
-  }
-
   private async collectReferences(): Promise<void> {
+    // Only use symbols we actually emit as definitions for enclosing lookup
+    const definitionSymbolIds = new Set(this.definitions.map((d) => d.symbol_id));
+    this.definitionSymbolIdsForEnclosing = definitionSymbolIds;
+
     // Build symbol lookup: name -> symbolId -> SymbolRecord
     const symbolByName = new Map<string, SymbolRecord[]>();
     for (const record of this.symbolIndex) {
+      if (!definitionSymbolIds.has(record.symbolId)) continue;
       const records = symbolByName.get(record.name) ?? [];
       records.push(record);
       symbolByName.set(record.name, records);
@@ -1325,6 +1179,12 @@ export class PythonExtractor extends ExtractorBase {
       definitionsByUri.set(record.uri, records);
     }
 
+    // Build imported names per file (so we resolve refs to e.g. functools.wraps)
+    const importedNamesByFile = new Map<string, Set<string>>();
+    for (const [filePath, lines] of this.fileLines) {
+      importedNamesByFile.set(filePath, this.collectImportedNames(lines));
+    }
+
     // Collect all identifier positions from all files
     const identifierPositions: Array<{
       uri: string;
@@ -1336,15 +1196,14 @@ export class PythonExtractor extends ExtractorBase {
 
     for (const [filePath, lines] of this.fileLines) {
       const uri = toUri(filePath);
+      const importedNames = importedNamesByFile.get(filePath) ?? new Set();
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
         const line = lines[lineNum];
-        // Match Python identifiers
         const regex = /\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g;
         let match;
         while ((match = regex.exec(line)) !== null) {
           const name = match[1];
-          // Only consider names that match known symbols
-          if (symbolByName.has(name)) {
+          if (symbolByName.has(name) || importedNames.has(name)) {
             identifierPositions.push({
               uri,
               filePath,
@@ -1375,10 +1234,8 @@ export class PythonExtractor extends ExtractorBase {
           try {
             const definition = await this.fetchDefinition(pos.uri, pos.position);
             if (definition) {
-              // Check if definition matches a known symbol
               const targetRecord = this.findSymbolAtLocation(definition);
-              
-              
+
               if (targetRecord) {
                 // Skip if this identifier is at the definition site (not a reference)
                 // Exception: Field definitions (Variable with scope=Field) are also Write references
@@ -1416,7 +1273,7 @@ export class PythonExtractor extends ExtractorBase {
 
                 if (enclosing) {
                   const lines = this.fileLines.get(pos.filePath) ?? [];
-                  const receiver = this.extractReceiver(lines, pos.range);
+                  const receiver = extractReceiver(lines, pos.range);
                   
                   // Determine the actual target symbol
                   let actualTarget = targetRecord.symbolId;
@@ -1443,21 +1300,45 @@ export class PythonExtractor extends ExtractorBase {
                   
                   // Get the actual target record for role inference
                   const actualTargetRecord = this.symbolIndex.find(r => r.symbolId === actualTarget) ?? targetRecord;
-                  const role = this.inferReferenceRole(lines, pos.range, actualTargetRecord.kind);
-                  
-                  // Skip TypeAnnotation references in function signatures - these are already 
-                  // captured in FunctionDetails (param_type, return_types)
-                  if (role === ReferenceRole.TypeAnnotation && enclosing.kind === SymbolKind.Function) {
-                    // Check if this is within the function signature (definition line)
-                    if (pos.range.start.line === enclosing.selectionRange.start.line) {
+                  const role = inferReferenceRole(lines, pos.range, actualTargetRecord.kind);
+
+                  // Skip type-in-signature (param/return/inherits) - no reference emitted
+                  if (role === null) {
+                    completed++;
+                    return;
+                  }
+
+                  // Skip Decorate refs when decorator is for nested def/class (we don't track those)
+                  if (role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line)) {
+                    completed++;
+                    return;
+                  }
+
+                  // Skip type refs on def/class line (param types, return type, base classes)
+                  if (enclosing.kind === SymbolKind.Function) {
+                    const defLine = findDefLine(lines, enclosing.range.start.line);
+                    if (pos.range.start.line === defLine && actualTargetRecord.kind === SymbolKind.Type) {
+                      completed++;
+                      return;
+                    }
+                  } else if (enclosing.kind === SymbolKind.Type) {
+                    const classLine = findClassLine(lines, enclosing.range.start.line);
+                    if (pos.range.start.line === classLine && actualTargetRecord.kind === SymbolKind.Type) {
                       completed++;
                       return;
                     }
                   }
-                  
+
+                  // Class decorator: use __init__ as enclosing_symbol (Decorate semantics)
+                  let enclosingSymbolId = enclosing.symbolId;
+                  if (role === ReferenceRole.Decorate && enclosing.kind === SymbolKind.Type) {
+                    const initId = this.findInitSymbol(enclosing.symbolId);
+                    if (initId) enclosingSymbolId = initId;
+                  }
+
                   this.references.push({
                     target_symbol: actualTarget,
-                    enclosing_symbol: enclosing.symbolId,
+                    enclosing_symbol: enclosingSymbolId,
                     role,
                     receiver,
                     location: {
@@ -1466,6 +1347,109 @@ export class PythonExtractor extends ExtractorBase {
                       column: pos.range.start.character
                     }
                   });
+                }
+              } else {
+                // Definition not in our symbol index: external (e.g. functools.wraps) or at import line
+                try {
+                  const defPath = fileURLToPath(definition.uri);
+                  const defPathResolved = path.resolve(defPath);
+                  const projectFilePaths = new Set(
+                    Array.from(this.fileLines.keys()).map((f) => path.resolve(f))
+                  );
+                  const isOutsideProject = !projectFilePaths.has(defPathResolved);
+                  let defLine = "";
+                  if (projectFilePaths.has(defPathResolved)) {
+                    const key = Array.from(this.fileLines.keys()).find(
+                      (k) => path.resolve(k) === defPathResolved
+                    );
+                    if (key) {
+                      defLine =
+                        this.fileLines.get(key)?.[definition.range.start.line] ??
+                        "";
+                    }
+                  }
+                  const isImportLine =
+                    /^\s*from\s+\S+\s+import/.test(defLine) ||
+                    /^\s*import\s+/.test(defLine);
+                  if (isOutsideProject || isImportLine) {
+                    let externalSymbolId: string;
+                    if (isImportLine) {
+                      const fromMatch = defLine.match(/^\s*from\s+(\S+)\s+import/);
+                      const module = fromMatch
+                        ? fromMatch[1]
+                        : path.basename(defPath, path.extname(defPath));
+                      externalSymbolId = `${module}.${pos.name}#Function`;
+                    } else {
+                      externalSymbolId = this.inferExternalSymbolId(
+                        definition.uri,
+                        pos.name
+                      );
+                    }
+                    this.ensureExternalSymbol(externalSymbolId, pos.name);
+                    const enclosing = this.findEnclosingSymbol({
+                      uri: pos.uri,
+                      range: pos.range
+                    } as Location);
+                    if (enclosing) {
+                      const lines = this.fileLines.get(pos.filePath) ?? [];
+                      const role = inferReferenceRole(
+                        lines,
+                        pos.range,
+                        SymbolKind.Function
+                      );
+                      if (role !== null &&
+                          !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))) {
+                        this.references.push({
+                          target_symbol: externalSymbolId,
+                          enclosing_symbol: enclosing.symbolId,
+                          role,
+                          receiver: undefined,
+                          location: {
+                            file_path: relativePath(
+                              this.options.projectRoot,
+                              pos.filePath
+                            ),
+                            line: pos.range.start.line,
+                            column: pos.range.start.character
+                          }
+                        });
+                      }
+                    }
+                  }
+                } catch {
+                  // Ignore URI parse errors
+                }
+              }
+            } else {
+              // LSP returned no definition (e.g. stdlib); if name is imported, create external ref
+              const importedNames = importedNamesByFile.get(pos.filePath);
+              if (importedNames?.has(pos.name)) {
+                const enclosing = this.findEnclosingSymbol({
+                  uri: pos.uri,
+                  range: pos.range
+                } as Location);
+                if (enclosing) {
+                  const module = this.getModuleForImportedName(pos.filePath, pos.name);
+                  if (module) {
+                    const externalSymbolId = `${module}.${pos.name}#Function`;
+                    this.ensureExternalSymbol(externalSymbolId, pos.name);
+                    const lines = this.fileLines.get(pos.filePath) ?? [];
+                    const role = inferReferenceRole(lines, pos.range, SymbolKind.Function);
+                    if (role !== null &&
+                        !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))) {
+                      this.references.push({
+                        target_symbol: externalSymbolId,
+                        enclosing_symbol: enclosing.symbolId,
+                        role,
+                        receiver: undefined,
+                        location: {
+                          file_path: relativePath(this.options.projectRoot, pos.filePath),
+                          line: pos.range.start.line,
+                          column: pos.range.start.character
+                        }
+                      });
+                    }
+                  }
                 }
               }
             }
@@ -1481,6 +1465,7 @@ export class PythonExtractor extends ExtractorBase {
         })
       )
     );
+    this.definitionSymbolIdsForEnclosing = null;
   }
 
   private async fetchDefinition(uri: string, position: Position): Promise<Location | null> {
@@ -1505,7 +1490,7 @@ export class PythonExtractor extends ExtractorBase {
     // Find symbol whose selectionRange contains the location
     for (const record of candidates) {
       if (
-        this.rangeContains(record.selectionRange, location.range.start) ||
+        rangeContains(record.selectionRange, location.range.start) ||
         (record.selectionRange.start.line === location.range.start.line &&
           record.selectionRange.start.character === location.range.start.character)
       ) {
@@ -1515,44 +1500,20 @@ export class PythonExtractor extends ExtractorBase {
     return undefined;
   }
 
-  private createReference(targetSymbolId: string, targetKind: SymbolKind, location: Location): SymbolReference | null {
-    const absPath = fileURLToPath(location.uri);
-    const relPath = relativePath(this.options.projectRoot, absPath);
-    const lines = this.getFileLines(absPath);
-    const role = this.inferReferenceRole(lines, location.range, targetKind);
-
-    const enclosing = this.findEnclosingSymbol(location);
-    if (!enclosing) return null;
-
-    return {
-      target_symbol: targetSymbolId,
-      enclosing_symbol: enclosing.symbolId,
-      role,
-      receiver: this.extractReceiver(lines, location.range),
-      location: {
-        file_path: relPath,
-        line: location.range.start.line,
-        column: location.range.start.character
-      }
-    };
-  }
-
   private findEnclosingSymbol(location: Location): SymbolRecord | undefined {
-    // Use URI index for O(n) -> O(m) lookup where m << n
     const candidates = this.symbolIndexByUri.get(location.uri);
     if (!candidates) return undefined;
 
-    // Find deepest Function or Type symbol whose range contains location
-    // We skip Variables because references should be enclosed by Functions/Types, not by Variables
+    const allowedIds = this.definitionSymbolIdsForEnclosing;
     let best: SymbolRecord | undefined;
     let bestSize = Infinity;
 
     for (const record of candidates) {
-      // Only consider Functions and Types as potential enclosing symbols
       if (record.kind === SymbolKind.Variable) continue;
-      
-      if (this.rangeContains(record.range, location.range.start)) {
-        const size = this.rangeSize(record.range);
+      if (allowedIds && !allowedIds.has(record.symbolId)) continue;
+
+      if (rangeContains(record.range, location.range.start)) {
+        const size = rangeSize(record.range);
         if (size < bestSize) {
           best = record;
           bestSize = size;
@@ -1568,86 +1529,106 @@ export class PythonExtractor extends ExtractorBase {
     return this.fileLines.get(filePath) ?? [];
   }
 
-  private inferReferenceRole(lines: string[], range: Range, targetKind: SymbolKind): ReferenceRole {
-    const line = lines[range.start.line] ?? "";
-    const before = line.slice(0, range.start.character);
-    const after = line.slice(range.end.character).trimStart();
-    
-    // Check for type annotation context (applies to Type symbols)
-    // Patterns: ": Type", "-> Type", "[Type]", "Type[", "| Type"
-    if (targetKind === SymbolKind.Type) {
-      // Check before: ends with ": " or "-> " (type annotation/return type)
-      if (before.match(/(?::\s*|->?\s*)$/)) {
-        return ReferenceRole.TypeAnnotation;
-      }
-      // Check after: followed by "]" or "[" or "," or ")" or end (generic params)
-      if (after.match(/^[\]\[,\)=\s]/) || after === "") {
-        // Also check before for "[" indicating generic context
-        if (before.match(/[\[\(,]\s*$/)) {
-          return ReferenceRole.TypeAnnotation;
-        }
-      }
-      // Check for union type: "| Type" or "Type |"
-      if (before.match(/\|\s*$/) || after.startsWith("|")) {
-        return ReferenceRole.TypeAnnotation;
-      }
-      // Check for inheritance context: "class Foo(Type)"
-      if (before.match(/class\s+\w+\s*\(\s*$/) || before.match(/,\s*$/)) {
-        const lineBeforeClass = line.match(/class\s+\w+\s*\(/);
-        if (lineBeforeClass) {
-          return ReferenceRole.TypeAnnotation;
-        }
-      }
-    }
-    
-    // Check for function call
-    if (after.startsWith("(")) {
-      return ReferenceRole.Call;
-    }
-    
-    // Check for assignment - the reference is being assigned to
-    // Patterns: "x = ", "x += ", "x[...] = ", "self.x = "
-    // After the reference, check for assignment operators
-    if (after.match(/^(?:\[[^\]]*\])?\s*(?:=(?!=)|\+=|-=|\*=|\/=|%=|\|=|&=|\^=|>>=|<<=|\*\*=|\/\/=)/)) {
-      return ReferenceRole.Write;
-    }
-    
-    return ReferenceRole.Read;
-  }
-
-  private extractReceiver(lines: string[], range: Range): string | null {
-    const line = lines[range.start.line] ?? "";
-    const before = line.slice(0, range.start.character);
-    const match = before.match(/([a-zA-Z0-9_]+)\.$/);
-    return match ? match[1] : null;
-  }
-
   private findMemberSymbol(typeSymbolId: string, memberName: string): string | null {
     // Look for a member (method or field) of the given type with the given name
     // Symbol IDs follow pattern: module.Type.member#Kind
     // e.g., main.FileReader.encoding#Variable or main.Reader.read#Function
-    
-    // First, try to find an exact match in symbolIndex
     for (const record of this.symbolIndex) {
       if (record.enclosingSymbol === typeSymbolId && record.name === memberName) {
         return record.symbolId;
       }
     }
-    
-    // If not found, the type might be an interface/protocol and we should look
-    // for the member on the implementing type. For now, return null.
     return null;
   }
 
-  private rangeContains(range: Range, position: Position): boolean {
-    if (position.line < range.start.line || position.line > range.end.line) return false;
-    if (position.line === range.start.line && position.character < range.start.character) return false;
-    if (position.line === range.end.line && position.character > range.end.character) return false;
-    return true;
+  /** Find __init__ method symbol ID for a type (for class-decorator enclosing). */
+  private findInitSymbol(typeSymbolId: string): string | null {
+    return this.findMemberSymbol(typeSymbolId, "__init__");
   }
 
-  private rangeSize(range: Range): number {
-    return (range.end.line - range.start.line) * 1000 + (range.end.character - range.start.character);
+  /** Collect imported names from file lines (from X import Y, Z; import X as Y). */
+  private collectImportedNames(lines: string[]): Set<string> {
+    const names = new Set<string>();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const fromMatch = trimmed.match(/^from\s+\S+\s+import\s+(.+)$/);
+      if (fromMatch) {
+        for (const part of fromMatch[1].split(",")) {
+          const asMatch = part.trim().match(/^(\w+)(?:\s+as\s+(\w+))?$/);
+          if (asMatch) names.add(asMatch[2] ?? asMatch[1]);
+        }
+        continue;
+      }
+      const importMatch = trimmed.match(/^import\s+(.+)$/);
+      if (importMatch) {
+        for (const part of importMatch[1].split(",")) {
+          const asMatch = part.trim().match(/^(\w+)(?:\s+as\s+(\w+))?$/);
+          if (asMatch) names.add(asMatch[2] ?? asMatch[1]);
+        }
+      }
+    }
+    return names;
+  }
+
+  /** Get module name for an imported name (from X import Y -> X for name Y). */
+  private getModuleForImportedName(filePath: string, name: string): string | null {
+    const lines = this.fileLines.get(filePath) ?? [];
+    for (const line of lines) {
+      const fromMatch = line.trim().match(/^from\s+(\S+)\s+import\s+(.+)$/);
+      if (fromMatch) {
+        const imports = fromMatch[2].split(",").map((p) => p.trim().match(/^(\w+)(?:\s+as\s+(\w+))?$/));
+        for (const m of imports) {
+          if (m && (m[2] ?? m[1]) === name) return fromMatch[1];
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Infer external symbol ID from definition URI and name (e.g. functools.wraps#Function). */
+  private inferExternalSymbolId(definitionUri: string, name: string): string {
+    try {
+      const defPath = fileURLToPath(definitionUri);
+      const base = path.basename(defPath, path.extname(defPath));
+      const module = base === "typing" || /^[a-z_]+$/.test(base) ? base : "external";
+      return `${module}.${name}#Function`;
+    } catch {
+      return `external.${name}#Function`;
+    }
+  }
+
+  /** Ensure external symbol exists in externalSymbols (minimal stub for reference target). */
+  private ensureExternalSymbol(symbolId: string, name: string): void {
+    if (this.externalSymbolIds.has(symbolId)) return;
+    this.externalSymbolIds.add(symbolId);
+    const [displayName] = symbolId.split("#");
+    const lastDot = displayName.lastIndexOf(".");
+    const shortName = lastDot >= 0 ? displayName.slice(lastDot + 1) : displayName;
+    this.externalSymbols.push({
+      symbol_id: symbolId,
+      kind: SymbolKind.Function,
+      name: shortName,
+      display_name: displayName,
+      location: { file_path: "", line: 0, column: 0 },
+      span: { start_line: 0, start_column: 0, end_line: 0, end_column: 0 },
+      enclosing_symbol: null,
+      is_external: true,
+      documentation: [],
+      details: {
+        Function: {
+          parameters: [],
+          return_types: [],
+          type_params: [],
+          modifiers: {
+            is_async: false,
+            is_generator: false,
+            is_static: false,
+            is_abstract: false,
+            visibility: "Public" as const
+          }
+        }
+      }
+    });
   }
 
   private groupByDocument() {

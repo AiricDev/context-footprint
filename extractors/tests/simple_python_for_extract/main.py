@@ -1,6 +1,41 @@
 """Simple Python module for testing semantic extraction."""
 
 from typing import Protocol
+from functools import wraps
+
+
+def log_call(func):
+    """Decorator that logs function calls."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        print(f"Calling {func.__name__}")
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def retry(max_attempts: int = 3):
+    """Decorator factory that retries function calls."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for i in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception:
+                    if i == max_attempts - 1:
+                        raise
+            return None
+        return wrapper
+    return decorator
+
+
+def singleton(cls):
+    """Class decorator that ensures only one instance exists."""
+    instances = {}
+    def get_instance(*args, **kwargs):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kwargs)
+        return instances[cls]
+    return get_instance
 
 
 class Reader(Protocol):
@@ -41,6 +76,19 @@ class FileReader(Reader):
             return content
 
 
+@singleton
+class ServiceManager:
+    """Manages services - uses class decorator."""
+    
+    def __init__(self):
+        self.services = {}
+    
+    def register(self, name: str, service):
+        self.services[name] = service
+
+
+@log_call
+@retry(max_attempts=3)
 def process_file(reader: Reader, path: str) -> int:
     """Process a file using given reader.
     

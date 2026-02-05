@@ -238,7 +238,7 @@ export enum TypeKind {
  * - target_symbol: Must exist in definitions or external_symbols.
  * - location: Where the reference occurs.
  * - enclosing_symbol: Function or module containing this reference.
- * - role: Call/Read/Write/TypeAnnotation/TypeInstantiation/Import/Decorator.
+ * - role: Call/Read/Write/Decorate.
  * - receiver: undefined for direct access (foo(), GLOBAL_VAR); set to variable name for member access (self.method(), obj.field).
  */
 export interface SymbolReference {
@@ -255,19 +255,13 @@ export interface SymbolReference {
  * - Call: function/method/constructor call.
  * - Read: variable read (not assignment).
  * - Write: assignment/mutation (mutable shared state → SharedStateWrite expansion).
- * - TypeAnnotation: type in annotation; does not create graph edges.
- * - TypeInstantiation: new Class(), Class(); may become Call to constructor.
- * - Import: import statement; usage has separate Call/Read refs.
- * - Decorator: decorator/annotation application; target_symbol = decorator function.
+ * - Decorate: decorator/annotation application; target_symbol = decorator function.
  */
 export enum ReferenceRole {
   Call = "Call",
   Read = "Read",
   Write = "Write",
-  TypeAnnotation = "TypeAnnotation",
-  TypeInstantiation = "TypeInstantiation",
-  Import = "Import",
-  Decorator = "Decorator"
+  Decorate = "Decorate",
 }
 
 /**

@@ -8,9 +8,11 @@
 
 import { describe, it, beforeAll } from "bun:test";
 import assert from "node:assert";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runExtractionWithCache, clearExtractionCache } from "./test-helper";
+import type { SourceSpan } from "../src/core/types";
 import type { 
   SemanticData, 
   DocumentSemantics,
@@ -35,6 +37,20 @@ function isVariableSymbol(def: SymbolDefinition): def is VariableSymbol {
 
 function isTypeSymbol(def: SymbolDefinition): def is TypeSymbol {
   return def.kind === "Type";
+}
+
+/** Extract text from source file at given span. Span uses 0-based line/col; end is exclusive. */
+function extractSpanText(sourceLines: string[], span: SourceSpan): string {
+  if (span.start_line === span.end_line) {
+    return sourceLines[span.start_line]!.slice(span.start_column, span.end_column);
+  }
+  const parts: string[] = [];
+  parts.push(sourceLines[span.start_line]!.slice(span.start_column));
+  for (let i = span.start_line + 1; i < span.end_line; i++) {
+    parts.push(sourceLines[i]!);
+  }
+  parts.push(sourceLines[span.end_line]!.slice(0, span.end_column));
+  return parts.join("\n");
 }
 
 describe("Integration Tests for extract-semantics CLI", () => {
@@ -127,7 +143,7 @@ describe("Integration Tests for extract-semantics CLI", () => {
   });
 
   describe("Function/Method definition validation", () => {
-    it("should extract module-level function with correct symbol_id", () => {
+    it("should extract module-level function has correct details", () => {
       const processFile = mainDoc.definitions.find(
         (d): d is FunctionSymbol => isFunctionSymbol(d) && d.name === "process_file"
       );
@@ -138,12 +154,6 @@ describe("Integration Tests for extract-semantics CLI", () => {
         "Module-level function should have null enclosing_symbol");
       // symbol_id should be module.function#Function
       assert.strictEqual(processFile.symbol_id, "main.process_file#Function");
-    });
-
-    it("should have correct Function details with parameters", () => {
-      const processFile = mainDoc.definitions.find(
-        (d): d is FunctionSymbol => isFunctionSymbol(d) && d.name === "process_file"
-      )!;
 
       const funcDetails = processFile.details.Function;
       assert.ok(Array.isArray(funcDetails.parameters));
@@ -152,15 +162,9 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.strictEqual(typeof funcDetails.modifiers.is_generator, "boolean");
       assert.strictEqual(typeof funcDetails.modifiers.is_static, "boolean");
       assert.strictEqual(typeof funcDetails.modifiers.is_abstract, "boolean");
-      assert.ok(["Public", "Private", "Protected", "Internal"].includes(funcDetails.modifiers.visibility));
-    });
+      assert.strictEqual(funcDetails.modifiers.visibility, "Public");
 
-    it("should extract process_file parameters correctly with fully qualified type symbol_ids", () => {
-      const processFile = mainDoc.definitions.find(
-        (d): d is FunctionSymbol => isFunctionSymbol(d) && d.name === "process_file"
-      )!;
-
-      const params = processFile.details.Function.parameters;
+      const params = funcDetails.parameters;
       // process_file(reader: Reader, path: str) -> int
       assert.strictEqual(params.length, 2, "process_file should have 2 parameters");
       
@@ -193,15 +197,6 @@ describe("Integration Tests for extract-semantics CLI", () => {
       // Method symbol_id should be: module.Class.method#Function
       assert.strictEqual(initMethod.symbol_id, "main.FileReader.__init__#Function");
       assert.strictEqual(initMethod.enclosing_symbol, "main.FileReader#Type");
-    });
-
-    it("should extract FileReader.__init__ parameters correctly", () => {
-      const initMethod = mainDoc.definitions.find(
-        (d): d is FunctionSymbol => 
-          isFunctionSymbol(d) && 
-          d.name === "__init__" &&
-          d.symbol_id === "main.FileReader.__init__#Function"
-      )!;
 
       const params = initMethod.details.Function.parameters;
       // __init__(self, encoding: str = "utf-8")
@@ -323,6 +318,22 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.strictEqual(debugMode.details.Variable.visibility, "Private");
     });
 
+    it("should simplify Literal types to base types for variables without type annotation", () => {
+      // MAX_SIZE = 1024 * 1024 -> should be "int", not "Literal[1048576]"
+      const maxSize = mainDoc.definitions.find(
+        (d): d is VariableSymbol => isVariableSymbol(d) && d.name === "MAX_SIZE"
+      )!;
+      assert.strictEqual(maxSize.details.Variable.var_type, "int",
+        "Integer literal should be simplified to int");
+
+      // _debug_mode = False -> should be "bool", not "Literal[False]"
+      const debugMode = mainDoc.definitions.find(
+        (d): d is VariableSymbol => isVariableSymbol(d) && d.name === "_debug_mode"
+      )!;
+      assert.strictEqual(debugMode.details.Variable.var_type, "bool",
+        "Boolean literal should be simplified to bool");
+    });
+
     it("should extract class fields with correct enclosing_symbol", () => {
       const fileReader = mainDoc.definitions.find(
         (d): d is TypeSymbol => isTypeSymbol(d) && d.name === "FileReader"
@@ -384,34 +395,76 @@ describe("Integration Tests for extract-semantics CLI", () => {
         assert.ok(matchingVar, `Field ${field.name} should have matching Variable definition`);
       }
     });
+
+    it("should use declared type annotation instead of inferred Literal type", () => {
+      // Config.value has explicit type annotation: value: str = "global"
+      // Should use declared type "str", not inferred "Literal['global']"
+      const config = mainDoc.definitions.find(
+        (d): d is TypeSymbol => isTypeSymbol(d) && d.name === "Config"
+      )!;
+
+      const valueField = config.details.Type.fields.find(f => f.name === "value");
+      assert.ok(valueField, "Config should have a 'value' field");
+      assert.strictEqual(valueField.field_type, "str",
+        "Field with explicit type annotation should use declared type, not Literal");
+
+      // Also check the Variable definition
+      const valueVar = mainDoc.definitions.find(
+        (d): d is VariableSymbol => 
+          isVariableSymbol(d) && d.symbol_id === "main.Config.value#Variable"
+      );
+      assert.ok(valueVar, "Config.value Variable definition should exist");
+      assert.strictEqual(valueVar.details.Variable.var_type, "str",
+        "Variable with explicit type annotation should use declared type, not Literal");
+    });
   });
 
   describe("SourceLocation and SourceSpan validation", () => {
-    it("should have 0-based line and column numbers", () => {
-      // Reader class starts at line 6 (1-based) / 5 (0-based), column 0
+    const mainPyPath = path.join(testProjectPath, "main.py");
+    const sourceLines: string[] = fs.readFileSync(mainPyPath, "utf-8").split("\n");
+
+    it("should point to source lines that contain the symbol name", () => {
+      // Reader class: location should point to a line containing "class Reader"
       const reader = mainDoc.definitions.find(
         (d) => isTypeSymbol(d) && d.name === "Reader"
       )!;
+      const readerLine = sourceLines[reader.location.line];
+      assert.ok(readerLine?.includes("Reader"),
+        `Line ${reader.location.line + 1} should contain "Reader", got: ${JSON.stringify(readerLine)}`);
 
-      // LSP returns 0-based line numbers
-      assert.strictEqual(reader.location.line, 5,
-        "Line numbers should be 0-based (Reader is on line 6 in file)");
-      assert.strictEqual(reader.location.column, 0);
-      
-      // FileReader class starts at line 14 (1-based) / 13 (0-based), column 0
+      // FileReader class: location should point to a line containing "class FileReader"
       const fileReader = mainDoc.definitions.find(
         (d) => isTypeSymbol(d) && d.name === "FileReader"
       )!;
-      assert.strictEqual(fileReader.location.line, 13,
-        "Line numbers should be 0-based (FileReader is on line 14 in file)");
+      const fileReaderLine = sourceLines[fileReader.location.line];
+      assert.ok(fileReaderLine?.includes("FileReader"),
+        `Line ${fileReader.location.line + 1} should contain "FileReader", got: ${JSON.stringify(fileReaderLine)}`);
     });
 
-    it("should have valid source spans (start <= end)", () => {
+    it("should have span text that matches the symbol declaration", () => {
+      const reader = mainDoc.definitions.find(
+        (d) => isTypeSymbol(d) && d.name === "Reader"
+      )!;
+      const readerSpanText = extractSpanText(sourceLines, reader.span);
+      assert.ok(readerSpanText.includes("class Reader"),
+        `Span should cover "class Reader", got: ${JSON.stringify(readerSpanText.slice(0, 80))}...`);
+
+      const fileReader = mainDoc.definitions.find(
+        (d) => isTypeSymbol(d) && d.name === "FileReader"
+      )!;
+      const fileReaderSpanText = extractSpanText(sourceLines, fileReader.span);
+      assert.ok(fileReaderSpanText.includes("class FileReader"),
+        `Span should cover "class FileReader", got: ${JSON.stringify(fileReaderSpanText.slice(0, 80))}...`);
+    });
+
+    it("should have valid source spans (start <= end, in bounds)", () => {
       for (const def of mainDoc.definitions) {
         const span = def.span;
         assert.ok(span.start_line <= span.end_line,
           `${def.symbol_id}: start_line should be <= end_line`);
-        
+        assert.ok(span.start_line >= 0 && span.end_line < sourceLines.length,
+          `${def.symbol_id}: span lines should be within file bounds`);
+
         if (span.start_line === span.end_line) {
           assert.ok(span.start_column <= span.end_column,
             `${def.symbol_id}: start_column should be <= end_column when on same line`);
@@ -448,7 +501,8 @@ describe("Integration Tests for extract-semantics CLI", () => {
     });
 
     it("should correctly identify Read and Write roles", () => {
-      const validRoles = ["Call", "Read", "Write", "TypeAnnotation", "TypeInstantiation", "Import", "Decorator"];
+      // Only Call, Read, Write, and Decorate roles are valid
+      const validRoles = ["Call", "Read", "Write", "Decorate"];
 
       for (const ref of mainDoc.references) {
         assert.ok(validRoles.includes(ref.role),
@@ -458,9 +512,7 @@ describe("Integration Tests for extract-semantics CLI", () => {
       // Should have some write references (assignments)
       const writeRefs = mainDoc.references.filter((r) => r.role === "Write");
       assert.ok(writeRefs.length > 0, "Should have Write references for assignments");
-    });
 
-    it("should identify receiver for member access", () => {
       // Find references with receiver (like self.encoding, self._cache)
       const refsWithReceiver = mainDoc.references.filter(
         (r) => r.receiver === "self"
@@ -493,43 +545,6 @@ describe("Integration Tests for extract-semantics CLI", () => {
         })))}`);
     });
 
-    it("should use TypeAnnotation role for type annotations in function signatures", () => {
-      // process_file(reader: Reader, path: str) -> int
-      // The "Reader" type annotation should be TypeAnnotation, not Read
-      const processFileRefs = mainDoc.references.filter(
-        (r) => r.enclosing_symbol === "main.process_file#Function"
-      );
-
-      // Find reference to Reader type in process_file
-      const readerTypeRef = processFileRefs.find(
-        (r) => r.target_symbol === "main.Reader#Type" && 
-               r.location.line === 43 // def process_file line
-      );
-
-      if (readerTypeRef) {
-        assert.strictEqual(readerTypeRef.role, "TypeAnnotation",
-          "Type annotation in function parameter should have TypeAnnotation role, not Read");
-      }
-    });
-
-    it("should use TypeAnnotation role for return type annotations", () => {
-      // def get_config() -> Config:
-      const getConfigRefs = mainDoc.references.filter(
-        (r) => r.enclosing_symbol === "main.get_config#Function" &&
-               r.target_symbol === "main.Config#Type"
-      );
-
-      // The return type annotation reference
-      const returnTypeRef = getConfigRefs.find(
-        (r) => r.location.line === 69 // def get_config line
-      );
-
-      if (returnTypeRef) {
-        assert.strictEqual(returnTypeRef.role, "TypeAnnotation",
-          "Return type annotation should have TypeAnnotation role");
-      }
-    });
-
     it("should have Call reference target method symbol, not the class type", () => {
       // reader.read(path) should reference main.Reader.read#Function, not main.Reader#Type
       const methodCallRef = mainDoc.references.find(
@@ -541,7 +556,7 @@ describe("Integration Tests for extract-semantics CLI", () => {
       if (methodCallRef) {
         // The target should be the method, not the type
         assert.ok(
-          methodCallRef.target_symbol.includes("read#Function"),
+          methodCallRef.target_symbol === "main.Reader.read#Function",
           `Method call should target the method symbol (got ${methodCallRef.target_symbol})`
         );
       }
@@ -580,28 +595,6 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.ok(cacheWrite, "Should have Write reference for self._cache assignment");
     });
 
-    it("should NOT have TypeAnnotation references for parameter/return types (already in definitions)", () => {
-      // Parameter types and return types are already captured in FunctionDetails
-      // They should NOT appear as TypeAnnotation references
-      const typeAnnotationRefs = mainDoc.references.filter(
-        (r) => r.role === "TypeAnnotation"
-      );
-      
-      // Type annotations should only be for inheritance (class Foo(Bar)) 
-      // not for function signatures
-      for (const ref of typeAnnotationRefs) {
-        // Check that enclosing_symbol is a Type (class inheritance context), not a Function
-        const enclosingDef = mainDoc.definitions.find(d => d.symbol_id === ref.enclosing_symbol);
-        assert.ok(
-          enclosingDef?.kind === "Type",
-          `TypeAnnotation should only be for class inheritance, not function signatures. ` +
-          `Found TypeAnnotation in ${ref.enclosing_symbol} at line ${ref.location.line}`
-        );
-      }
-    });
-  });
-
-  describe("Cross-reference validation", () => {
     it("should have consistent symbol_id format across all symbols", () => {
       for (const doc of cachedData.documents) {
         for (const def of doc.definitions) {
@@ -626,4 +619,158 @@ describe("Integration Tests for extract-semantics CLI", () => {
       }
     });
   });
+
+  describe("Annotation (Decorator) semantics", () => {
+    // Specification: how Python decorators (annotations) should be expressed in SemanticData.
+    //
+    // 1. main.py:7-14 (log_call)
+    //    - The inner "wrapper" function is inside a function; it is NOT a definition (we only emit top-level/method definitions).
+    //    - Decorator used inside function are ignored.
+    //
+    // 2. main.py:16-28 (retry)
+    //    - Inner "decorator" and "wrapper" are NOT definitions; ignore any annotations/references inside them.
+    //    - No requirement for references from retry's inner scope.
+    //
+    // 3. main.py:79-87 (@singleton class ServiceManager)
+    //    - Class is decorated with @singleton. Express as ONE Decorate reference:
+    //      enclosing_symbol = main.ServiceManager.__init__#Function, target_symbol = main.singleton#Function, role = Decorate.
+    //
+    // 4. main.py:90-105 (@log_call @retry(max_attempts=3) def process_file(...))
+    //    - Function has two decorators. Express as TWO references, both role = Decorate:
+    //      (enclosing = main.process_file#Function, target = main.log_call#Function),
+    //      (enclosing = main.process_file#Function, target = main.retry#Function).
+
+    it("should NOT define nested functions inside decorators as top-level definitions", () => {
+      const funcDefs = mainDoc.definitions.filter((d) => isFunctionSymbol(d));
+      const logCallId = "main.log_call#Function";
+      const retryId = "main.retry#Function";
+
+      const nestedInLogCall = funcDefs.filter(
+        (d) => d.enclosing_symbol === logCallId
+      );
+      const nestedInRetry = funcDefs.filter(
+        (d) => d.enclosing_symbol === retryId
+      );
+
+      assert.strictEqual(
+        nestedInLogCall.length,
+        0,
+        "log_call should have no nested function definitions (wrapper is not a definition)"
+      );
+      assert.strictEqual(
+        nestedInRetry.length,
+        0,
+        "retry should have no nested function definitions (decorator/wrapper are not definitions)"
+      );
+    });
+
+    it("should not have references from log_call to wraps (Call or Decorate)", () => {
+      // Case 1 (main.py 7-14): inside log_call, @wraps(func) — express as one reference: enclosing = log_call, target = wraps.
+      // Role may be Call (function call) or Decorate (decorator application); both match the spec.
+      const refsInLogCall = mainDoc.references.filter(
+        (r) => r.enclosing_symbol === "main.log_call#Function"
+      );
+      assert.strictEqual(refsInLogCall.length, 0, "Should not have references from log_call to wraps");
+
+      // Case 2 (main.py 16-28): retry's inner decorator/wrapper are not definitions; ignore annotations inside.
+      // We do not require any references from them. This test documents that inner functions need no refs.
+      const refsInRetry = mainDoc.references.filter(
+        (r) => r.enclosing_symbol === "main.retry#Function"
+      );
+      // retry body may have a reference to max_attempts (parameter) or range, etc.; no requirement for zero.
+      // This test documents that inner functions are not definitions and need no refs.
+      assert.strictEqual(refsInRetry.length, 0, "Should not have references from retry inner functions");
+    });
+
+    it("should have Decorate reference from ServiceManager.__init__ to singleton", () => {
+      // Case 3 (main.py 79-87): @singleton on class ServiceManager.
+      // SemanticData: one reference enclosing_symbol = main.ServiceManager.__init__#Function,
+      // target_symbol = main.singleton#Function, role = Decorate.
+      const annotationRefs = mainDoc.references.filter(
+        (r) =>
+          r.role === "Decorate" &&
+          r.target_symbol === "main.singleton#Function"
+      );
+      const fromInit = annotationRefs.find(
+        (r) => r.enclosing_symbol === "main.ServiceManager.__init__#Function"
+      );
+      assert.ok(
+        fromInit,
+        "Should have Decorate reference from ServiceManager.__init__ to singleton (class decorator expressed via __init__)"
+      );
+    });
+
+    it("should have two Decorate references from process_file to log_call and retry", () => {
+      // Case 4 (main.py 90-105): @log_call and @retry(max_attempts=3) on process_file.
+      // SemanticData: two references, both role = Decorate:
+      //   (enclosing = main.process_file#Function, target = main.log_call#Function),
+      //   (enclosing = main.process_file#Function, target = main.retry#Function).
+      const processFileAnnotationRefs = mainDoc.references.filter(
+        (r) =>
+          r.role === "Decorate" &&
+          r.enclosing_symbol === "main.process_file#Function"
+      );
+      assert.strictEqual(
+        processFileAnnotationRefs.length,
+        2,
+        "process_file should have exactly 2 Decorate references (log_call and retry)"
+      );
+      const targets = processFileAnnotationRefs.map((r) => r.target_symbol);
+      assert.ok(
+        targets.includes("main.log_call#Function"),
+        "Should have Decorate reference from process_file to log_call"
+      );
+      assert.ok(
+        targets.includes("main.retry#Function"),
+        "Should have Decorate reference from process_file to retry"
+      );
+    });
+
+    it("should treat decorator usage as reference (Decorate), not definition", () => {
+      const defIds = new Set(mainDoc.definitions.map((d) => d.symbol_id));
+      const externalIds = new Set(
+        cachedData.external_symbols.map((d) => d.symbol_id)
+      );
+      const annotationRefs = mainDoc.references.filter(
+        (r) => r.role === "Decorate"
+      );
+      assert.ok(
+        annotationRefs.length >= 3,
+        "Should have at least 3 Decorate references (singleton, log_call, retry)"
+      );
+      for (const ref of annotationRefs) {
+        assert.ok(
+          defIds.has(ref.target_symbol) || externalIds.has(ref.target_symbol),
+          `Annotation reference should point to definition or external_symbol: ${ref.target_symbol}`
+        );
+      }
+    });
+
+    it("should include the expected Decorate references for cases 3 & 4", () => {
+      // Required set of decorator application references for main.py (cases 3 & 4).
+      // Case 1 (@wraps inside log_call) may also appear as Decorate; extra Decorate refs are allowed.
+      const requiredAnnotationRefs: [string, string][] = [
+        ["main.ServiceManager.__init__#Function", "main.singleton#Function"],
+        ["main.process_file#Function", "main.log_call#Function"],
+        ["main.process_file#Function", "main.retry#Function"],
+      ];
+      const annotationRefs = mainDoc.references.filter(
+        (r) => r.role === "Decorate"
+      );
+      const actualPairs = annotationRefs.map((r) => [
+        r.enclosing_symbol,
+        r.target_symbol,
+      ]) as [string, string][];
+      for (const [enclosing, target] of requiredAnnotationRefs) {
+        const found = actualPairs.some(
+          ([e, t]) => e === enclosing && t === target
+        );
+        assert.ok(
+          found,
+          `Missing Decorate reference: enclosing=${enclosing}, target=${target}. Actual: ${JSON.stringify(actualPairs)}`
+        );
+      }
+    });
+  });
+
 });

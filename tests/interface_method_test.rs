@@ -8,9 +8,9 @@ use context_footprint::domain::node::Node;
 use context_footprint::domain::policy::{PruningParams, evaluate};
 use context_footprint::domain::ports::SourceReader;
 use context_footprint::domain::semantic::{
-    DocumentSemantics, FunctionDetails, FunctionModifiers, Parameter, ReferenceRole,
-    SemanticData, SourceLocation, SourceSpan, SymbolDefinition, SymbolDetails, SymbolKind,
-    SymbolReference, TypeDetails, Visibility,
+    DocumentSemantics, FunctionDetails, FunctionModifiers, Parameter, ReferenceRole, SemanticData,
+    SourceLocation, SourceSpan, SymbolDefinition, SymbolDetails, SymbolKind, SymbolReference,
+    TypeDetails, Visibility,
 };
 use std::path::Path;
 
@@ -111,7 +111,6 @@ fn test_interface_method_becomes_node_with_flag() {
             ],
             references: vec![],
         }],
-        external_symbols: vec![],
     };
 
     let builder = GraphBuilder::new(
@@ -235,7 +234,6 @@ fn test_interface_method_with_good_doc_is_boundary() {
             ],
             references: vec![],
         }],
-        external_symbols: vec![],
     };
 
     let builder = GraphBuilder::new(
@@ -381,7 +379,6 @@ fn test_call_to_interface_method_creates_edge() {
                 },
             ],
         }],
-        external_symbols: vec![],
     };
 
     let builder = GraphBuilder::new(

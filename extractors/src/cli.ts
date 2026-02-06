@@ -39,6 +39,12 @@ program
       } else {
         process.stdout.write(json);
       }
+
+      const mem = process.memoryUsage();
+      const toMB = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
+      console.error(
+        `\nMemory usage: RSS=${toMB(mem.rss)}MB, Heap Used=${toMB(mem.heapUsed)}MB, Heap Total=${toMB(mem.heapTotal)}MB, External=${toMB(mem.external)}MB`
+      );
     } catch (err) {
       if (err instanceof Error) {
         console.error(options?.verbose ? err.stack ?? err.message : err.message);

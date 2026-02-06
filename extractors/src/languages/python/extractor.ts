@@ -60,8 +60,6 @@ export class PythonExtractor extends ExtractorBase {
   private symbolIndexByUri = new Map<string, SymbolRecord[]>(); // Index by URI for fast lookup
   private definitions: SymbolDefinition[] = [];
   private references: SymbolReference[] = [];
-  private externalSymbols: SymbolDefinition[] = [];
-  private externalSymbolIds = new Set<string>();
   private hoverCache = new Map<string, Hover>();
   private protocolClasses = new Set<string>();
   // Map from function symbol ID to set of local type names defined within that function
@@ -122,8 +120,7 @@ export class PythonExtractor extends ExtractorBase {
 
     return {
       project_root: this.options.projectRoot,
-      documents,
-      external_symbols: this.externalSymbols
+      documents
     };
   }
 
@@ -843,7 +840,6 @@ export class PythonExtractor extends ExtractorBase {
                   const projectFilePaths = new Set(
                     Array.from(this.fileLines.keys()).map((f) => path.resolve(f))
                   );
-                  const isOutsideProject = !projectFilePaths.has(defPathResolved);
                   let defLine = "";
                   if (projectFilePaths.has(defPathResolved)) {
                     const key = Array.from(this.fileLines.keys()).find(
@@ -858,15 +854,11 @@ export class PythonExtractor extends ExtractorBase {
                   const isImportLine =
                     /^\s*from\s+\S+\s+import/.test(defLine) ||
                     /^\s*import\s+/.test(defLine);
-                  if (isOutsideProject || isImportLine) {
-                    let externalSymbolId: string;
-                    if (isImportLine) {
+                  if (isImportLine) {
                       const fromMatch = defLine.match(/^\s*from\s+(\S+)\s+import/);
                       const module = fromMatch
                         ? fromMatch[1]
                         : path.basename(defPath, path.extname(defPath));
-                      // LSP may return the import line instead of the actual definition.
-                      // If the symbol is defined in this project, resolve to it instead of creating external.
                       const candidateIds = [
                         `${module}.${pos.name}#Function`,
                         `${module}.${pos.name}#Type`,
@@ -913,53 +905,14 @@ export class PythonExtractor extends ExtractorBase {
                             });
                           }
                         }
-                        completed++;
-                        return;
                       }
-                      externalSymbolId = `${module}.${pos.name}#Function`;
-                    } else {
-                      externalSymbolId = this.inferExternalSymbolId(
-                        definition.uri,
-                        pos.name
-                      );
-                    }
-                    this.ensureExternalSymbol(externalSymbolId, pos.name);
-                    const enclosing = this.findEnclosingSymbol({
-                      uri: pos.uri,
-                      range: pos.range
-                    } as Location);
-                    if (enclosing) {
-                      const lines = this.fileLines.get(pos.filePath) ?? [];
-                      const role = inferReferenceRole(
-                        lines,
-                        pos.range,
-                        SymbolKind.Function
-                      );
-                      if (role !== null &&
-                          !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))) {
-                        this.references.push({
-                          target_symbol: externalSymbolId,
-                          enclosing_symbol: enclosing.symbolId,
-                          role,
-                          receiver: undefined,
-                          location: {
-                            file_path: relativePath(
-                              this.options.projectRoot,
-                              pos.filePath
-                            ),
-                            line: pos.range.start.line,
-                            column: pos.range.start.character
-                          }
-                        });
-                      }
-                    }
                   }
                 } catch {
                   // Ignore URI parse errors
                 }
               }
             } else {
-              // LSP returned no definition (e.g. stdlib); if name is imported, resolve or create external ref
+              // LSP returned no definition; try to resolve to a project symbol via imports
               const importedNames = importedNamesByFile.get(pos.filePath);
               if (importedNames?.has(pos.name)) {
                 const enclosing = this.findEnclosingSymbol({
@@ -977,32 +930,28 @@ export class PythonExtractor extends ExtractorBase {
                     const projectSymbolId = candidateIds.find((id) =>
                       definitionSymbolIds.has(id)
                     );
-                    const targetSymbolId = projectSymbolId ?? `${module}.${pos.name}#Function`;
-                    if (!projectSymbolId) {
-                      this.ensureExternalSymbol(targetSymbolId, pos.name);
-                    }
-                    const projectRecord = projectSymbolId
-                      ? this.symbolIndex.find((r) => r.symbolId === projectSymbolId)
-                      : undefined;
-                    const lines = this.fileLines.get(pos.filePath) ?? [];
-                    const role = inferReferenceRole(
-                      lines,
-                      pos.range,
-                      projectRecord?.kind ?? SymbolKind.Function
-                    );
-                    if (role !== null &&
-                        !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))) {
-                      this.references.push({
-                        target_symbol: targetSymbolId,
-                        enclosing_symbol: enclosing.symbolId,
-                        role,
-                        receiver: undefined,
-                        location: {
-                          file_path: relativePath(this.options.projectRoot, pos.filePath),
-                          line: pos.range.start.line,
-                          column: pos.range.start.character
-                        }
-                      });
+                    if (projectSymbolId) {
+                      const projectRecord = this.symbolIndex.find((r) => r.symbolId === projectSymbolId);
+                      const lines = this.fileLines.get(pos.filePath) ?? [];
+                      const role = inferReferenceRole(
+                        lines,
+                        pos.range,
+                        projectRecord?.kind ?? SymbolKind.Function
+                      );
+                      if (role !== null &&
+                          !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))) {
+                        this.references.push({
+                          target_symbol: projectSymbolId,
+                          enclosing_symbol: enclosing.symbolId,
+                          role,
+                          receiver: undefined,
+                          location: {
+                            file_path: relativePath(this.options.projectRoot, pos.filePath),
+                            line: pos.range.start.line,
+                            column: pos.range.start.character
+                          }
+                        });
+                      }
                     }
                   }
                 }
@@ -1123,52 +1072,6 @@ export class PythonExtractor extends ExtractorBase {
       }
     }
     return null;
-  }
-
-  /** Infer external symbol ID from definition URI and name (e.g. functools.wraps#Function). */
-  private inferExternalSymbolId(definitionUri: string, name: string): string {
-    try {
-      const defPath = fileURLToPath(definitionUri);
-      const base = path.basename(defPath, path.extname(defPath));
-      const module = base === "typing" || /^[a-z_]+$/.test(base) ? base : "external";
-      return `${module}.${name}#Function`;
-    } catch {
-      return `external.${name}#Function`;
-    }
-  }
-
-  /** Ensure external symbol exists in externalSymbols (minimal stub for reference target). */
-  private ensureExternalSymbol(symbolId: string, name: string): void {
-    if (this.externalSymbolIds.has(symbolId)) return;
-    this.externalSymbolIds.add(symbolId);
-    const [displayName] = symbolId.split("#");
-    const lastDot = displayName.lastIndexOf(".");
-    const shortName = lastDot >= 0 ? displayName.slice(lastDot + 1) : displayName;
-    this.externalSymbols.push({
-      symbol_id: symbolId,
-      kind: SymbolKind.Function,
-      name: shortName,
-      display_name: displayName,
-      location: { file_path: "", line: 0, column: 0 },
-      span: { start_line: 0, start_column: 0, end_line: 0, end_column: 0 },
-      enclosing_symbol: null,
-      is_external: true,
-      documentation: [],
-      details: {
-        Function: {
-          parameters: [],
-          return_types: [],
-          type_params: [],
-          modifiers: {
-            is_async: false,
-            is_generator: false,
-            is_static: false,
-            is_abstract: false,
-            visibility: Visibility.Public,
-          }
-        }
-      }
-    });
   }
 
   private groupByDocument() {

@@ -158,7 +158,6 @@ fn test_strategy_pattern_boundary() {
     let _data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     // Note on Strategy Test:
@@ -225,7 +224,6 @@ fn test_strategy_pattern_boundary() {
     let data_factory = SemanticData {
         project_root: "/test".into(),
         documents: docs_factory,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data_factory, sym_client);
@@ -303,7 +301,6 @@ fn test_observer_pattern_boundary() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_subject);
@@ -357,7 +354,6 @@ fn test_facade_pattern_boundary() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_client);
@@ -406,7 +402,6 @@ fn test_template_method_boundary() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_client);
@@ -452,7 +447,6 @@ fn test_adapter_pattern_boundary() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_client);
@@ -498,7 +492,6 @@ fn test_leaky_facade_traversed() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_client);
@@ -564,7 +557,6 @@ fn test_singleton_global_state_penalty() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_client);
@@ -631,7 +623,6 @@ fn test_transparent_module_coupling_isp_violation() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_client);
@@ -668,7 +659,6 @@ fn test_segregated_interface_isp_compliance() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     let (graph, result) = compute_cf(data, sym_client);
@@ -742,7 +732,6 @@ fn test_law_of_demeter_violation_penalty() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     // Test Bad Client (Train Wreck)
@@ -835,7 +824,6 @@ fn test_mediator_topology_decoupling() {
     let data = SemanticData {
         project_root: "/test".into(),
         documents,
-        external_symbols: vec![],
     };
 
     // Test Mesh (Spaghetti)

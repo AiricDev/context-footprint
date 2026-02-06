@@ -53,27 +53,3 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
-
-  coverage:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Protocol Buffers compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Generate coverage
-        run: cargo tarpaulin --out Xml --output-dir coverage
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage/cobertura.xml
-          fail_ci_if_error: false

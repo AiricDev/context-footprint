@@ -470,7 +470,6 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
     }
 }
 
-
 /// Extract only the signature portion of a method span (first line to colon/semicolon)
 /// For interface methods, we only want to count the signature, not any implementation body
 fn extract_signature_span(span: &SemanticSpan, source_code: &str) -> SourceSpan {

@@ -20,13 +20,10 @@ export type TypeRef = string;
  * Adapter contract:
  * - project_root: Absolute path; all document relative_path are relative to it.
  * - documents: All project source files; each has definitions and references.
- * - external_symbols: Only symbols actually referenced by project code; all have is_external=true.
- *   Provide enough info for CF boundary (signature completeness, types, is_abstract).
  */
 export interface SemanticData {
   project_root: string;
   documents: DocumentSemantics[];
-  external_symbols: SymbolDefinition[];
 }
 
 /**
@@ -59,7 +56,6 @@ export type SymbolDefinition = FunctionSymbol | VariableSymbol | TypeSymbol;
  * - span: Full extent for context_size; functions = entire body (or signature only if abstract);
  *   end positions are exclusive.
  * - enclosing_symbol: Methods/fields point to their Type; top-level null.
- * - is_external: true for stdlib/third-party.
  * - documentation: All doc comments; order most relevant first; empty if none.
  */
 interface BaseSymbolDefinition {
@@ -70,7 +66,6 @@ interface BaseSymbolDefinition {
   location: SourceLocation;
   span: SourceSpan;
   enclosing_symbol: SymbolId | null;
-  is_external: boolean;
   documentation: string[];
 }
 
@@ -235,7 +230,7 @@ export enum TypeKind {
  * A reference to a symbol (for edge construction).
  *
  * Adapter contract:
- * - target_symbol: Must exist in definitions or external_symbols.
+ * - target_symbol: Must exist in definitions.
  * - location: Where the reference occurs.
  * - enclosing_symbol: Function or module containing this reference.
  * - role: Call/Read/Write/Decorate.

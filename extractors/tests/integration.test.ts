@@ -73,7 +73,6 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.ok(path.isAbsolute(cachedData.project_root), "project_root should be absolute path");
       assert.ok(Array.isArray(cachedData.documents), "documents should be an array");
       assert.ok(cachedData.documents.length > 0, "should have at least one document");
-      assert.ok(Array.isArray(cachedData.external_symbols), "external_symbols should be an array");
     });
 
     it("should have correct DocumentSemantics structure", () => {
@@ -103,7 +102,6 @@ describe("Integration Tests for extract-semantics CLI", () => {
       assert.strictEqual(fileReader.symbol_id, "main.FileReader#Type");
       assert.strictEqual(fileReader.name, "FileReader");
       assert.strictEqual(fileReader.enclosing_symbol, null);
-      assert.strictEqual(fileReader.is_external, false);
     });
 
     it("should have correct Type details for FileReader", () => {
@@ -728,9 +726,6 @@ describe("Integration Tests for extract-semantics CLI", () => {
 
     it("should treat decorator usage as reference (Decorate), not definition", () => {
       const defIds = new Set(mainDoc.definitions.map((d) => d.symbol_id));
-      const externalIds = new Set(
-        cachedData.external_symbols.map((d) => d.symbol_id)
-      );
       const annotationRefs = mainDoc.references.filter(
         (r) => r.role === "Decorate"
       );
@@ -740,8 +735,8 @@ describe("Integration Tests for extract-semantics CLI", () => {
       );
       for (const ref of annotationRefs) {
         assert.ok(
-          defIds.has(ref.target_symbol) || externalIds.has(ref.target_symbol),
-          `Annotation reference should point to definition or external_symbol: ${ref.target_symbol}`
+          defIds.has(ref.target_symbol),
+          `Annotation reference should point to definition: ${ref.target_symbol}`
         );
       }
     });

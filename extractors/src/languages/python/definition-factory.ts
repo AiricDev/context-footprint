@@ -377,7 +377,6 @@ export function createTypeDefinition(
     location,
     span,
     enclosing_symbol: enclosingSymbol,
-    is_external: false,
     documentation,
     details: { Type: details }
   };
@@ -466,7 +465,6 @@ export async function createFunctionDefinition(
     location,
     span,
     enclosing_symbol: enclosingSymbol,
-    is_external: false,
     documentation,
     details: { Function: details }
   };
@@ -515,7 +513,6 @@ export function createVariableDefinition(
     location,
     span,
     enclosing_symbol: enclosingSymbol,
-    is_external: false,
     documentation,
     details: { Variable: varDetails }
   };

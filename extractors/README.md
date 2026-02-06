@@ -69,7 +69,6 @@ The output follows the schema defined in `src/core/types.ts`:
 
 - **project_root**: Absolute path to the project
 - **documents**: Array of source files with definitions and references
-- **external_symbols**: Symbols from dependencies (stdlib, third-party)
 
 Each symbol has:
 - **symbol_id**: Globally unique identifier (e.g., `module.Class.method#Function`)

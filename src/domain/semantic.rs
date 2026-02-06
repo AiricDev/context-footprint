@@ -72,18 +72,6 @@ pub struct SemanticData {
     /// - Each document contains definitions and references for that file
     /// - No duplicate files
     pub documents: Vec<DocumentSemantics>,
-
-    /// External symbols (stdlib/third-party dependencies)
-    ///
-    /// **Adapter Contract**:
-    /// - Include ONLY symbols that are actually referenced by project code
-    /// - For each external symbol, provide sufficient information for CF boundary decisions:
-    ///   * Functions: signature completeness (parameters with types, return type)
-    ///   * Variables: type and mutability
-    ///   * Types: is_abstract flag for DI/interface detection
-    /// - `is_external=true` for all symbols here
-    /// - For stdlib types (int, str, List, etc.): provide canonical definitions
-    pub external_symbols: Vec<SymbolDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,8 +235,7 @@ pub enum SymbolDetails {
 /// Function Details
 /// ============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FunctionDetails {
     /// Parameters (in definition order)
     ///
@@ -286,9 +273,7 @@ pub struct FunctionDetails {
     pub modifiers: FunctionModifiers,
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Parameter {
     pub name: String,
 
@@ -318,7 +303,6 @@ pub struct Parameter {
     /// - For variadic params, `param_type` is the element type (if annotated)
     pub is_variadic: bool,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeParam {
@@ -629,7 +613,7 @@ pub struct SymbolReference {
     /// Referenced symbol ID
     ///
     /// **Adapter Contract**:
-    /// - Must match a `symbol_id` in definitions or external_symbols
+    /// - Must match a `symbol_id` in definitions
     /// - If target cannot be resolved (dynamic access, reflection):
     ///   * For now: omit the reference (unresolved)
     ///   * Future: may support synthetic "unresolved" symbols
@@ -761,12 +745,9 @@ pub struct SourceSpan {
 /// ============================================================================
 
 impl SemanticData {
-    /// Get all symbol definitions (from both documents and external symbols)
+    /// Get all symbol definitions from all documents
     pub fn all_definitions(&self) -> impl Iterator<Item = &SymbolDefinition> {
-        self.documents
-            .iter()
-            .flat_map(|doc| doc.definitions.iter())
-            .chain(self.external_symbols.iter())
+        self.documents.iter().flat_map(|doc| doc.definitions.iter())
     }
 
     /// Build enclosing map (symbol_id → parent_symbol_id)
@@ -1003,7 +984,6 @@ mod tests {
                 ],
                 references: vec![],
             }],
-            external_symbols: vec![],
         };
 
         let map = data.build_enclosing_map();

@@ -51,8 +51,26 @@ export function extractHoverInfo(hover?: Hover): { documentation: string[]; sign
 }
 
 /**
+ * Find the matching closing paren for the open paren at startIndex.
+ * Returns the index of the closing paren, or -1 if not found.
+ */
+function findMatchingParen(s: string, startIndex: number): number {
+  let depth = 0;
+  for (let i = startIndex; i < s.length; i++) {
+    const c = s[i];
+    if (c === "(") depth++;
+    else if (c === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * Parse function signature to extract parameters and return types.
  * Returns raw type names; resolution is done separately.
+ * Handles nested parentheses in default values (e.g. Depends(HTTPBearer(auto_error=False))).
  */
 export function parseSignature(signature: string): { parameters: Parameter[]; returnTypes: string[] } {
   if (!signature) {
@@ -66,13 +84,20 @@ export function parseSignature(signature: string): { parameters: Parameter[]; re
 
   const cleanSig = normalizedSig.replace(/^\([^)]+\)\s*/, "");
   const withoutDef = cleanSig.replace(/^def\s+/, "");
-  const paramMatch = withoutDef.match(/\(([^)]*)\)(?:\s*->\s*(.+))?$/);
-  if (!paramMatch) {
+  const openParen = withoutDef.indexOf("(");
+  if (openParen === -1) {
     return { parameters: [], returnTypes: [] };
   }
 
-  const paramString = paramMatch[1];
-  const returnTypeStr = paramMatch[2]?.trim();
+  const closeParen = findMatchingParen(withoutDef, openParen);
+  if (closeParen === -1) {
+    return { parameters: [], returnTypes: [] };
+  }
+
+  const paramString = withoutDef.slice(openParen + 1, closeParen).trim();
+  const afterParams = withoutDef.slice(closeParen + 1).trim();
+  const returnMatch = afterParams.match(/^->\s*(.+)$/);
+  const returnTypeStr = returnMatch?.[1]?.trim() ?? null;
 
   const parameters: Parameter[] = [];
   if (paramString.trim()) {

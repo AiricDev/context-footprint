@@ -1,6 +1,12 @@
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
+import {
+  DocumentSymbol,
+  Location,
+  Position,
+  SymbolInformation
+} from "vscode-languageserver-protocol";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -93,6 +99,52 @@ export class LspClient extends EventEmitter {
   async sendNotification(method: string, params: any): Promise<void> {
     const payload = { jsonrpc: "2.0", method, params };
     this.write(payload);
+  }
+
+  /**
+   * Request document symbols for a URI. Normalizes different server response
+   * shapes (DocumentSymbol[], SymbolInformation[], or { documentSymbols }) into
+   * a flat list of DocumentSymbol.
+   */
+  async getDocumentSymbols(uri: string): Promise<DocumentSymbol[]> {
+    const response = await this.sendRequest<
+      { documentSymbols: DocumentSymbol[] } | DocumentSymbol[] | SymbolInformation[]
+    >("textDocument/documentSymbol", { textDocument: { uri } });
+
+    if (Array.isArray(response)) {
+      if (response.length === 0) return [];
+      if ("range" in response[0]) {
+        return response as DocumentSymbol[];
+      }
+      return (response as SymbolInformation[]).map((info) => ({
+        name: info.name,
+        detail: undefined,
+        kind: info.kind,
+        range: info.location.range,
+        selectionRange: info.location.range,
+        children: []
+      }));
+    }
+    return response.documentSymbols ?? [];
+  }
+
+  /**
+   * Request definition for a position. Returns the first location if the
+   * server returns an array, or null on error.
+   */
+  async getDefinition(uri: string, position: Position): Promise<Location | null> {
+    try {
+      const result = await this.sendRequest<Location | Location[] | null>(
+        "textDocument/definition",
+        { textDocument: { uri }, position }
+      );
+      if (Array.isArray(result)) {
+        return result[0] ?? null;
+      }
+      return result;
+    } catch {
+      return null;
+    }
   }
 
   private write(message: object) {

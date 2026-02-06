@@ -2,7 +2,82 @@ import type { Range, Position } from "vscode-languageserver-protocol";
 import { SymbolKind as LspSymbolKind } from "vscode-languageserver-protocol";
 import type { DocumentSymbol } from "vscode-languageserver-protocol";
 import { Mutability, Visibility } from "../../core/types";
-import { PYTHON_BUILTIN_TYPES } from "./constants";
+import { SymbolKind } from "../../core/types";
+import { relativePath } from "../../core/utils";
+import { PYTHON_BUILTIN_TYPES } from "./types";
+
+/**
+ * Extract Python module name from file path (relative to project root).
+ */
+export function extractModuleName(projectRoot: string, filePath: string): string {
+  return relativePath(projectRoot, filePath)
+    .replace(/\.py$/, "")
+    .replace(/[\\/]/g, ".");
+}
+
+/**
+ * Map LSP SymbolKind to our SymbolKind (Function, Variable, Type).
+ */
+export function mapSymbolKind(kind: LspSymbolKind): SymbolKind | null {
+  switch (kind) {
+    case LspSymbolKind.Function:
+    case LspSymbolKind.Method:
+    case LspSymbolKind.Constructor:
+      return SymbolKind.Function;
+    case LspSymbolKind.Class:
+    case LspSymbolKind.Interface:
+      return SymbolKind.Type;
+    case LspSymbolKind.Variable:
+    case LspSymbolKind.Field:
+    case LspSymbolKind.Constant:
+    case LspSymbolKind.Property:
+      return SymbolKind.Variable;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Build a hierarchy of DocumentSymbols from a flat list by containment (range).
+ * If symbols already have children, returns as-is.
+ */
+export function buildHierarchyFromFlatList(symbols: DocumentSymbol[]): DocumentSymbol[] {
+  if (symbols.some((s) => s.children && s.children.length > 0)) {
+    return symbols;
+  }
+
+  const sorted = [...symbols].sort((a, b) => {
+    if (a.range.start.line !== b.range.start.line) {
+      return a.range.start.line - b.range.start.line;
+    }
+    return a.range.start.character - b.range.start.character;
+  });
+
+  const root: DocumentSymbol[] = [];
+  const stack: { symbol: DocumentSymbol; children: DocumentSymbol[] }[] = [];
+
+  for (const symbol of sorted) {
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1];
+      if (rangeContains(top.symbol.range, symbol.range.start)) {
+        break;
+      }
+      stack.pop();
+    }
+
+    const newSymbol: DocumentSymbol = { ...symbol, children: [] };
+
+    if (stack.length === 0) {
+      root.push(newSymbol);
+    } else {
+      stack[stack.length - 1].children.push(newSymbol);
+    }
+
+    stack.push({ symbol: newSymbol, children: newSymbol.children! });
+  }
+
+  return root;
+}
 
 /**
  * Split a parameter/argument string by top-level commas (respects brackets).

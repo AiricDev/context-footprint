@@ -7,7 +7,6 @@ import {
   Location,
   Position,
   Range,
-  SymbolInformation,
   SymbolKind as LspSymbolKind,
   TextDocumentItem,
   Hover
@@ -16,31 +15,36 @@ import { ExtractorBase, ExtractOptions } from "../../core/extractor-base";
 import { discoverFiles, relativePath, toUri } from "../../core/utils";
 import { LspClientOptions } from "../../core/lsp-client";
 import {
-  FunctionDetails,
-  FunctionModifiers,
-  Parameter,
   ReferenceRole,
   SemanticData,
   SymbolDefinition,
   SymbolKind,
   SymbolReference,
   TypeDetails,
-  TypeKind,
-  VariableDetails,
-  VariableScope
+  Visibility
 } from "../../core/types";
-import { LSP_CONCURRENCY, FILE_READ_CONCURRENCY, pyrightLangServer } from "./constants";
+import { LSP_CONCURRENCY, FILE_READ_CONCURRENCY, pyrightLangServer } from "./types";
 import type { SymbolRecord } from "./types";
 import {
-  splitParams,
+  buildHierarchyFromFlatList,
+  extractModuleName,
+  mapSymbolKind,
   rangeContains,
   rangeSize,
   inferVisibility,
-  inferMutability,
-  isBuiltinType,
-  simplifyLiteralType
+  inferMutability
 } from "./symbol-utils";
-import { extractHoverInfo, parseSignature } from "./hover";
+import { extractHoverInfo } from "./hover";
+import {
+  type DefinitionContext,
+  createTypeDefinition,
+  createFunctionDefinition,
+  createVariableDefinition,
+  createSymbolId,
+  createFieldSymbolId,
+  extractDeclaredType,
+  extractVariableType
+} from "./definition-factory";
 import {
   inferReferenceRole,
   extractReceiver,
@@ -151,8 +155,8 @@ export class PythonExtractor extends ExtractorBase {
       files.map((file) =>
         limit(async () => {
           const uri = toUri(file);
-          const docSymbols = await this.fetchDocumentSymbols(uri);
-          const hierarchy = this.buildHierarchyFromFlatList(docSymbols);
+          const docSymbols = await this.client!.getDocumentSymbols(uri);
+          const hierarchy = buildHierarchyFromFlatList(docSymbols);
           symbolsByFile.set(file, hierarchy);
           completed++;
           this.progress(completed, files.length, "Fetching symbols");
@@ -280,49 +284,6 @@ export class PythonExtractor extends ExtractorBase {
     }
   }
 
-  private buildHierarchyFromFlatList(symbols: DocumentSymbol[]): DocumentSymbol[] {
-    // If symbols already have children, return as-is
-    if (symbols.some(s => s.children && s.children.length > 0)) {
-      return symbols;
-    }
-
-    // Sort by range start position
-    const sorted = [...symbols].sort((a, b) => {
-      if (a.range.start.line !== b.range.start.line) {
-        return a.range.start.line - b.range.start.line;
-      }
-      return a.range.start.character - b.range.start.character;
-    });
-
-    const root: DocumentSymbol[] = [];
-    const stack: { symbol: DocumentSymbol; children: DocumentSymbol[] }[] = [];
-
-    for (const symbol of sorted) {
-      // Pop stack until we find a parent that contains this symbol
-      while (stack.length > 0) {
-        const top = stack[stack.length - 1];
-        if (rangeContains(top.symbol.range, symbol.range.start)) {
-          break;
-        }
-        stack.pop();
-      }
-
-      const newSymbol: DocumentSymbol = { ...symbol, children: [] };
-
-      if (stack.length === 0) {
-        // Top-level symbol
-        root.push(newSymbol);
-      } else {
-        // Child of the top of stack
-        stack[stack.length - 1].children.push(newSymbol);
-      }
-
-      stack.push({ symbol: newSymbol, children: newSymbol.children! });
-    }
-
-    return root;
-  }
-
   private async openDocuments(files: string[]): Promise<void> {
     const limit = pLimit(LSP_CONCURRENCY);
     let completed = 0;
@@ -351,42 +312,27 @@ export class PythonExtractor extends ExtractorBase {
     const classRegex = /^class\s+(\w+)\s*\(\s*Protocol\s*\)/gm;
     let match;
     while ((match = classRegex.exec(content)) !== null) {
-      const moduleName = relativePath(this.options.projectRoot, filePath)
-        .replace(/\.py$/, "")
-        .replace(/[\\/]/g, ".");
+      const moduleName = extractModuleName(this.options.projectRoot, filePath);
       const symbolId = `${moduleName}.${match[1]}#Type`;
       this.protocolClasses.add(symbolId);
     }
   }
 
-  private async fetchDocumentSymbols(uri: string): Promise<DocumentSymbol[]> {
-    const response = await this.client!.sendRequest<
-      { documentSymbols: DocumentSymbol[] } | DocumentSymbol[] | SymbolInformation[]
-    >(
-      "textDocument/documentSymbol",
-      { textDocument: { uri } }
-    );
-
-    if (Array.isArray(response)) {
-      if (response.length === 0) return [];
-      if ("range" in response[0]) {
-        return response as DocumentSymbol[];
-      }
-      return (response as SymbolInformation[]).map((info) => ({
-        name: info.name,
-        detail: undefined,
-        kind: info.kind,
-        range: info.location.range,
-        selectionRange: info.location.range,
-        children: []
-      }));
-    }
-    return response.documentSymbols ?? [];
-  }
-
   private getHoverInfo(uri: string, nameChain: string[]): Hover | undefined {
     const cacheKey = `${uri}#${nameChain.join(".")}`;
     return this.hoverCache.get(cacheKey);
+  }
+
+  private getDefinitionContext(): DefinitionContext {
+    return {
+      projectRoot: this.options.projectRoot,
+      getFileContent: (filePath) => this.fileContents.get(filePath),
+      getFileLines: (filePath) => this.getFileLines(filePath),
+      definitions: this.definitions,
+      protocolClasses: this.protocolClasses,
+      localTypesByFunction: this.localTypesByFunction,
+      getImportedModuleForName: (fp, name) => this.getModuleForImportedName(fp, name)
+    };
   }
 
   // First pass: process only Type definitions to establish type symbol IDs
@@ -397,7 +343,7 @@ export class PythonExtractor extends ExtractorBase {
     parents: SymbolRecord[] = []
   ): void {
     for (const symbol of symbols) {
-      const kind = this.mapSymbolKind(symbol.kind);
+      const kind = mapSymbolKind(symbol.kind);
 
       if (!kind) {
         // Still recurse into children even if skipping this symbol
@@ -410,7 +356,7 @@ export class PythonExtractor extends ExtractorBase {
       // Only process Type definitions in this pass
       if (kind === SymbolKind.Type) {
         // Build proper symbol ID with full hierarchy
-        const symbolId = this.createSymbolId(filePath, parents, symbol, kind);
+        const symbolId = createSymbolId(this.options.projectRoot, filePath, parents, symbol, kind);
         
         // Find enclosing Type symbol (for nested classes)
         let enclosing: string | null = null;
@@ -448,7 +394,14 @@ export class PythonExtractor extends ExtractorBase {
         const nameChain = [...parents.map(p => p.name), symbol.name].filter(Boolean);
         const hover = this.getHoverInfo(uri, nameChain);
         
-        const definition = this.createTypeDefinition(filePath, symbolId, symbol, enclosing, hover);
+        const definition = createTypeDefinition(
+          this.getDefinitionContext(),
+          filePath,
+          symbolId,
+          symbol,
+          enclosing,
+          hover
+        );
         this.definitions.push(definition);
 
         // Collect fields for Type definitions
@@ -467,7 +420,7 @@ export class PythonExtractor extends ExtractorBase {
       } else if (symbol.children) {
         // For non-Type symbols, still recurse to find nested Type definitions
         // (e.g., a class defined inside a function)
-        const symbolId = this.createSymbolId(filePath, parents, symbol, kind);
+        const symbolId = createSymbolId(this.options.projectRoot, filePath, parents, symbol, kind);
         const record: SymbolRecord = {
           symbolId,
           uri,
@@ -502,7 +455,7 @@ export class PythonExtractor extends ExtractorBase {
     if (parentFunction) {
       const funcLine = parentFunction.selectionRange.start.line;
       for (const child of symbols) {
-        if (this.mapSymbolKind(child.kind) === SymbolKind.Variable && 
+        if (mapSymbolKind(child.kind) === SymbolKind.Variable && 
             child.range.start.line === funcLine) {
           paramKeys.add(`${child.name}@${child.range.start.line}`);
         }
@@ -510,7 +463,7 @@ export class PythonExtractor extends ExtractorBase {
     }
 
     for (const symbol of symbols) {
-      const kind = this.mapSymbolKind(symbol.kind);
+      const kind = mapSymbolKind(symbol.kind);
 
       if (!kind) {
         if (symbol.children) {
@@ -522,7 +475,7 @@ export class PythonExtractor extends ExtractorBase {
       // Skip Type definitions - they were processed in the first pass
       if (kind === SymbolKind.Type) {
         // Find the existing record for this type
-        const symbolId = this.createSymbolId(filePath, parents, symbol, kind);
+        const symbolId = createSymbolId(this.options.projectRoot, filePath, parents, symbol, kind);
         const record = this.symbolIndex.find(r => r.symbolId === symbolId);
         if (record && symbol.children) {
           const childParents = [...parents, record];
@@ -555,8 +508,8 @@ export class PythonExtractor extends ExtractorBase {
       // Build proper symbol ID with full hierarchy
       // For class fields in __init__, exclude Function parents from the chain
       const symbolId = (kind === SymbolKind.Variable && isInInit)
-        ? this.createFieldSymbolId(filePath, parents, symbol)
-        : this.createSymbolId(filePath, parents, symbol, kind);
+        ? createFieldSymbolId(this.options.projectRoot, filePath, parents, symbol)
+        : createSymbolId(this.options.projectRoot, filePath, parents, symbol, kind);
       
       // Find enclosing Type symbol (for methods and fields)
       let enclosing: string | null = null;
@@ -586,13 +539,14 @@ export class PythonExtractor extends ExtractorBase {
       const hover = this.getHoverInfo(uri, nameChain);
       
       // For Function definitions, resolve type references using LSP
+      const ctx = this.getDefinitionContext();
       let definition: SymbolDefinition;
       if (kind === SymbolKind.Function) {
-        definition = await this.createFunctionDefinition(
-          filePath, uri, symbolId, symbol, enclosing, hover
+        definition = await createFunctionDefinition(
+          ctx, filePath, symbolId, symbol, enclosing, hover
         );
       } else {
-        definition = this.createVariableDefinition(filePath, symbolId, symbol, enclosing, hover);
+        definition = createVariableDefinition(ctx, filePath, symbolId, symbol, enclosing, hover);
       }
       this.definitions.push(definition);
 
@@ -612,20 +566,18 @@ export class PythonExtractor extends ExtractorBase {
   ): void {
     const typeDetails = (typeDef.details as { Type: TypeDetails }).Type;
     const uri = toUri(filePath);
-    const currentModule = this.extractModuleName(filePath);
+    const ctx = this.getDefinitionContext();
+    const currentModule = extractModuleName(this.options.projectRoot, filePath);
     const lines = this.getFileLines(filePath);
     
     // Helper to get field type - prefers declared type annotation over inferred
     const getFieldType = (field: DocumentSymbol, nameChain: string[]): string | null => {
-      // First try to get declared type from source
-      const declaredType = this.extractDeclaredType(lines, field.selectionRange, currentModule);
+      const declaredType = extractDeclaredType(ctx, lines, field.selectionRange, currentModule, filePath);
       if (declaredType) return declaredType;
-      
-      // Fall back to hover-based inference
       const hover = this.getHoverInfo(uri, nameChain);
       if (hover) {
         const { signature } = extractHoverInfo(hover);
-        return this.extractVariableType(signature, currentModule);
+        return extractVariableType(ctx, signature, currentModule, filePath);
       }
       return null;
     };
@@ -633,19 +585,24 @@ export class PythonExtractor extends ExtractorBase {
     // Only recurse into __init__ to find fields - other methods have parameters, not fields
     const collectFieldsFromInit = (symbols: DocumentSymbol[]) => {
       for (const child of symbols) {
-        const childKind = this.mapSymbolKind(child.kind);
+        const childKind = mapSymbolKind(child.kind);
         
         if (childKind === SymbolKind.Function && child.name === "__init__") {
           // Look for fields inside __init__
           if (child.children) {
             for (const field of child.children) {
-              const fieldKind = this.mapSymbolKind(field.kind);
+              const fieldKind = mapSymbolKind(field.kind);
               if (fieldKind === SymbolKind.Variable) {
                 // Skip parameters (those on the same line as the function)
                 if (field.range.start.line === child.selectionRange.start.line) {
                   continue;
                 }
-                const fieldSymbolId = this.createSymbolId(filePath, [typeRecord], field, fieldKind);
+                const fieldSymbolId = createFieldSymbolId(
+                  this.options.projectRoot,
+                  filePath,
+                  [typeRecord],
+                  field
+                );
                 if (!typeDetails.fields.some(f => f.symbol_id === fieldSymbolId)) {
                   const nameChain = [typeRecord.name, child.name, field.name];
                   const fieldType = getFieldType(field, nameChain);
@@ -662,7 +619,12 @@ export class PythonExtractor extends ExtractorBase {
           }
         } else if (childKind === SymbolKind.Variable) {
           // Direct class-level variables (rare in Python but possible)
-          const fieldSymbolId = this.createSymbolId(filePath, [typeRecord], child, childKind);
+          const fieldSymbolId = createFieldSymbolId(
+            this.options.projectRoot,
+            filePath,
+            [typeRecord],
+            child
+          );
           if (!typeDetails.fields.some(f => f.symbol_id === fieldSymbolId)) {
             const nameChain = [typeRecord.name, child.name];
             const fieldType = getFieldType(child, nameChain);
@@ -679,481 +641,6 @@ export class PythonExtractor extends ExtractorBase {
     };
     
     collectFieldsFromInit(children);
-  }
-
-  private mapSymbolKind(kind: LspSymbolKind): SymbolKind | null {
-    switch (kind) {
-      case LspSymbolKind.Function:
-      case LspSymbolKind.Method:
-      case LspSymbolKind.Constructor:
-        return SymbolKind.Function;
-      case LspSymbolKind.Class:
-      case LspSymbolKind.Interface:
-        return SymbolKind.Type;
-      case LspSymbolKind.Variable:
-      case LspSymbolKind.Field:
-      case LspSymbolKind.Constant:
-      case LspSymbolKind.Property:
-        return SymbolKind.Variable;
-      default:
-        return null;
-    }
-  }
-
-  private extractModuleName(filePath: string): string {
-    return relativePath(this.options.projectRoot, filePath)
-      .replace(/\.py$/, "")
-      .replace(/[\\/]/g, ".");
-  }
-
-  private createSymbolId(filePath: string, parents: SymbolRecord[], symbol: DocumentSymbol, kind: SymbolKind): string {
-    const moduleName = this.extractModuleName(filePath);
-    
-    // Build the name chain: module.ParentClass.method
-    const nameChain: string[] = [moduleName];
-    
-    // Add parent names (both Types and Functions for nested definitions)
-    // This ensures local classes inside functions get unique IDs like main.func.LocalClass#Type
-    for (const parent of parents) {
-      if (parent.kind === SymbolKind.Type || parent.kind === SymbolKind.Function) {
-        nameChain.push(parent.name);
-      }
-    }
-    
-    // Add the current symbol name (remove parentheses for functions)
-    const cleanName = symbol.name.replace(/\(.*/, "");
-    nameChain.push(cleanName);
-    
-    const baseName = nameChain.join(".");
-    const suffix = kind;
-    return `${baseName}#${suffix}`;
-  }
-
-  // Create symbol ID for class fields (in __init__), excludes Function parents
-  private createFieldSymbolId(filePath: string, parents: SymbolRecord[], symbol: DocumentSymbol): string {
-    const moduleName = this.extractModuleName(filePath);
-    
-    // Build the name chain: module.ParentClass (only Types, not Functions)
-    const nameChain: string[] = [moduleName];
-    
-    // Only add Type parents, skip Function parents (like __init__)
-    for (const parent of parents) {
-      if (parent.kind === SymbolKind.Type) {
-        nameChain.push(parent.name);
-      }
-    }
-    
-    // Add the field name
-    nameChain.push(symbol.name);
-    
-    const baseName = nameChain.join(".");
-    return `${baseName}#Variable`;
-  }
-
-  // Parse class inheritance from source code
-  // Returns { inherits: [...], implements: [...] }
-  private parseClassInheritance(
-    filePath: string,
-    symbol: DocumentSymbol,
-    typeKind: TypeKind
-  ): { inherits: string[]; implements: string[] } {
-    const content = this.fileContents.get(filePath);
-    if (!content) {
-      return { inherits: [], implements: [] };
-    }
-
-    const lines = content.split(/\r?\n/);
-    const classLine = lines[symbol.range.start.line];
-    if (!classLine) {
-      return { inherits: [], implements: [] };
-    }
-
-    // Match class definition: class ClassName(Base1, Base2):
-    // Handle multi-line class definitions by looking at the start line
-    const classMatch = classLine.match(/class\s+\w+\s*\(([^)]*)\)/);
-    if (!classMatch) {
-      // No explicit bases - inherit from object in Python 3
-      return { inherits: [], implements: [] };
-    }
-
-    const baseList = classMatch[1];
-    if (!baseList.trim()) {
-      return { inherits: [], implements: [] };
-    }
-
-    // Parse base classes
-    // Split by comma, handling potential generic types like List[str]
-    const bases = splitParams(baseList).map(b => b.trim()).filter(b => b);
-    
-    const inherits: string[] = [];
-    const implementsList: string[] = [];
-
-    for (const base of bases) {
-      // Extract just the type name (handle generics like Reader[T])
-      const baseNameMatch = base.match(/^(\w+)/);
-      if (!baseNameMatch) continue;
-      
-      const baseName = baseNameMatch[1];
-      
-      // Resolve to full symbol ID if it's a user-defined type in current module
-      const moduleName = this.extractModuleName(filePath);
-      const resolvedType = this.resolveTypeRef(baseName, moduleName);
-      
-      // If resolved to a symbol ID (contains #), use it; otherwise keep original
-      const typeRef = resolvedType.includes("#") ? resolvedType : baseName;
-      
-      // In Python, Protocol is treated as Interface (implements relationship)
-      // Regular classes go to inherits, Protocol classes go to implements
-      if (baseName === "Protocol" || this.isProtocolClass(typeRef)) {
-        implementsList.push(typeRef);
-      } else {
-        inherits.push(typeRef);
-      }
-    }
-
-    return { inherits, implements: implementsList };
-  }
-
-  // Check if a type is a Protocol class
-  private isProtocolClass(symbolId: string): boolean {
-    return this.protocolClasses.has(symbolId);
-  }
-
-  // Create Type definition (first pass)
-  private createTypeDefinition(
-    filePath: string,
-    symbolId: string,
-    symbol: DocumentSymbol,
-    enclosingSymbol: string | null,
-    hover?: Hover
-  ): SymbolDefinition {
-    const relPath = relativePath(this.options.projectRoot, filePath);
-    const location = {
-      file_path: relPath,
-      line: symbol.range.start.line,
-      column: symbol.range.start.character
-    };
-    const span = {
-      start_line: symbol.range.start.line,
-      start_column: symbol.range.start.character,
-      end_line: symbol.range.end.line,
-      end_column: symbol.range.end.character
-    };
-
-    const { documentation } = extractHoverInfo(hover);
-    const typeKind = this.inferTypeKind(symbolId, symbol, hover);
-    
-    // Parse inheritance from source code
-    const inheritance = this.parseClassInheritance(filePath, symbol, typeKind);
-    
-    const details: TypeDetails = {
-      kind: typeKind,
-      is_abstract: typeKind === TypeKind.Interface || this.isAbstractType(symbol),
-      is_final: false,
-      visibility: inferVisibility(symbol.name),
-      type_params: [],
-      fields: [],
-      inherits: inheritance.inherits,
-      implements: inheritance.implements
-    };
-    
-    return {
-      symbol_id: symbolId,
-      kind: SymbolKind.Type,
-      name: symbol.name,
-      display_name: symbol.detail || symbol.name,
-      location,
-      span,
-      enclosing_symbol: enclosingSymbol,
-      is_external: false,
-      documentation,
-      details: { Type: details }
-    };
-  }
-
-  // Create Function definition with resolved type references (second pass)
-  private async createFunctionDefinition(
-    filePath: string,
-    uri: string,
-    symbolId: string,
-    symbol: DocumentSymbol,
-    enclosingSymbol: string | null,
-    hover?: Hover
-  ): Promise<SymbolDefinition> {
-    const relPath = relativePath(this.options.projectRoot, filePath);
-    const location = {
-      file_path: relPath,
-      line: symbol.range.start.line,
-      column: symbol.range.start.character
-    };
-    const span = {
-      start_line: symbol.range.start.line,
-      start_column: symbol.range.start.character,
-      end_line: symbol.range.end.line,
-      end_column: symbol.range.end.character
-    };
-
-    const { documentation, signature } = extractHoverInfo(hover);
-    
-    // Parse signature to get raw type names
-    const { parameters: rawParameters, returnTypes: rawReturnTypes } = 
-      parseSignature(signature || symbol.detail || "");
-    
-    // Resolve type references to fully qualified symbol IDs
-    // Pass the function's symbol ID to exclude locally shadowed types
-    const moduleName = this.extractModuleName(filePath);
-    const excludedTypes = this.localTypesByFunction.get(symbolId) ?? new Set();
-    
-    const parameters: Parameter[] = [];
-    for (const param of rawParameters) {
-      const resolvedType = param.param_type 
-        ? this.resolveTypeRef(param.param_type, moduleName, excludedTypes)
-        : null;
-      parameters.push({
-        ...param,
-        param_type: resolvedType
-      });
-    }
-    
-    const returnTypes: string[] = [];
-    for (const returnType of rawReturnTypes) {
-      const resolvedType = this.resolveTypeRef(returnType, moduleName, excludedTypes);
-      returnTypes.push(resolvedType);
-    }
-
-    const isAbstract = this.isAbstractFromHover(hover) || 
-                       this.inferAbstractFromDetail(symbol.detail) ||
-                       this.isMethodOfProtocol(enclosingSymbol);
-    
-    const details: FunctionDetails = {
-      parameters,
-      return_types: returnTypes,
-      type_params: [],
-      modifiers: {
-        ...this.inferFunctionModifiers(symbol),
-        is_abstract: isAbstract
-      }
-    };
-    
-    return {
-      symbol_id: symbolId,
-      kind: SymbolKind.Function,
-      name: symbol.name.replace(/\(.*/, ""),
-      display_name: signature || symbol.detail || symbol.name,
-      location,
-      span,
-      enclosing_symbol: enclosingSymbol,
-      is_external: false,
-      documentation,
-      details: { Function: details }
-    };
-  }
-
-  // Create Variable definition (second pass)
-  private createVariableDefinition(
-    filePath: string,
-    symbolId: string,
-    symbol: DocumentSymbol,
-    enclosingSymbol: string | null,
-    hover?: Hover
-  ): SymbolDefinition {
-    const relPath = relativePath(this.options.projectRoot, filePath);
-    const location = {
-      file_path: relPath,
-      line: symbol.range.start.line,
-      column: symbol.range.start.character
-    };
-    const span = {
-      start_line: symbol.range.start.line,
-      start_column: symbol.range.start.character,
-      end_line: symbol.range.end.line,
-      end_column: symbol.range.end.character
-    };
-
-    const { documentation, signature } = extractHoverInfo(hover);
-    const currentModule = this.extractModuleName(filePath);
-    const lines = this.getFileLines(filePath);
-    
-    // Prefer declared type annotation from source code over inferred type from hover
-    const declaredType = this.extractDeclaredType(lines, symbol.selectionRange, currentModule);
-    const inferredType = this.extractVariableType(signature, currentModule);
-    const varType = declaredType || inferredType;
-
-    const varDetails: VariableDetails = {
-      var_type: varType || undefined,
-      mutability: inferMutability(symbol),
-      scope: enclosingSymbol ? VariableScope.Field : VariableScope.Global,
-      visibility: inferVisibility(symbol.name)
-    };
-
-    return {
-      symbol_id: symbolId,
-      kind: SymbolKind.Variable,
-      name: symbol.name,
-      display_name: symbol.detail || symbol.name,
-      location,
-      span,
-      enclosing_symbol: enclosingSymbol,
-      is_external: false,
-      documentation,
-      details: { Variable: varDetails }
-    };
-  }
-
-  // Resolve a type reference to a fully qualified symbol ID
-  // Uses heuristic matching against known types in the current module
-  // excludedTypes: set of type names that should not be resolved (locally shadowed)
-  private resolveTypeRef(
-    typeName: string,
-    currentModule: string,
-    excludedTypes: Set<string> = new Set()
-  ): string {
-    // For builtin types, return as-is
-    if (isBuiltinType(typeName)) {
-      return typeName;
-    }
-
-    // For generic types like "List[Reader]", try to resolve the parameter
-    const genericMatch = typeName.match(/^(\w+)\[(.+)]$/);
-    if (genericMatch) {
-      const baseType = genericMatch[1];
-      const paramType = genericMatch[2].trim();
-      const resolvedParam = this.resolveTypeRef(paramType, currentModule, excludedTypes);
-      return `${baseType}[${resolvedParam}]`;
-    }
-
-    // For union types, return as-is (too complex to resolve each part)
-    if (typeName.includes("|") || typeName.startsWith("Union[")) {
-      return typeName;
-    }
-
-    // Check if this type is excluded (locally shadowed)
-    if (excludedTypes.has(typeName)) {
-      // Return original name - the type reference refers to the local type
-      return typeName;
-    }
-
-    // Check if this type matches a known type definition in the current module
-    // Build the expected symbol ID for a type in the current module
-    const possibleSymbolId = `${currentModule}.${typeName}#Type`;
-    
-    // Check if we have a type definition with this symbol ID
-    const matchingType = this.definitions.find(
-      d => d.symbol_id === possibleSymbolId && d.kind === SymbolKind.Type
-    );
-    
-    if (matchingType) {
-      return matchingType.symbol_id;
-    }
-
-    // Not found in current module, return original name
-    // (could be an import from another module, external type, etc.)
-    return typeName;
-  }
-
-  /**
-   * Extract declared type annotation from source code.
-   * Patterns: "name: Type" or "name: Type = value"
-   * Returns null if no explicit type annotation is found.
-   */
-  private extractDeclaredType(lines: string[], range: Range, currentModule: string): string | null {
-    const line = lines[range.start.line] ?? "";
-    // Look for pattern: name: Type or name: Type = value
-    // Match from the variable name position to find ": Type"
-    const afterName = line.slice(range.end.character);
-    
-    // Pattern: ": Type" possibly followed by "=" or end of statement
-    const typeMatch = afterName.match(/^\s*:\s*([^=]+?)(?:\s*=|$)/);
-    if (typeMatch) {
-      const rawType = typeMatch[1].trim();
-      if (rawType) {
-        return this.resolveTypeRef(rawType, currentModule);
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Extract variable type from hover signature.
-   * Pyright format: "(variable) name: Type" or "(type alias) Type = ..."
-   */
-  private extractVariableType(signature: string, currentModule: string): string | null {
-    if (!signature) return null;
-
-    // Normalize to single line
-    const normalized = signature.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
-
-    // Pattern: "(variable) name: Type" or "(constant) name: Type"
-    const varMatch = normalized.match(/^\((?:variable|constant)\)\s+\w+:\s*(.+)$/);
-    if (varMatch) {
-      const rawType = varMatch[1].trim();
-      const resolved = this.resolveTypeRef(rawType, currentModule);
-      return simplifyLiteralType(resolved);
-    }
-
-    // Pattern: just "name: Type" (simpler case)
-    const simpleMatch = normalized.match(/^\w+:\s*(.+)$/);
-    if (simpleMatch) {
-      const rawType = simpleMatch[1].trim();
-      const resolved = this.resolveTypeRef(rawType, currentModule);
-      return simplifyLiteralType(resolved);
-    }
-
-    return null;
-  }
-
-  private isAbstractFromHover(hover?: Hover): boolean {
-    if (!hover) return false;
-    
-    const { signature } = extractHoverInfo(hover);
-    // In Pyright, abstract methods often show "@abstractmethod" or similar in hover
-    return signature.includes("@abstract") || signature.includes("@abstractmethod");
-  }
-
-  private isMethodOfProtocol(enclosingSymbol: string | null): boolean {
-    // If the enclosing symbol is a Protocol class, the method is abstract
-    return enclosingSymbol !== null && this.protocolClasses.has(enclosingSymbol);
-  }
-
-  private inferAbstractFromDetail(detail?: string): boolean {
-    return detail?.includes("abstract") ?? false;
-  }
-
-  private inferFunctionModifiers(symbol: DocumentSymbol): FunctionModifiers {
-    const name = symbol.name;
-    return {
-      is_async: symbol.detail?.includes("async") ?? false,
-      is_generator: false,
-      is_static: name.startsWith("__") && name.endsWith("__"),
-      is_abstract: false, // Will be set by caller
-      visibility: inferVisibility(name)
-    };
-  }
-
-  private inferTypeKind(symbolId: string, symbol: DocumentSymbol, hover?: Hover): TypeKind {
-    // Check if this is a Protocol class (parsed from source)
-    if (this.protocolClasses.has(symbolId)) {
-      return TypeKind.Interface;
-    }
-    
-    // Check hover info first
-    if (hover) {
-      const { signature } = extractHoverInfo(hover);
-      if (signature.includes("Protocol") || signature.includes("protocol")) {
-        return TypeKind.Interface;
-      }
-    }
-    
-    // Check both detail and the original LSP SymbolKind
-    if (symbol.detail?.includes("Protocol") || 
-        (symbol as any).kind === LspSymbolKind.Interface) {
-      return TypeKind.Interface;
-    }
-    return TypeKind.Class;
-  }
-
-  private isAbstractType(symbol: DocumentSymbol): boolean {
-    return symbol.detail?.includes("Protocol") ?? false;
   }
 
   private async collectReferences(): Promise<void> {
@@ -1232,7 +719,7 @@ export class PythonExtractor extends ExtractorBase {
       identifierPositions.map((pos) =>
         limit(async () => {
           try {
-            const definition = await this.fetchDefinition(pos.uri, pos.position);
+            const definition = await this.client!.getDefinition(pos.uri, pos.position);
             if (definition) {
               const targetRecord = this.findSymbolAtLocation(definition);
 
@@ -1378,6 +865,57 @@ export class PythonExtractor extends ExtractorBase {
                       const module = fromMatch
                         ? fromMatch[1]
                         : path.basename(defPath, path.extname(defPath));
+                      // LSP may return the import line instead of the actual definition.
+                      // If the symbol is defined in this project, resolve to it instead of creating external.
+                      const candidateIds = [
+                        `${module}.${pos.name}#Function`,
+                        `${module}.${pos.name}#Type`,
+                        `${module}.${pos.name}#Variable`
+                      ];
+                      const projectSymbolId = candidateIds.find((id) =>
+                        definitionSymbolIds.has(id)
+                      );
+                      if (projectSymbolId) {
+                        const projectRecord = this.symbolIndex.find(
+                          (r) => r.symbolId === projectSymbolId
+                        );
+                        const enclosing = this.findEnclosingSymbol({
+                          uri: pos.uri,
+                          range: pos.range
+                        } as Location);
+                        if (enclosing) {
+                          const lines = this.fileLines.get(pos.filePath) ?? [];
+                          const role = inferReferenceRole(
+                            lines,
+                            pos.range,
+                            projectRecord?.kind ?? SymbolKind.Function
+                          );
+                          if (
+                            role !== null &&
+                            !(
+                              role === ReferenceRole.Decorate &&
+                              isDecoratorForNestedDef(lines, pos.range.start.line)
+                            )
+                          ) {
+                            this.references.push({
+                              target_symbol: projectSymbolId,
+                              enclosing_symbol: enclosing.symbolId,
+                              role,
+                              receiver: undefined,
+                              location: {
+                                file_path: relativePath(
+                                  this.options.projectRoot,
+                                  pos.filePath
+                                ),
+                                line: pos.range.start.line,
+                                column: pos.range.start.character
+                              }
+                            });
+                          }
+                        }
+                        completed++;
+                        return;
+                      }
                       externalSymbolId = `${module}.${pos.name}#Function`;
                     } else {
                       externalSymbolId = this.inferExternalSymbolId(
@@ -1421,7 +959,7 @@ export class PythonExtractor extends ExtractorBase {
                 }
               }
             } else {
-              // LSP returned no definition (e.g. stdlib); if name is imported, create external ref
+              // LSP returned no definition (e.g. stdlib); if name is imported, resolve or create external ref
               const importedNames = importedNamesByFile.get(pos.filePath);
               if (importedNames?.has(pos.name)) {
                 const enclosing = this.findEnclosingSymbol({
@@ -1431,14 +969,31 @@ export class PythonExtractor extends ExtractorBase {
                 if (enclosing) {
                   const module = this.getModuleForImportedName(pos.filePath, pos.name);
                   if (module) {
-                    const externalSymbolId = `${module}.${pos.name}#Function`;
-                    this.ensureExternalSymbol(externalSymbolId, pos.name);
+                    const candidateIds = [
+                      `${module}.${pos.name}#Function`,
+                      `${module}.${pos.name}#Type`,
+                      `${module}.${pos.name}#Variable`
+                    ];
+                    const projectSymbolId = candidateIds.find((id) =>
+                      definitionSymbolIds.has(id)
+                    );
+                    const targetSymbolId = projectSymbolId ?? `${module}.${pos.name}#Function`;
+                    if (!projectSymbolId) {
+                      this.ensureExternalSymbol(targetSymbolId, pos.name);
+                    }
+                    const projectRecord = projectSymbolId
+                      ? this.symbolIndex.find((r) => r.symbolId === projectSymbolId)
+                      : undefined;
                     const lines = this.fileLines.get(pos.filePath) ?? [];
-                    const role = inferReferenceRole(lines, pos.range, SymbolKind.Function);
+                    const role = inferReferenceRole(
+                      lines,
+                      pos.range,
+                      projectRecord?.kind ?? SymbolKind.Function
+                    );
                     if (role !== null &&
                         !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))) {
                       this.references.push({
-                        target_symbol: externalSymbolId,
+                        target_symbol: targetSymbolId,
                         enclosing_symbol: enclosing.symbolId,
                         role,
                         receiver: undefined,
@@ -1466,21 +1021,6 @@ export class PythonExtractor extends ExtractorBase {
       )
     );
     this.definitionSymbolIdsForEnclosing = null;
-  }
-
-  private async fetchDefinition(uri: string, position: Position): Promise<Location | null> {
-    try {
-      const result = await this.client!.sendRequest<Location | Location[] | null>(
-        "textDocument/definition",
-        { textDocument: { uri }, position }
-      );
-      if (Array.isArray(result)) {
-        return result[0] ?? null;
-      }
-      return result;
-    } catch {
-      return null;
-    }
   }
 
   private findSymbolAtLocation(location: Location): SymbolRecord | undefined {
@@ -1624,7 +1164,7 @@ export class PythonExtractor extends ExtractorBase {
             is_generator: false,
             is_static: false,
             is_abstract: false,
-            visibility: "Public" as const
+            visibility: Visibility.Public,
           }
         }
       }

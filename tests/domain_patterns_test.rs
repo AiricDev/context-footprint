@@ -77,7 +77,7 @@ fn assert_reachable(
 ) {
     let idx = graph
         .get_node_by_symbol(symbol)
-        .expect(&format!("Symbol {} not in graph", symbol));
+        .unwrap_or_else(|| panic!("Symbol {} not in graph", symbol));
     let id = graph.node(idx).core().id;
     assert!(
         result.reachable_set.contains(&id),
@@ -93,7 +93,7 @@ fn assert_not_reachable(
 ) {
     let idx = graph
         .get_node_by_symbol(symbol)
-        .expect(&format!("Symbol {} not in graph", symbol));
+        .unwrap_or_else(|| panic!("Symbol {} not in graph", symbol));
     let id = graph.node(idx).core().id;
     assert!(
         !result.reachable_set.contains(&id),

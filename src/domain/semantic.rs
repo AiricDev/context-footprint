@@ -117,10 +117,9 @@ pub struct DocumentSemantics {
     /// Symbol references (for edge construction)
     ///
     /// **Adapter Contract**:
-    /// - Include all function calls, variable reads/writes, type annotations
+    /// - Include all function calls, variable reads/writes, decorators
     /// - Set `receiver` for member access (self.field, obj.method)
     /// - For ambiguous cases (dynamic dispatch), use declared type of receiver
-    /// - TypeAnnotation references don't create graph edges but populate type info
     pub references: Vec<SymbolReference>,
 }
 
@@ -249,6 +248,7 @@ pub enum SymbolDetails {
 /// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct FunctionDetails {
     /// Parameters (in definition order)
     ///
@@ -286,18 +286,9 @@ pub struct FunctionDetails {
     pub modifiers: FunctionModifiers,
 }
 
-impl Default for FunctionDetails {
-    fn default() -> Self {
-        Self {
-            parameters: Vec::new(),
-            return_types: Vec::new(),
-            type_params: Vec::new(),
-            modifiers: FunctionModifiers::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Parameter {
     pub name: String,
 
@@ -328,16 +319,6 @@ pub struct Parameter {
     pub is_variadic: bool,
 }
 
-impl Default for Parameter {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            param_type: None,
-            has_default: false,
-            is_variadic: false,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeParam {
@@ -691,8 +672,8 @@ pub enum ReferenceRole {
     /// Function call → Call edge in graph
     ///
     /// **Adapter Contract**:
-    /// - Use for: function calls, method calls, constructor calls
-    /// - `target_symbol`: the Function symbol being called
+    /// - Use for: function calls, method calls, constructor calls (including `new Class()` / `Class()`)
+    /// - `target_symbol`: the Function symbol being called (for constructors, target the constructor function)
     /// - For method calls: set `receiver` to indicate instance/static access
     /// - Example: `obj.method()` → role=Call, receiver=Some("obj"), target=method_symbol
     Call,
@@ -717,42 +698,13 @@ pub enum ReferenceRole {
     /// - For mutable shared state, Write triggers SharedStateWrite expansion
     Write,
 
-    /// Type annotation (does NOT create graph edges)
-    ///
-    /// **Adapter Contract**:
-    /// - Use for: parameter types, return types, variable type annotations
-    /// - `target_symbol`: the Type symbol used in annotation
-    /// - These references are used to validate type references but don't create edges
-    /// - Types live in TypeRegistry, not graph
-    TypeAnnotation,
-
-    /// Type instantiation (may create Call edge to constructor)
-    ///
-    /// **Adapter Contract**:
-    /// - Use for: `new Class()`, `Class()` (Python), etc.
-    /// - `target_symbol`: the Type symbol being instantiated
-    /// - Builder may convert to Call edge if constructor exists
-    TypeInstantiation,
-
-    /// Import statement (generally ignored by builder)
-    ///
-    /// **Adapter Contract**:
-    /// - Use for: import statements
-    /// - Actual usage creates separate references (Call, Read, etc.)
-    /// - May be used for dependency analysis, not CF calculation
-    Import,
-
-    /// Decorator/annotation application
+    /// Decorator/annotation application → Annotates edge in graph
     ///
     /// **Adapter Contract**:
     /// - Use for: Python decorators, Java annotations, TS decorators
-    /// - `is_behavioral=true`: decorator changes behavior (e.g., @cached, @wraps)
-    ///   * Creates Annotates edge (understanding decorated requires understanding decorator)
-    /// - `is_behavioral=false`: decorator is metadata only (e.g., @deprecated)
-    ///   * May not create edge
     /// - `target_symbol`: the decorator Function
-    /// - `enclosing_symbol`: the decorated Function
-    Decorator { is_behavioral: bool },
+    /// - `enclosing_symbol`: the decorated Function (for class decorators, use __init__)
+    Decorate,
 }
 
 /// ============================================================================

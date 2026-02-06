@@ -18,7 +18,5 @@ pub enum EdgeKind {
 
     // ============ Annotations & Decorators ============
     /// Decorated → Decorator direction (understanding decorated requires decorator)
-    Annotates {
-        is_behavioral: bool, // true = decorator (strong dep), false = metadata (weak dep)
-    },
+    Annotates,
 }

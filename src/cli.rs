@@ -113,7 +113,7 @@ pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()
                 println!("\n  First 5 reachable nodes (ordered):");
                 for (i, &node_id) in result.reachable_nodes_ordered.iter().take(5).enumerate() {
                     // Find node by ID
-                    for (_sym, &idx) in &graph_arc.symbol_to_node {
+                    for &idx in graph_arc.symbol_to_node.values() {
                         let node = graph_arc.node(idx);
                         if node.core().id == node_id {
                             println!(

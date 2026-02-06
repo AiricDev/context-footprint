@@ -220,7 +220,7 @@ mod tests {
             start_line: usize,
             end_line: usize,
         ) -> anyhow::Result<Vec<String>> {
-            let lines = vec!["line1".to_string(), "line2".to_string()];
+            let lines = ["line1".to_string(), "line2".to_string()];
             let start = start_line.min(lines.len().saturating_sub(1));
             let end = end_line.min(lines.len().saturating_sub(1));
             Ok(lines[start..=end].to_vec())

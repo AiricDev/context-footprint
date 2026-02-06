@@ -465,6 +465,125 @@ impl ContextEngine {
     }
 }
 
+fn build_node_maps(graph: &ContextGraph) -> (HashMap<NodeId, NodeIndex>, HashMap<NodeId, String>) {
+    let mut node_id_to_index = HashMap::new();
+    let mut node_id_to_symbol = HashMap::new();
+
+    for idx in graph.graph.node_indices() {
+        let id = graph.node(idx).core().id;
+        node_id_to_index.insert(id, idx);
+    }
+
+    for (symbol, &idx) in &graph.symbol_to_node {
+        let id = graph.node(idx).core().id;
+        node_id_to_symbol
+            .entry(id)
+            .or_insert_with(|| symbol.clone());
+    }
+
+    (node_id_to_index, node_id_to_symbol)
+}
+
+fn pruning_params(kind: PolicyKind) -> PruningParams {
+    match kind {
+        PolicyKind::Academic => PruningParams::academic(0.5),
+        PolicyKind::Strict => PruningParams::strict(0.8),
+    }
+}
+
+fn node_type_str(node: &Node) -> &'static str {
+    match node {
+        Node::Function(_) => "function",
+        Node::Variable(_) => "variable",
+    }
+}
+
+fn span_dto(span: &crate::domain::node::SourceSpan) -> SpanDto {
+    SpanDto {
+        start_line: span.start_line,
+        start_column: span.start_column,
+        end_line: span.end_line,
+        end_column: span.end_column,
+        start_line_1based: span.start_line + 1,
+        end_line_1based: span.end_line + 1,
+    }
+}
+
+fn compute_distribution(mut sizes: Vec<u32>) -> CfDistribution {
+    if sizes.is_empty() {
+        return CfDistribution {
+            count: 0,
+            percentiles: vec![],
+            average: 0,
+            median: 0,
+            min: 0,
+            max: 0,
+        };
+    }
+
+    sizes.sort_unstable();
+    let count = sizes.len();
+
+    let percentiles = (5..=100)
+        .step_by(5)
+        .map(|p| {
+            let idx = ((p * (count - 1)) / 100).min(count - 1);
+            PercentileValue {
+                percentile: p as u32,
+                tokens: sizes[idx],
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let sum: u64 = sizes.iter().map(|&s| s as u64).sum();
+    let average = sum / count as u64;
+    let median = sizes[count / 2];
+
+    CfDistribution {
+        count,
+        percentiles,
+        average,
+        median,
+        min: sizes[0],
+        max: sizes[count - 1],
+    }
+}
+
+fn symbol_is_parameter(symbol: &str) -> bool {
+    symbol.contains("().(") && symbol.ends_with(')')
+}
+
+fn filter_top_level_nodes(
+    graph: &ContextGraph,
+    node_id_to_symbol: &HashMap<NodeId, String>,
+    sorted_nodes: Vec<NodeIndex>,
+) -> Vec<NodeIndex> {
+    let mut top_level_nodes: Vec<NodeIndex> = Vec::new();
+
+    for idx in sorted_nodes {
+        let core = graph.node(idx).core();
+
+        let symbol = node_id_to_symbol
+            .get(&core.id)
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let is_sub_node = symbol_is_parameter(symbol);
+
+        let is_contained = top_level_nodes.iter().any(|&prev_idx| {
+            let prev_core = graph.node(prev_idx).core();
+            core.span.start_line >= prev_core.span.start_line
+                && core.span.end_line <= prev_core.span.end_line
+                && idx != prev_idx
+        });
+
+        if !is_contained && !is_sub_node {
+            top_level_nodes.push(idx);
+        }
+    }
+
+    top_level_nodes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,12 +605,10 @@ mod tests {
             start_line: usize,
             end_line: usize,
         ) -> Result<Vec<String>> {
-            let lines = vec![
-                "line1".to_string(),
+            let lines = ["line1".to_string(),
                 "line2".to_string(),
                 "line3".to_string(),
-                "line4".to_string(),
-            ];
+                "line4".to_string()];
             let start = start_line.min(lines.len().saturating_sub(1));
             let end = end_line.min(lines.len().saturating_sub(1));
             Ok(lines[start..=end].to_vec())
@@ -614,123 +731,4 @@ mod tests {
             .any(|n| n.code.as_ref().is_some_and(|c| !c.is_empty()));
         assert!(any_code);
     }
-}
-
-fn build_node_maps(graph: &ContextGraph) -> (HashMap<NodeId, NodeIndex>, HashMap<NodeId, String>) {
-    let mut node_id_to_index = HashMap::new();
-    let mut node_id_to_symbol = HashMap::new();
-
-    for idx in graph.graph.node_indices() {
-        let id = graph.node(idx).core().id;
-        node_id_to_index.insert(id, idx);
-    }
-
-    for (symbol, &idx) in &graph.symbol_to_node {
-        let id = graph.node(idx).core().id;
-        node_id_to_symbol
-            .entry(id)
-            .or_insert_with(|| symbol.clone());
-    }
-
-    (node_id_to_index, node_id_to_symbol)
-}
-
-fn pruning_params(kind: PolicyKind) -> PruningParams {
-    match kind {
-        PolicyKind::Academic => PruningParams::academic(0.5),
-        PolicyKind::Strict => PruningParams::strict(0.8),
-    }
-}
-
-fn node_type_str(node: &Node) -> &'static str {
-    match node {
-        Node::Function(_) => "function",
-        Node::Variable(_) => "variable",
-    }
-}
-
-fn span_dto(span: &crate::domain::node::SourceSpan) -> SpanDto {
-    SpanDto {
-        start_line: span.start_line,
-        start_column: span.start_column,
-        end_line: span.end_line,
-        end_column: span.end_column,
-        start_line_1based: span.start_line + 1,
-        end_line_1based: span.end_line + 1,
-    }
-}
-
-fn compute_distribution(mut sizes: Vec<u32>) -> CfDistribution {
-    if sizes.is_empty() {
-        return CfDistribution {
-            count: 0,
-            percentiles: vec![],
-            average: 0,
-            median: 0,
-            min: 0,
-            max: 0,
-        };
-    }
-
-    sizes.sort_unstable();
-    let count = sizes.len();
-
-    let percentiles = (5..=100)
-        .step_by(5)
-        .map(|p| {
-            let idx = ((p * (count - 1)) / 100).min(count - 1);
-            PercentileValue {
-                percentile: p as u32,
-                tokens: sizes[idx],
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let sum: u64 = sizes.iter().map(|&s| s as u64).sum();
-    let average = sum / count as u64;
-    let median = sizes[count / 2];
-
-    CfDistribution {
-        count,
-        percentiles,
-        average,
-        median,
-        min: sizes[0],
-        max: sizes[count - 1],
-    }
-}
-
-fn symbol_is_parameter(symbol: &str) -> bool {
-    symbol.contains("().(") && symbol.ends_with(')')
-}
-
-fn filter_top_level_nodes(
-    graph: &ContextGraph,
-    node_id_to_symbol: &HashMap<NodeId, String>,
-    sorted_nodes: Vec<NodeIndex>,
-) -> Vec<NodeIndex> {
-    let mut top_level_nodes: Vec<NodeIndex> = Vec::new();
-
-    for idx in sorted_nodes {
-        let core = graph.node(idx).core();
-
-        let symbol = node_id_to_symbol
-            .get(&core.id)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        let is_sub_node = symbol_is_parameter(symbol);
-
-        let is_contained = top_level_nodes.iter().any(|&prev_idx| {
-            let prev_core = graph.node(prev_idx).core();
-            core.span.start_line >= prev_core.span.start_line
-                && core.span.end_line <= prev_core.span.end_line
-                && idx != prev_idx
-        });
-
-        if !is_contained && !is_sub_node {
-            top_level_nodes.push(idx);
-        }
-    }
-
-    top_level_nodes
 }

@@ -167,28 +167,35 @@ impl GraphBuilder {
                     }
 
                     // Handle Read/Write edges for variable references
-                    if matches!(reference.role, ReferenceRole::Read | ReferenceRole::Write) {
-                        // Target might be a variable (node) or a type (in type_registry)
-                        if let Some(target_sym) = &target_node_sym
-                            && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
-                            && source_idx != target_idx
-                        {
-                            let edge_kind = if reference.role == ReferenceRole::Write {
-                                EdgeKind::Write
-                            } else {
-                                EdgeKind::Read
-                            };
-                            graph.add_edge(source_idx, target_idx, edge_kind);
+                    if matches!(reference.role, ReferenceRole::Read | ReferenceRole::Write)
+                        && let Some(target_sym) = &target_node_sym
+                        && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
+                        && source_idx != target_idx
+                    {
+                        let edge_kind = if reference.role == ReferenceRole::Write {
+                            EdgeKind::Write
+                        } else {
+                            EdgeKind::Read
+                        };
+                        graph.add_edge(source_idx, target_idx, edge_kind);
 
-                            if reference.role == ReferenceRole::Write {
-                                state_writers
-                                    .entry(reference.target_symbol.clone())
-                                    .or_default()
-                                    .push(source_idx);
-                            } else {
-                                readers.push((source_idx, reference.target_symbol.clone()));
-                            }
+                        if reference.role == ReferenceRole::Write {
+                            state_writers
+                                .entry(reference.target_symbol.clone())
+                                .or_default()
+                                .push(source_idx);
+                        } else {
+                            readers.push((source_idx, reference.target_symbol.clone()));
                         }
+                    }
+
+                    // Handle Decorate edges (decorated → decorator)
+                    if reference.role == ReferenceRole::Decorate
+                        && let Some(target_sym) = &target_node_sym
+                        && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
+                        && source_idx != target_idx
+                    {
+                        graph.add_edge(source_idx, target_idx, EdgeKind::Annotates);
                     }
                 }
             }

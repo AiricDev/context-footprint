@@ -84,6 +84,10 @@ pub struct FunctionNode {
     /// True if this function is a type constructor (e.g. Python __init__).
     /// Set from semantic data by language extractor; used for boundary rules.
     pub is_constructor: bool,
+
+    /// True if this function is DI-wired (e.g. FastAPI Depends() or cf:di_wired pragma).
+    /// Boundary when signature is complete.
+    pub is_di_wired: bool,
 }
 
 impl FunctionNode {

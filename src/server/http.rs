@@ -253,6 +253,7 @@ mod tests {
             return_types: vec![],
             is_interface_method: false,
             is_constructor: false,
+            is_di_wired: false,
         });
         let idx = g.add_node("sym/f().".into(), f);
         g.add_edge(idx, idx, EdgeKind::Call); // self-loop, harmless

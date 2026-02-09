@@ -300,6 +300,7 @@ mod tests {
             return_types: vec![],
             is_interface_method: false,
             is_constructor: false,
+            is_di_wired: false,
         })
     }
 
@@ -333,6 +334,7 @@ mod tests {
             return_types: vec!["int#".to_string()],
             is_interface_method: false,
             is_constructor: false,
+            is_di_wired: false,
         })
     }
 

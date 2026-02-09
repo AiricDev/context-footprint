@@ -57,6 +57,7 @@ pub fn function_def(
                 is_static: false,
                 is_abstract: false,
                 is_constructor: false,
+                is_di_wired: false,
                 visibility: Visibility::Public,
             },
         }),

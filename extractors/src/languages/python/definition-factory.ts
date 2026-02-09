@@ -315,6 +315,42 @@ function inferAbstractFromDetail(detail?: string): boolean {
   return detail?.includes("abstract") ?? false;
 }
 
+/**
+ * Detect if the function signature contains any parameter default with Depends(...).
+ * Scans source lines of the function signature (def ... up to body).
+ */
+function hasDependsInSignature(
+  lines: string[],
+  startLine: number,
+  endLine: number
+): boolean {
+  const end = Math.min(endLine + 1, startLine + 30, lines.length);
+  for (let i = startLine; i < end; i++) {
+    const line = lines[i] ?? "";
+    if (line.includes("Depends(")) return true;
+  }
+  return false;
+}
+
+/**
+ * Detect cf:di_wired pragma in documentation strings or nearby comments (# cf:di_wired).
+ */
+function hasCfDiWiredPragma(
+  documentation: string[],
+  lines: string[],
+  startLine: number
+): boolean {
+  for (const doc of documentation) {
+    if (doc.includes("cf:di_wired")) return true;
+  }
+  const end = Math.min(startLine + 5, lines.length);
+  for (let i = Math.max(0, startLine - 1); i < end; i++) {
+    const line = lines[i] ?? "";
+    if (line.includes("# cf:di_wired") || line.includes("#cf:di_wired")) return true;
+  }
+  return false;
+}
+
 function inferFunctionModifiers(symbol: DocumentSymbol): {
   is_async: boolean;
   is_generator: boolean;
@@ -504,6 +540,10 @@ export async function createFunctionDefinition(
     inferAbstractFromDetail(symbol.detail) ||
     isMethodOfProtocol(ctx, enclosingSymbol);
 
+  const isDiWired =
+    hasDependsInSignature(lines, startLine, endLine) ||
+    hasCfDiWiredPragma(documentation, lines, startLine);
+
   const details: FunctionDetails = {
     parameters,
     return_types: returnTypes,
@@ -511,7 +551,8 @@ export async function createFunctionDefinition(
     modifiers: {
       ...inferFunctionModifiers(symbol),
       is_abstract: isAbstract,
-      is_constructor: isConstructor
+      is_constructor: isConstructor,
+      is_di_wired: isDiWired
     }
   };
 

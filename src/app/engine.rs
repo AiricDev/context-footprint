@@ -683,6 +683,7 @@ mod tests {
             return_types: vec![],
             is_interface_method: false,
             is_constructor: false,
+            is_di_wired: false,
         });
 
         let v1 = Node::Variable(VariableNode {

@@ -421,6 +421,7 @@ fn create_node_from_definition(
                 return_types: func_details.return_types.clone(),
                 is_interface_method,
                 is_constructor: func_details.modifiers.is_constructor,
+                is_di_wired: func_details.modifiers.is_di_wired,
             }))
         }
         SymbolDetails::Variable(var_details) => {

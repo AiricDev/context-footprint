@@ -134,6 +134,11 @@ pub fn evaluate(
             }
         }
         Node::Function(f) => {
+            // DI-wired function with complete signature: boundary (no doc requirement)
+            if f.is_di_wired && f.is_signature_complete() {
+                return PruningDecision::Boundary;
+            }
+
             // Interface/abstract methods: boundary if signature complete and documented
             if f.is_interface_method {
                 if f.is_signature_complete() && f.core.doc_score >= params.doc_threshold {
@@ -223,6 +228,7 @@ mod tests {
             return_types: vec!["int#".to_string()],
             is_interface_method: false,
             is_constructor: false,
+            is_di_wired: false,
         })
     }
 

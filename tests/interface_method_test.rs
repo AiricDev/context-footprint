@@ -105,6 +105,7 @@ fn test_interface_method_becomes_node_with_flag() {
                             is_static: false,
                             is_abstract: true,
                             is_constructor: false,
+                            is_di_wired: false,
                             visibility: Visibility::Public,
                         },
                     }),
@@ -229,6 +230,7 @@ fn test_interface_method_with_good_doc_is_boundary() {
                             is_static: false,
                             is_abstract: true,
                             is_constructor: false,
+                            is_di_wired: false,
                             visibility: Visibility::Public,
                         },
                     }),
@@ -340,6 +342,7 @@ fn test_call_to_interface_method_creates_edge() {
                             is_static: false,
                             is_abstract: true,
                             is_constructor: false,
+                            is_di_wired: false,
                             visibility: Visibility::Public,
                         },
                     }),
@@ -439,5 +442,6 @@ fn create_dummy_function(id: u32) -> Node {
         return_types: vec![],
         is_interface_method: false,
         is_constructor: false,
+        is_di_wired: false,
     })
 }

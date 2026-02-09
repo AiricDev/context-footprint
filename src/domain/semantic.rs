@@ -354,6 +354,12 @@ pub struct FunctionModifiers {
     #[serde(default)]
     pub is_constructor: bool,
 
+    /// True if this function participates in DI wiring (e.g. FastAPI Depends(),
+    /// or manually marked with `# cf:di_wired` pragma).
+    /// When true and signature is complete, treated as CF boundary.
+    #[serde(default)]
+    pub is_di_wired: bool,
+
     pub visibility: Visibility,
 }
 
@@ -365,6 +371,7 @@ impl Default for FunctionModifiers {
             is_static: false,
             is_abstract: false,
             is_constructor: false,
+            is_di_wired: false,
             visibility: Visibility::Public,
         }
     }

@@ -57,24 +57,29 @@ impl PruningParams {
 // -----------------------------------------------------------------------------
 
 /// Returns true if the function returns an abstract type (Protocol/Interface/Trait)
-/// with sufficient documentation - i.e. "abstract factory" pattern.
+/// i.e. "abstract factory" pattern.
+///
+/// Rationale: Abstract factory is a good design pattern. If a function returns an abstract type
+/// and has a complete signature, it's a valid boundary regardless of the return type's documentation.
+/// The abstract type's method signatures are more important than prose documentation.
 pub fn is_abstract_factory(
     function_node: &Node,
     type_registry: &TypeRegistry,
-    doc_threshold: f32,
+    _doc_threshold: f32,
 ) -> bool {
     let Node::Function(f) = function_node else {
         return false;
     };
-    if f.return_types.is_empty() {
+    if f.return_types.is_empty() || !f.is_signature_complete() {
         return false;
     }
 
-    // Check if ANY return type is an abstract factory type
+    // Check if ANY return type is an abstract type
+    // We don't require the return type itself to be well-documented,
+    // because the abstract type's method signatures are sufficient documentation.
     for return_type_id in &f.return_types {
         if let Some(type_info) = type_registry.get(return_type_id)
             && type_info.definition.is_abstract
-            && type_info.doc_score >= doc_threshold
         {
             return true;
         }

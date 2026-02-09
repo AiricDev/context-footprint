@@ -67,6 +67,10 @@ Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
 
 **Boundary**: `SemanticData` (domain) ← JSON file / LSP extractor output
 
+**Details**: See [`docs/adr-004-semantic-data-abstraction.md`](docs/adr-004-semantic-data-abstraction.md) for full design rationale, adapter contract, and implementation guidance
+
+---
+
 ## 🗂️ Key Domain Concepts
 
 ### Core Types

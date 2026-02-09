@@ -6,3 +6,6 @@ target/
 *.zip
 coverage/
 tarpaulin-report.html
+
+# Extractor deps installed in Docker; avoid copying local node_modules
+extractors/node_modules

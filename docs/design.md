@@ -1,7 +1,5 @@
 **Status**: Draft
 
-**Related Paper**: [ Context Footprint](https://www.notion.so/Context-Footprint-2e979ac6bd188055a3cbe83a06729809?pvs=21) 
-
 ## 1. Formal Definition: The Context Graph
 
 To provide an objective, mathematically rigorous definition, we model the software system as a directed graph.
@@ -199,37 +197,39 @@ Executes the traversal algorithm on the constructed graph:
 
 ### 6.2 Graph Schema: ContextGraph + TypeRegistry
 
+**Implementation Reference**: See `src/domain/graph.rs`, `src/domain/node.rs`, `src/domain/type_registry.rs`, `src/domain/edge.rs` for complete schema definitions.
+
 The implementation uses a directed graph of **nodes** (functions and variables only), a **symbol→node** map, and a separate **Type Registry** for type definitions. Dynamic expansion is **materialized as edges** at build time (Pass 3); there are no persistent "side indices" after construction.
 
-#### ContextGraph Structure
+#### Core Components and Design Principles
 
-```rust
-/// Symbol identifier (globally unique symbol string)
-pub type SymbolId = String;
+**1. ContextGraph Structure**:
+- Directed graph using `petgraph::DiGraph<Node, EdgeKind>`
+- Symbol lookup map: `HashMap<SymbolId, NodeIndex>`
+- TypeRegistry: stores type definitions (not graph nodes)
+- All edges (including `SharedStateWrite`, `CallIn`) materialized in graph after Pass 3
 
-pub struct ContextGraph {
-    /// The directed graph: petgraph DiGraph<Node, EdgeKind>
-    pub graph: DiGraph<Node, EdgeKind>,
+**2. Node Types** (only Function and Variable are nodes):
+- **Function**: `parameters` (with `param_type`), `return_types`, `is_interface_method`, `is_constructor`
+  - Key method: `is_signature_complete()` = all params typed + has return type
+- **Variable**: `var_type`, `mutability` (Const/Immutable/Mutable), `variable_kind` (Global/ClassField/Local)
+- **NodeCore** (shared): `context_size`, `doc_score`, `is_external`, `span`, `file_path`
 
-    /// Mapping from symbol to node index (for lookup and traversal entry)
-    pub symbol_to_node: HashMap<SymbolId, NodeIndex>,
+**3. TypeRegistry** (types not in graph):
+- Stores Class, Interface, Struct, Enum, TypeAlias definitions
+- Attributes: `type_kind`, `is_abstract`, `type_param_count`, `context_size`, `doc_score`
+- Queried during pruning (e.g., abstract factory pattern detection)
 
-    /// Type definitions live here, not as graph nodes; queried during pruning (e.g. abstract factory)
-    pub type_registry: TypeRegistry,
-}
-```
+**4. EdgeKind**:
+- Forward: `Call`, `Read`, `Write`
+- Reverse (dynamic expansion): `SharedStateWrite`, `CallIn`
+- Annotation: `Annotates`
+- Note: Type usage (param/return types) stored as node attributes, not edges
 
-Traversal uses `graph.neighbors_directed(idx, Outgoing)`; all edges (including `SharedStateWrite` and `CallIn`) are stored in the graph. The solver does not use separate state/caller indices.
-
-#### Design Principles
-
-1. **Information Maximization**: Retain as much semantic information as possible during graph building; pruning policy (`evaluate`) decides boundary vs transparent.
-2. **Polymorphic Nodes**: Two node variants—Function and Variable—with a shared `NodeCore` and type-specific fields.
-3. **Types out of graph**: Type definitions are not nodes; they are in `TypeRegistry`. Type usage is represented by node attributes (e.g. `return_types`, `parameters[].param_type`, `var_type`) referencing type IDs.
-
-#### Node Hierarchy
-
-Only **Function** and **Variable** are graph nodes. Module/namespace is a node property (`scope`). Types are in `TypeRegistry`.
+**Design Principles**:
+- **Information Maximization**: Graph retains all semantic data; pruning logic decides boundary vs transparent
+- **Types out of graph**: Type definitions in TypeRegistry; nodes reference by type ID
+- **Dynamic expansion materialized**: Reverse edges added in Pass 3; no separate indices after build
 
 ```rust
 /// Shared core attributes for all nodes
@@ -374,10 +374,355 @@ pub fn evaluate(
     - **Logic**: LLM-based evaluation of documentation quality ("Does this docstring explain the side effects?").
     - **Use Case**: CI/CD Quality Gates for enterprise projects.
 
-### 6.4 Implementation Phases (Revised)
+### 6.4 Detailed Algorithm Pseudocode
 
-1. **Phase 1**: Semantic Data Ingestion & Graph Builder (Rust).
-2. **Phase 2**: Baseline Policy (Type Hint + Doc presence check).
-3. **Phase 3**: Dynamic Expansion Logic (State Index for Mutability).
-4. **Phase 4**: CLI Tools for Visualization & Statistics.
-5. **Phase 5**: Experiment Runner (Batch processing BugsInPy).
+This section provides detailed pseudocode for the two core algorithms: **Graph Construction** and **CF Traversal**. See implementation in `src/domain/builder.rs` and `src/domain/solver.rs`.
+
+#### Algorithm 1: Graph Construction (Three-Pass Builder)
+
+**Input**: `SemanticData` (JSON), `SourceReader`, `SizeFunction`, `DocScorer`  
+**Output**: `ContextGraph` with all nodes, edges (including dynamic expansion), and TypeRegistry
+
+```
+function build_graph(semantic_data, source_reader, size_function, doc_scorer):
+    graph = empty_graph()
+    type_registry = empty_registry()
+    
+    // Pre-compute enclosing symbol map for symbol resolution
+    enclosing_map = semantic_data.build_enclosing_map()
+    node_symbols = empty_set()
+    
+    // PASS 1: Node Allocation and TypeRegistry
+    for each document in semantic_data.documents:
+        source_code = source_reader.read(document.path)
+        
+        for each definition in document.definitions:
+            // Check if this is an interface/abstract method
+            is_interface_method = (definition.kind == Function AND 
+                                  definition.details.modifiers.is_abstract)
+            
+            // Compute context_size
+            if is_interface_method:
+                // Only signature span for interface methods
+                signature_span = extract_signature_span(definition.span, source_code)
+                context_size = size_function.compute(source_code, signature_span, definition.documentation)
+            else:
+                context_size = size_function.compute(source_code, definition.span, definition.documentation)
+            
+            // Compute doc_score
+            doc_score = doc_scorer.score(definition, definition.documentation)
+            
+            if definition.kind == Type:
+                // Register in TypeRegistry (not a graph node)
+                type_info = create_type_info(definition, context_size, doc_score)
+                type_registry.register(definition.symbol_id, type_info)
+            
+            else if definition.kind in [Function, Variable]:
+                // Create graph node
+                node_symbols.add(definition.symbol_id)
+                node_core = NodeCore {
+                    id: graph.next_node_id(),
+                    name: definition.name,
+                    scope: definition.enclosing_symbol,
+                    context_size: context_size,
+                    span: definition.span,
+                    doc_score: doc_score,
+                    is_external: definition.is_external,
+                    file_path: document.path
+                }
+                
+                node = create_node(node_core, definition, is_interface_method)
+                graph.add_node(definition.symbol_id, node)
+    
+    // Build constructor init map: type_symbol -> __init__ node symbol
+    init_map = {}
+    for each definition in all_definitions:
+        if (definition.kind == Function AND 
+            definition.name == "__init__" AND 
+            definition.enclosing_symbol in type_registry AND 
+            definition.symbol_id in node_symbols):
+            init_map[definition.enclosing_symbol] = definition.symbol_id
+    
+    // PASS 2: Edge Wiring (Static Edges + Collect for Dynamic Expansion)
+    state_writers = {}  // variable_symbol -> list of writer nodes
+    callers = {}        // function_symbol -> list of caller nodes
+    readers = []        // list of (reader_node, variable_symbol) pairs
+    
+    for each document in semantic_data.documents:
+        for each reference in document.references:
+            // Resolve symbols to nearest node ancestors
+            source_node_symbol = resolve_to_node_symbol(
+                reference.enclosing_symbol, node_symbols, enclosing_map)
+            target_node_symbol = resolve_to_node_symbol(
+                reference.target_symbol, node_symbols, enclosing_map)
+            
+            if source_node_symbol is None:
+                continue
+            
+            source_idx = graph.get_node_index(source_node_symbol)
+            
+            // Handle Call edges
+            if reference.role == Call:
+                // Try direct target, or fallback to constructor (__init__)
+                target_idx = graph.get_node_index(target_node_symbol) 
+                            OR graph.get_node_index(init_map[reference.target_symbol])
+                
+                if target_idx exists AND source_idx != target_idx:
+                    graph.add_edge(source_idx, target_idx, EdgeKind.Call)
+                    callers[resolved_target_symbol].append(source_idx)
+            
+            // Handle Read/Write edges
+            if reference.role in [Read, Write]:
+                target_idx = graph.get_node_index(target_node_symbol)
+                if target_idx exists AND source_idx != target_idx:
+                    edge_kind = EdgeKind.Write if reference.role == Write else EdgeKind.Read
+                    graph.add_edge(source_idx, target_idx, edge_kind)
+                    
+                    if reference.role == Write:
+                        state_writers[reference.target_symbol].append(source_idx)
+                    else:
+                        readers.append((source_idx, reference.target_symbol))
+            
+            // Handle Decorate edges (decorated -> decorator)
+            if reference.role == Decorate:
+                target_idx = graph.get_node_index(target_node_symbol)
+                if target_idx exists AND source_idx != target_idx:
+                    graph.add_edge(source_idx, target_idx, EdgeKind.Annotates)
+    
+    // PASS 2.5: Fill type references in nodes from definition details
+    for each definition in all_definitions:
+        if definition.symbol_id in graph:
+            node = graph.get_node(definition.symbol_id)
+            if node is FunctionNode:
+                // Set return_types from definition
+                for type_id in definition.details.return_types:
+                    if type_id in type_registry:
+                        node.return_types.append(type_id)
+            else if node is VariableNode:
+                // Set var_type from definition
+                if definition.details.var_type in type_registry:
+                    node.var_type = definition.details.var_type
+    
+    // PASS 3: Dynamic Expansion Edges
+    // 1. SharedStateWrite: reader -> writers of mutable variables
+    for (reader_idx, var_symbol) in readers:
+        if is_variable_mutable(var_symbol, semantic_data):
+            for writer_idx in state_writers[var_symbol]:
+                if reader_idx != writer_idx:
+                    graph.add_edge(reader_idx, writer_idx, EdgeKind.SharedStateWrite)
+    
+    // 2. CallIn: underspecified callee -> callers
+    for callee_symbol in graph.all_node_symbols():
+        callee_idx = graph.get_node_index(callee_symbol)
+        if is_function_underspecified(callee_symbol, graph):
+            for caller_idx in callers[callee_symbol]:
+                if callee_idx != caller_idx:
+                    graph.add_edge(callee_idx, caller_idx, EdgeKind.CallIn)
+    
+    graph.type_registry = type_registry
+    return graph
+
+function resolve_to_node_symbol(symbol, node_symbols, enclosing_map):
+    // Walk up enclosing chain until we find a node symbol
+    current = symbol
+    while current is not None:
+        if current in node_symbols:
+            return current
+        current = enclosing_map.get(current, None)
+    return None
+
+function is_function_underspecified(symbol, graph):
+    node = graph.get_node(symbol)
+    if node is not FunctionNode:
+        return false
+    return NOT node.is_signature_complete()
+
+function is_variable_mutable(symbol, semantic_data):
+    definition = semantic_data.find_definition(symbol)
+    if definition AND definition.kind == Variable:
+        return definition.details.mutability == Mutable
+    return true  // Conservative default
+```
+
+#### Algorithm 2: CF Computation (BFS with Conditional Pruning)
+
+**Input**: `ContextGraph`, `start_nodes[]`, `PruningParams`, `max_tokens` (optional)  
+**Output**: `CfResult` with reachable set, total size, traversal steps, layers
+
+```
+function compute_cf(graph, start_nodes, pruning_params, max_tokens):
+    visited = empty_set()
+    ordered = []  // reachable nodes in BFS order
+    traversal_steps = []
+    layers = []  // reachable nodes grouped by BFS depth
+    queue = empty_queue()
+    total_size = 0
+    
+    // Initialize with start nodes at depth 0
+    for start in start_nodes:
+        queue.enqueue((start, depth=0, incoming_edge=None, decision=None))
+    
+    while queue is not empty:
+        (current, depth, incoming_edge, incoming_decision) = queue.dequeue()
+        current_node = graph.node(current)
+        current_id = current_node.core.id
+        
+        // Skip if already visited
+        if current_id in visited:
+            continue
+        
+        // Mark as visited and accumulate
+        visited.add(current_id)
+        node_size = current_node.core.context_size
+        total_size += node_size
+        ordered.append(current_id)
+        traversal_steps.append(TraversalStep {
+            node_id: current_id,
+            incoming_edge_kind: incoming_edge,
+            decision: incoming_decision
+        })
+        
+        // Add to layers
+        if depth >= layers.length:
+            layers.append([])
+        layers[depth].append(current_id)
+        
+        // Check token limit
+        if max_tokens is not None AND total_size >= max_tokens:
+            break
+        
+        // Get neighbors and sort by symbol for deterministic traversal
+        neighbors = graph.neighbors(current).sort_by_symbol()
+        
+        for (neighbor, edge_kind) in neighbors:
+            neighbor_node = graph.node(neighbor)
+            neighbor_id = neighbor_node.core.id
+            
+            // Evaluate pruning decision
+            decision = evaluate(pruning_params, current_node, neighbor_node, edge_kind, graph)
+            
+            if decision == Transparent:
+                // Continue traversal through this node
+                queue.enqueue((neighbor, depth + 1, edge_kind, decision))
+            
+            else:  // decision == Boundary
+                // Include boundary node in reachable set but don't traverse
+                if neighbor_id not in visited:
+                    boundary_size = neighbor_node.core.context_size
+                    
+                    // Check if adding boundary exceeds limit
+                    if max_tokens is not None AND total_size + boundary_size > max_tokens:
+                        break
+                    
+                    visited.add(neighbor_id)
+                    total_size += boundary_size
+                    ordered.append(neighbor_id)
+                    traversal_steps.append(TraversalStep {
+                        node_id: neighbor_id,
+                        incoming_edge_kind: edge_kind,
+                        decision: decision
+                    })
+                    layers[depth + 1].append(neighbor_id)
+        
+        // Re-check token limit after processing neighbors
+        if max_tokens is not None AND total_size >= max_tokens:
+            break
+    
+    return CfResult {
+        reachable_set: visited,
+        reachable_nodes_ordered: ordered,
+        reachable_nodes_by_layer: layers,
+        traversal_steps: traversal_steps,
+        total_context_size: total_size
+    }
+
+// Pruning decision function (domain/policy.rs)
+function evaluate(params, source, target, edge_kind, graph):
+    // 1. Dynamic expansion edges
+    if edge_kind == SharedStateWrite:
+        return Transparent  // Always traverse to understand mutable state
+    
+    if edge_kind == CallIn:
+        // Check source (callee) specification
+        if source is Function AND 
+           source.is_signature_complete() AND 
+           source.core.doc_score >= params.doc_threshold:
+            return Boundary
+        return Transparent
+    
+    // 2. External dependencies always stop
+    if target.core.is_external:
+        return Boundary
+    
+    // 3. Node type dispatch
+    if target is Variable:
+        if edge_kind == Write:
+            return Transparent  // Writing is an action
+        else:  // Read
+            if target.mutability in [Const, Immutable]:
+                return Boundary  // Immutable values fully determined
+            else:
+                return Transparent  // Mutable state triggers expansion
+    
+    else if target is Function:
+        // Interface/abstract methods
+        if target.is_interface_method:
+            if target.is_signature_complete() AND 
+               target.core.doc_score >= params.doc_threshold:
+                return Boundary
+            return Transparent  // Undocumented interface = leaky abstraction
+        
+        // Constructor with complete signature
+        if target.is_constructor AND target.is_signature_complete():
+            return Boundary
+        
+        // Abstract factory pattern
+        if is_abstract_factory(target, graph.type_registry, params.doc_threshold):
+            return Boundary
+        
+        // Academic mode: typed + documented function is boundary
+        if params.treat_typed_documented_function_as_boundary AND 
+           target.is_signature_complete() AND 
+           target.core.doc_score >= params.doc_threshold:
+            return Boundary
+        
+        return Transparent
+
+function is_abstract_factory(function_node, type_registry, doc_threshold):
+    if function_node.return_types is empty OR 
+       NOT function_node.is_signature_complete():
+        return false
+    
+    // Check if ANY return type is abstract
+    for type_id in function_node.return_types:
+        type_info = type_registry.get(type_id)
+        if type_info AND type_info.definition.is_abstract:
+            return true
+    
+    return false
+```
+
+#### Key Implementation Details
+
+**Symbol Resolution** (`resolve_to_node_symbol`):
+- References may point to non-node symbols (e.g., parameters, local variables, type definitions)
+- Walk up the enclosing chain until finding a Function or Variable node
+- Example: Reference to parameter `x` resolves to its enclosing function
+
+**Constructor Handling**:
+- Type instantiation references (e.g., `MyClass()`) map to `__init__` method via `init_map`
+- Fallback mechanism: try direct target, then try constructor
+
+**Dynamic Expansion Timing**:
+- `SharedStateWrite` edges added only for mutable variables (checked via semantic data)
+- `CallIn` edges added only for underspecified functions (checked via `is_signature_complete()`)
+
+**Traversal Ordering**:
+- BFS ensures shortest path to each node
+- Neighbors sorted by symbol for deterministic results (testing, debugging)
+- Layers group nodes by distance from start
+
+**Boundary Node Inclusion**:
+- Boundary nodes ARE included in reachable set and CF total
+- Represents the interface/contract being consumed
+- Their outgoing edges are NOT traversed

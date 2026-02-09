@@ -29,7 +29,7 @@ impl SourceReader for FileSourceReader {
 
         let lines: Vec<String> = content.lines().map(String::from).collect();
 
-        // Semantic data spans are 0-indexed. start_line is inclusive, end_line is exclusive.
+        // Semantic data spans are 0-indexed; start_line and end_line are inclusive.
         let start_idx = start_line;
         let end_idx = (end_line + 1).min(lines.len());
 
@@ -74,7 +74,7 @@ mod tests {
         let reader = FileSourceReader::new();
         let path_str = file_path.to_str().unwrap();
 
-        // Test mid-range
+        // 0-based, inclusive: (1, 2) = indices 1, 2 = line2, line3
         let lines = reader.read_lines(path_str, 1, 2).unwrap();
         assert_eq!(lines, vec!["line2", "line3"]);
 
@@ -82,11 +82,12 @@ mod tests {
         let lines = reader.read_lines(path_str, 10, 15).unwrap();
         assert!(lines.is_empty());
 
-        // Test boundary
+        // (0, 0) = index 0 only = line1
         let lines = reader.read_lines(path_str, 0, 0).unwrap();
         assert_eq!(lines, vec!["line1"]);
 
-        let lines = reader.read_lines(path_str, 4, 10).unwrap();
+        // (4, 4) = index 4 = line5
+        let lines = reader.read_lines(path_str, 4, 4).unwrap();
         assert_eq!(lines, vec!["line5"]);
     }
 

@@ -124,7 +124,7 @@ impl SourceReader for MockSourceReader {
 
         let lines: Vec<String> = content.lines().map(String::from).collect();
 
-        // Semantic data spans are 0-indexed.
+        // Semantic data spans: 0-indexed, start and end inclusive.
         let start_idx = start_line;
         let end_idx = (end_line + 1).min(lines.len());
 

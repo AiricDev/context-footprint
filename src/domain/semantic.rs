@@ -183,10 +183,11 @@ pub struct SymbolDefinition {
     /// Whether this is an external dependency
     ///
     /// **Adapter Contract**:
-    /// - `true`: stdlib or third-party library symbol
-    /// - `false`: project code
+    /// - `true`: stdlib or third-party library symbol (definition not in semantic data)
+    /// - `false`: project code (definition found in semantic data)
     /// - External symbols act as CF boundaries (traversal stops but includes them)
-    /// - Affects CF calculation: external dependencies should be well-documented
+    /// - If omitted: defaults to `false` (symbol is in definitions → internal)
+    #[serde(default)]
     pub is_external: bool,
 
     /// Documentation strings (for doc_score calculation)

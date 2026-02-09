@@ -33,13 +33,10 @@ pub fn debug_graph_data(json_path: &Path) -> Result<()> {
             end_line: usize,
         ) -> Result<Vec<String>> {
             let content = self.read(Path::new(path))?;
-            let lines: Vec<String> = content
-                .lines()
-                .skip(start_line.saturating_sub(1))
-                .take(end_line - start_line + 1)
-                .map(String::from)
-                .collect();
-            Ok(lines)
+            let lines: Vec<String> = content.lines().map(String::from).collect();
+            let start_idx = start_line.min(lines.len());
+            let end_idx = (end_line + 1).min(lines.len()); // end_line inclusive
+            Ok(lines[start_idx..end_idx].to_vec())
         }
     }
 

@@ -58,9 +58,9 @@ pub struct SpanDto {
     /// 0-based, inclusive end column.
     pub end_column: u32,
 
-    /// 1-based, inclusive start line (convenience).
+    /// 1-based, inclusive start line (for display).
     pub start_line_1based: u32,
-    /// 1-based, inclusive end line (convenience).
+    /// 1-based, inclusive end line (for display).
     pub end_line_1based: u32,
 }
 

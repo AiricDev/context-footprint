@@ -80,13 +80,10 @@ impl ContextEngine {
                 end_line: usize,
             ) -> Result<Vec<String>> {
                 let content = self.read(Path::new(path))?;
-                let lines: Vec<String> = content
-                    .lines()
-                    .skip(start_line.saturating_sub(1))
-                    .take(end_line - start_line + 1)
-                    .map(String::from)
-                    .collect();
-                Ok(lines)
+                let lines: Vec<String> = content.lines().map(String::from).collect();
+                let start_idx = start_line.min(lines.len());
+                let end_idx = (end_line + 1).min(lines.len()); // end_line inclusive
+                Ok(lines[start_idx..end_idx].to_vec())
             }
         }
 
@@ -477,6 +474,8 @@ fn node_type_str(node: &Node) -> &'static str {
 }
 
 fn span_dto(span: &crate::domain::node::SourceSpan) -> SpanDto {
+    // Domain span is 0-based; both start_line and end_line are inclusive.
+    // 1-based display: add 1 to each.
     SpanDto {
         start_line: span.start_line,
         start_column: span.start_column,
@@ -589,9 +588,9 @@ mod tests {
                 "line3".to_string(),
                 "line4".to_string(),
             ];
-            let start = start_line.min(lines.len().saturating_sub(1));
-            let end = end_line.min(lines.len().saturating_sub(1));
-            Ok(lines[start..=end].to_vec())
+            let start = start_line.min(lines.len());
+            let end = (end_line + 1).min(lines.len()); // end_line inclusive
+            Ok(lines[start..end].to_vec())
         }
     }
 

@@ -912,14 +912,49 @@ export class PythonExtractor extends ExtractorBase {
                 }
               }
             } else {
-              // LSP returned no definition; try to resolve to a project symbol via imports
-              const importedNames = importedNamesByFile.get(pos.filePath);
-              if (importedNames?.has(pos.name)) {
-                const enclosing = this.findEnclosingSymbol({
-                  uri: pos.uri,
-                  range: pos.range
-                } as Location);
-                if (enclosing) {
+              // LSP returned no definition; try fallbacks
+              const enclosing = this.findEnclosingSymbol({
+                uri: pos.uri,
+                range: pos.range
+              } as Location);
+              const lines = this.fileLines.get(pos.filePath) ?? [];
+              const receiver = extractReceiver(lines, pos.range);
+
+              // Fallback 1: resolve method call via parameter type (e.g. use_case.execute -> RelayChatUseCase.execute)
+              // LSP sometimes does not resolve method calls on dependency-injected variables
+              let resolvedTarget: string | null = null;
+              if (receiver && enclosing) {
+                const paramTypeId = this.getParamTypeForReceiver(enclosing.symbolId, receiver);
+                if (paramTypeId) {
+                  const memberSymbolId = this.findMemberSymbol(paramTypeId, pos.name);
+                  if (memberSymbolId && definitionSymbolIds.has(memberSymbolId)) {
+                    resolvedTarget = memberSymbolId;
+                  }
+                }
+              }
+              if (resolvedTarget && enclosing) {
+                const memberRecord = this.symbolIndex.find((r) => r.symbolId === resolvedTarget);
+                const role = inferReferenceRole(lines, pos.range, memberRecord?.kind ?? SymbolKind.Function);
+                if (
+                  role !== null &&
+                  !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))
+                ) {
+                  this.references.push({
+                    target_symbol: resolvedTarget,
+                    enclosing_symbol: enclosing.symbolId,
+                    role,
+                    receiver,
+                    location: {
+                      file_path: relativePath(this.options.projectRoot, pos.filePath),
+                      line: pos.range.start.line,
+                      column: pos.range.start.character
+                    }
+                  });
+                }
+              } else if (enclosing) {
+                // Fallback 2: resolve to a project symbol via imports
+                const importedNames = importedNamesByFile.get(pos.filePath);
+                if (importedNames?.has(pos.name) && enclosing) {
                   const module = this.getModuleForImportedName(pos.filePath, pos.name);
                   if (module) {
                     const candidateIds = [
@@ -932,14 +967,18 @@ export class PythonExtractor extends ExtractorBase {
                     );
                     if (projectSymbolId) {
                       const projectRecord = this.symbolIndex.find((r) => r.symbolId === projectSymbolId);
-                      const lines = this.fileLines.get(pos.filePath) ?? [];
                       const role = inferReferenceRole(
                         lines,
                         pos.range,
                         projectRecord?.kind ?? SymbolKind.Function
                       );
-                      if (role !== null &&
-                          !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))) {
+                      if (
+                        role !== null &&
+                        !(
+                          role === ReferenceRole.Decorate &&
+                          isDecoratorForNestedDef(lines, pos.range.start.line)
+                        )
+                      ) {
                         this.references.push({
                           target_symbol: projectSymbolId,
                           enclosing_symbol: enclosing.symbolId,
@@ -1016,6 +1055,33 @@ export class PythonExtractor extends ExtractorBase {
   private getFileLines(filePath: string): string[] {
     // Use cached lines instead of splitting every time
     return this.fileLines.get(filePath) ?? [];
+  }
+
+  /**
+   * Get the Type symbol ID for a parameter named receiverName in the function identified by enclosingSymbolId.
+   * Used to resolve method calls on dependency-injected variables (e.g. use_case.execute -> RelayChatUseCase.execute)
+   * when LSP does not return a definition.
+   */
+  private getParamTypeForReceiver(enclosingSymbolId: string, receiverName: string): string | null {
+    const definitionSymbolIds = this.definitionSymbolIdsForEnclosing;
+    if (!definitionSymbolIds) return null;
+
+    const def = this.definitions.find((d) => d.symbol_id === enclosingSymbolId);
+    if (!def || def.kind !== SymbolKind.Function) return null;
+
+    const params = (def.details as { Function: { parameters: { name: string; param_type?: string | null }[] } }).Function?.parameters;
+    if (!params) return null;
+
+    const param = params.find((p) => p.name === receiverName && p.param_type);
+    if (!param?.param_type) return null;
+
+    const raw = param.param_type.trim();
+    if (definitionSymbolIds.has(raw)) return raw;
+    if (!raw.endsWith("#Type")) {
+      const withKind = `${raw}#Type`;
+      if (definitionSymbolIds.has(withKind)) return withKind;
+    }
+    return null;
   }
 
   private findMemberSymbol(typeSymbolId: string, memberName: string): string | null {

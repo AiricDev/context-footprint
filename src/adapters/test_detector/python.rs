@@ -92,31 +92,16 @@ mod tests {
     fn test_detects_test_function() {
         let detector = PythonTestDetector;
         // Semantic data format: module.name#Function
-        assert!(detector.is_test_code(
-            "module.test_my_function#Function",
-            "src/module.py"
-        ));
-        assert!(!detector.is_test_code(
-            "module.my_function#Function",
-            "src/module.py"
-        ));
+        assert!(detector.is_test_code("module.test_my_function#Function", "src/module.py"));
+        assert!(!detector.is_test_code("module.my_function#Function", "src/module.py"));
     }
 
     #[test]
     fn test_detects_test_class() {
         let detector = PythonTestDetector;
         // Semantic data format: module.Class#Type, module.Class.method#Function
-        assert!(detector.is_test_code(
-            "module.TestMyClass#Type",
-            "src/module.py"
-        ));
-        assert!(detector.is_test_code(
-            "module.TestMyClass.test_method#Function",
-            "src/module.py"
-        ));
-        assert!(!detector.is_test_code(
-            "module.MyClass#Type",
-            "src/module.py"
-        ));
+        assert!(detector.is_test_code("module.TestMyClass#Type", "src/module.py"));
+        assert!(detector.is_test_code("module.TestMyClass.test_method#Function", "src/module.py"));
+        assert!(!detector.is_test_code("module.MyClass#Type", "src/module.py"));
     }
 }

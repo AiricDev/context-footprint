@@ -67,6 +67,9 @@ enum Commands {
         /// Also show which nodes are boundaries (stop traversal)
         #[arg(short, long)]
         show_boundaries: bool,
+        /// Print traversal node list with edge kind and boundary/transparent decision
+        #[arg(long)]
+        show_traversal: bool,
         /// Max tokens to include in output
         #[arg(short, long)]
         max_tokens: Option<u32>,
@@ -134,9 +137,16 @@ async fn main() -> Result<()> {
         Commands::Context {
             symbol,
             show_boundaries,
+            show_traversal,
             max_tokens,
         } => {
-            cli::display_context_code(&engine, symbol, *show_boundaries, *max_tokens)?;
+            cli::display_context_code(
+                &engine,
+                symbol,
+                *show_boundaries,
+                *show_traversal,
+                *max_tokens,
+            )?;
         }
         Commands::Serve { host, port } => {
             let addr: SocketAddr = format!("{host}:{port}")

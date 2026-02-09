@@ -138,6 +138,11 @@ pub fn evaluate(
                 return PruningDecision::Transparent;
             }
 
+            // Constructor with complete signature: boundary (no doc requirement)
+            if f.is_constructor && f.is_signature_complete() {
+                return PruningDecision::Boundary;
+            }
+
             if is_abstract_factory(target, &graph.type_registry, params.doc_threshold) {
                 return PruningDecision::Boundary;
             }
@@ -212,6 +217,7 @@ mod tests {
             visibility: Visibility::Public,
             return_types: vec!["int#".to_string()],
             is_interface_method: false,
+            is_constructor: false,
         })
     }
 

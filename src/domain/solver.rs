@@ -1,11 +1,20 @@
+use crate::domain::edge::EdgeKind;
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::NodeId;
-use crate::domain::policy::{PruningParams, evaluate};
+use crate::domain::policy::{PruningDecision, PruningParams, evaluate};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+/// Single step in BFS traversal: node plus the edge/decision that led to it.
+#[derive(Debug, Clone)]
+pub struct TraversalStep {
+    pub node_id: NodeId,
+    pub incoming_edge_kind: Option<EdgeKind>,
+    pub decision: Option<PruningDecision>,
+}
 
 /// CF computation result
 #[derive(Debug, Clone)]
@@ -13,6 +22,8 @@ pub struct CfResult {
     pub reachable_set: HashSet<NodeId>,
     pub reachable_nodes_ordered: Vec<NodeId>,
     pub reachable_nodes_by_layer: Vec<Vec<NodeId>>,
+    /// Traversal steps in BFS order: for each node, the edge kind and decision that led to it (None for start nodes).
+    pub traversal_steps: Vec<TraversalStep>,
     pub total_context_size: u32,
 }
 
@@ -57,16 +68,17 @@ impl CfSolver {
 
         let mut visited = HashSet::new();
         let mut ordered = Vec::new();
+        let mut traversal_steps = Vec::new();
         let mut layers: Vec<Vec<NodeId>> = Vec::new();
-        let mut queue = VecDeque::new();
+        let mut queue: VecDeque<(NodeIndex, u32, Option<EdgeKind>, Option<PruningDecision>)> =
+            VecDeque::new();
         let mut total_size = 0;
 
-        // queue stores (node_index, depth)
         for &start in starts {
-            queue.push_back((start, 0));
+            queue.push_back((start, 0, None, None));
         }
 
-        while let Some((current, depth)) = queue.pop_front() {
+        while let Some((current, depth, incoming_edge, incoming_decision)) = queue.pop_front() {
             let current_node = graph.node(current);
             let current_id = current_node.core().id;
 
@@ -77,12 +89,17 @@ impl CfSolver {
             let node_size = current_node.core().context_size;
             total_size += node_size;
             ordered.push(current_id);
+            traversal_steps.push(TraversalStep {
+                node_id: current_id,
+                incoming_edge_kind: incoming_edge,
+                decision: incoming_decision,
+            });
 
             // Add to layers
-            while layers.len() <= depth {
+            while layers.len() <= depth as usize {
                 layers.push(Vec::new());
             }
-            layers[depth].push(current_id);
+            layers[depth as usize].push(current_id);
 
             // Check if we exceeded max_tokens
             if let Some(limit) = max_tokens
@@ -104,11 +121,8 @@ impl CfSolver {
                 let neighbor_id = neighbor_node.core().id;
                 let decision = evaluate(params, current_node, neighbor_node, edge_kind, graph);
 
-                if matches!(
-                    decision,
-                    crate::domain::policy::PruningDecision::Transparent
-                ) {
-                    queue.push_back((neighbor, depth + 1));
+                if matches!(decision, PruningDecision::Transparent) {
+                    queue.push_back((neighbor, depth + 1, Some(edge_kind.clone()), Some(decision)));
                 } else {
                     // Boundary: count as reached and include its size, but do not traverse
                     if !visited.contains(&neighbor_id) {
@@ -124,12 +138,17 @@ impl CfSolver {
                         if visited.insert(neighbor_id) {
                             total_size += b_size;
                             ordered.push(neighbor_id);
+                            traversal_steps.push(TraversalStep {
+                                node_id: neighbor_id,
+                                incoming_edge_kind: Some(edge_kind.clone()),
+                                decision: Some(decision),
+                            });
 
                             let b_depth = depth + 1;
-                            while layers.len() <= b_depth {
+                            while layers.len() <= b_depth as usize {
                                 layers.push(Vec::new());
                             }
-                            layers[b_depth].push(neighbor_id);
+                            layers[b_depth as usize].push(neighbor_id);
                         }
                     }
                 }
@@ -146,6 +165,7 @@ impl CfSolver {
             reachable_set: visited.clone(),
             reachable_nodes_ordered: ordered.clone(),
             reachable_nodes_by_layer: layers.clone(),
+            traversal_steps,
             total_context_size: total_size,
         };
 
@@ -279,6 +299,7 @@ mod tests {
             visibility: Visibility::Public,
             return_types: vec![],
             is_interface_method: false,
+            is_constructor: false,
         })
     }
 
@@ -311,6 +332,7 @@ mod tests {
             visibility: Visibility::Public,
             return_types: vec!["int#".to_string()],
             is_interface_method: false,
+            is_constructor: false,
         })
     }
 

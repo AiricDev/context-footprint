@@ -29,10 +29,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// ============================================================================
-/// Core Types
-/// ============================================================================
-
 /// Symbol identifier - Globally unique within project
 ///
 /// **Adapter Contract**:
@@ -351,6 +347,13 @@ pub struct FunctionModifiers {
     /// - Abstract methods with good docs are CF boundaries
     pub is_abstract: bool,
 
+    /// Whether this function is a type constructor (e.g. Python __init__).
+    ///
+    /// **Adapter Contract**: Set by language extractor. Constructors implicitly return
+    /// the instance/None; extractor should set return type so signature is complete.
+    #[serde(default)]
+    pub is_constructor: bool,
+
     pub visibility: Visibility,
 }
 
@@ -361,6 +364,7 @@ impl Default for FunctionModifiers {
             is_generator: false,
             is_static: false,
             is_abstract: false,
+            is_constructor: false,
             visibility: Visibility::Public,
         }
     }
@@ -692,10 +696,6 @@ pub enum ReferenceRole {
     Decorate,
 }
 
-/// ============================================================================
-/// Source Location
-/// ============================================================================
-
 /// Source location (single point in source code)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLocation {
@@ -740,10 +740,6 @@ pub struct SourceSpan {
     /// 0-based end column (exclusive)
     pub end_column: u32,
 }
-
-/// ============================================================================
-/// Helper Functions
-/// ============================================================================
 
 impl SemanticData {
     /// Get all symbol definitions from all documents

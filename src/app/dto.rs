@@ -118,6 +118,22 @@ pub struct ContextRequest {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub include_code: bool,
+    /// When true, include traversal_steps (edge kind + decision per node) for debugging.
+    #[serde(default)]
+    pub show_traversal: bool,
+}
+
+/// One step in BFS traversal: node plus the edge and decision that led to it.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TraversalStepDto {
+    pub node: ReachableNode,
+    /// Edge kind that led to this node (e.g. "Call", "CallIn"); absent for start node(s).
+    pub edge_kind: Option<String>,
+    /// Pruning decision at that edge ("Boundary" or "Transparent").
+    pub decision: Option<String>,
+    /// For functions only: whether the signature is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_signature_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -126,6 +142,9 @@ pub struct ContextResponse {
     pub total_context_size: u32,
     pub reachable_node_count: usize,
     pub layers: Vec<ContextLayer>,
+    /// Traversal steps in BFS order (only set when request had show_traversal).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traversal_steps: Option<Vec<TraversalStepDto>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -36,6 +36,11 @@ export function inferReferenceRole(lines: string[], range: Range, targetKind: Sy
     }
   }
 
+  // FastAPI dependency injection: Depends(get_x) implies a call to provider.
+  if (targetKind === SymbolKind.Function && isWithinDependsCall(line, range)) {
+    return ReferenceRole.Call;
+  }
+
   if (after.startsWith("(")) {
     return ReferenceRole.Call;
   }
@@ -45,6 +50,33 @@ export function inferReferenceRole(lines: string[], range: Range, targetKind: Sy
   }
 
   return ReferenceRole.Read;
+}
+
+function findMatchingParen(s: string, startIndex: number): number {
+  let depth = 0;
+  for (let i = startIndex; i < s.length; i++) {
+    const c = s[i];
+    if (c === "(") depth++;
+    else if (c === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function isWithinDependsCall(line: string, range: Range): boolean {
+  const dependsToken = "Depends(";
+  const before = line.slice(0, range.start.character);
+  const dependsIdx = before.lastIndexOf(dependsToken);
+  if (dependsIdx === -1) return false;
+
+  const openIdx = dependsIdx + dependsToken.length - 1;
+  if (line[openIdx] !== "(") return false;
+  const closeIdx = findMatchingParen(line, openIdx);
+  if (closeIdx === -1) return false;
+
+  return range.start.character > openIdx && range.end.character <= closeIdx;
 }
 
 /**

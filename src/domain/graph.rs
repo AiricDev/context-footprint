@@ -93,6 +93,7 @@ mod tests {
             visibility: crate::domain::node::Visibility::Public,
             return_types: vec![],
             is_interface_method: false,
+            is_constructor: false,
         })
     }
 

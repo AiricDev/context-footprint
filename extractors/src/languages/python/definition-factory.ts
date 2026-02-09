@@ -63,28 +63,77 @@ function getParamTypeFromSource(
   return null;
 }
 
+function isExplicitNoneReturn(typeExpr: string | null | undefined): boolean {
+  if (!typeExpr) return false;
+  const normalized = typeExpr.replace(/\s+/g, "").toLowerCase();
+  return normalized === "none" || normalized === "nonetype";
+}
+
 /**
- * Extract return type from source when hover reports "Unknown".
- * Looks for ") -> Type" in the function signature lines.
+ * Extract the return type expression from source (explicit annotation only).
+ * Supports multi-line, union (A | B), generics (List[T]), and nested brackets.
+ * Returns null if no "->" is found (no explicit return type).
  */
 function getReturnTypeFromSource(
   lines: string[],
   startLine: number,
   endLine: number
 ): string | null {
-  const end = Math.min(endLine + 1, startLine + 30, lines.length);
-  for (let i = startLine; i < end; i++) {
-    const line = lines[i];
-    const arrowIdx = line.indexOf("->");
-    if (arrowIdx === -1) continue;
-    const afterArrow = line.slice(arrowIdx + 2).trim();
-    const colonIdx = afterArrow.indexOf(":");
-    const typePart = colonIdx >= 0 ? afterArrow.slice(0, colonIdx).trim() : afterArrow.trim();
-    if (typePart && !typePart.startsWith('"""') && !typePart.startsWith("'''")) {
-      return typePart;
+  const end = Math.min(endLine + 1, startLine + 40, lines.length);
+  const fragment = lines.slice(startLine, end).join("\n");
+  const arrowIdx = fragment.indexOf("->");
+  if (arrowIdx === -1) return null;
+
+  let pos = arrowIdx + 2;
+  const n = fragment.length;
+  let depth = 0; // count of unclosed ([{
+  let start = pos;
+
+  while (pos < n) {
+    const ch = fragment[pos];
+
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      const isTriple = fragment.slice(pos, pos + 3) === quote + quote + quote;
+      pos += isTriple ? 3 : 1;
+      while (pos < n) {
+        if (fragment[pos] === "\\") {
+          pos += 2;
+          continue;
+        }
+        if (isTriple && fragment.slice(pos, pos + 3) === quote + quote + quote) {
+          pos += 3;
+          break;
+        }
+        if (!isTriple && fragment[pos] === quote) {
+          pos++;
+          break;
+        }
+        pos++;
+      }
+      continue;
     }
+
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++;
+      pos++;
+      continue;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      depth--;
+      pos++;
+      continue;
+    }
+
+    if (depth === 0 && ch === ":") {
+      break;
+    }
+    pos++;
   }
-  return null;
+
+  const raw = fragment.slice(start, pos).trim();
+  if (!raw) return null;
+  return raw.replace(/\s+/g, " ");
 }
 
 export interface DefinitionContext {
@@ -430,16 +479,24 @@ export async function createFunctionDefinition(
     parameters.push({ ...param, param_type: resolvedType });
   }
 
+  const funcName = symbol.name.replace(/\(.*/, "");
+  const isConstructor = funcName === "__init__";
+
   const returnTypes: string[] = [];
-  for (const returnType of rawReturnTypes) {
-    let typeToResolve = returnType;
-    if (typeToResolve === "Unknown" || typeToResolve.includes("Unknown")) {
-      const fromSource = getReturnTypeFromSource(lines, startLine, endLine);
-      if (fromSource) typeToResolve = fromSource;
+  const explicitReturn = getReturnTypeFromSource(lines, startLine, endLine);
+  if (explicitReturn) {
+    if (isExplicitNoneReturn(explicitReturn)) {
+      // Preserve explicit `-> None` as a declared return type.
+      returnTypes.push("None");
+    } else {
+      returnTypes.push(
+        ...resolveTypeExpr(ctx, explicitReturn, moduleName, excludedTypes, filePath)
+      );
     }
-    returnTypes.push(
-      ...resolveTypeExpr(ctx, typeToResolve, moduleName, excludedTypes, filePath)
-    );
+  }
+  // Python __init__ implicitly returns None; treat as signature-complete for CF.
+  if (isConstructor && returnTypes.length === 0) {
+    returnTypes.push("None");
   }
 
   const isAbstract =
@@ -453,14 +510,15 @@ export async function createFunctionDefinition(
     type_params: [],
     modifiers: {
       ...inferFunctionModifiers(symbol),
-      is_abstract: isAbstract
+      is_abstract: isAbstract,
+      is_constructor: isConstructor
     }
   };
 
   return {
     symbol_id: symbolId,
     kind: SymbolKind.Function,
-    name: symbol.name.replace(/\(.*/, ""),
+    name: funcName,
     display_name: signature || symbol.detail || symbol.name,
     location,
     span,

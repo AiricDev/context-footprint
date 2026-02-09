@@ -132,6 +132,7 @@ export interface TypeParam {
  *
  * Adapter contract:
  * - is_abstract: true for interface/protocol/trait methods (signature only). Critical for CF boundary.
+ * - is_constructor: true for type constructors (e.g. Python __init__). Language-specific; extractor sets this.
  * - visibility: Public/Private/Protected/Internal per language.
  */
 export interface FunctionModifiers {
@@ -139,6 +140,8 @@ export interface FunctionModifiers {
   is_generator: boolean;
   is_static: boolean;
   is_abstract: boolean;
+  /** True if this function is a type constructor (e.g. Python __init__). Set by language extractor. */
+  is_constructor?: boolean;
   visibility: Visibility;
 }
 

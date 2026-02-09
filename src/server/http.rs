@@ -252,6 +252,7 @@ mod tests {
             visibility: Visibility::Public,
             return_types: vec![],
             is_interface_method: false,
+            is_constructor: false,
         });
         let idx = g.add_node("sym/f().".into(), f);
         g.add_edge(idx, idx, EdgeKind::Call); // self-loop, harmless

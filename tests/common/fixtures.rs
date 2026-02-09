@@ -56,6 +56,7 @@ pub fn function_def(
                 is_generator: false,
                 is_static: false,
                 is_abstract: false,
+                is_constructor: false,
                 visibility: Visibility::Public,
             },
         }),

@@ -420,6 +420,7 @@ fn create_node_from_definition(
                 visibility: convert_visibility(&func_details.modifiers.visibility),
                 return_types: func_details.return_types.clone(),
                 is_interface_method,
+                is_constructor: func_details.modifiers.is_constructor,
             }))
         }
         SymbolDetails::Variable(var_details) => {

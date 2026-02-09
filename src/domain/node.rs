@@ -80,6 +80,10 @@ pub struct FunctionNode {
     // True if this method is defined in an Interface/Protocol/Trait/Abstract Class
     // Such methods have no implementation body, only signature + documentation
     pub is_interface_method: bool,
+
+    /// True if this function is a type constructor (e.g. Python __init__).
+    /// Set from semantic data by language extractor; used for boundary rules.
+    pub is_constructor: bool,
 }
 
 impl FunctionNode {

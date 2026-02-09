@@ -207,6 +207,7 @@ pub fn display_context_code(
     engine: &ContextEngine,
     symbol: &str,
     _show_boundaries: bool,
+    show_traversal: bool,
     max_tokens: Option<u32>,
 ) -> Result<()> {
     println!("Computing context for symbol: {}", symbol);
@@ -214,7 +215,8 @@ pub fn display_context_code(
         symbol: symbol.to_string(),
         policy: PolicyKind::Academic,
         max_tokens,
-        include_code: true,
+        include_code: !show_traversal, // skip loading source when only showing traversal
+        show_traversal,
     })?;
 
     println!("\nContext Summary:");
@@ -225,31 +227,64 @@ pub fn display_context_code(
     }
     println!("{}", "=".repeat(80));
 
-    for layer in &result.layers {
-        println!(
-            "\n\u{1F310} Layer {}: {}",
-            layer.depth,
-            if layer.depth == 0 {
-                "Observed Symbol"
-            } else {
-                "Direct Dependencies"
-            }
-        );
-        println!("{}", "=".repeat(40));
+    if let Some(steps) = &result.traversal_steps {
+        println!("\nTraversal (BFS order, edge + decision):");
+        println!("{}", "=".repeat(80));
+        for (i, step) in steps.iter().enumerate() {
+            let edge = step.edge_kind.as_deref().unwrap_or("(start)");
+            let decision = step.decision.as_deref().unwrap_or("-");
+            let short = step
+                .node
+                .symbol
+                .rsplit('/')
+                .next()
+                .unwrap_or(&step.node.symbol);
+            let sig = step
+                .is_signature_complete
+                .map(|v| if v { "sig=complete" } else { "sig=incomplete" })
+                .unwrap_or("sig=na");
+            println!(
+                "  {:4}  {}  {}  {}  ({} tokens, doc={:.2}, {})",
+                i + 1,
+                edge,
+                decision,
+                short,
+                step.node.context_size,
+                step.node.doc_score,
+                sig
+            );
+        }
+        println!("{}", "=".repeat(80));
+    }
 
-        for file in &layer.files {
-            println!("\n  \u{1F4C4} File: {}", file.file_path);
-            for node in &file.nodes {
-                let display = node.symbol.split('/').next_back().unwrap_or(&node.symbol);
-                println!("    Symbol: {} ({} tokens)", display, node.context_size);
-                println!(
-                    "    Lines: {}-{}",
-                    node.span.start_line_1based, node.span.end_line_1based
-                );
-                if let Some(lines) = &node.code {
-                    println!("    Code:");
-                    for l in lines {
-                        println!("      {:4} | {}", l.line_number, l.text);
+    // When --show-traversal we only print the traversal list; skip detailed layers/code.
+    if !show_traversal {
+        for layer in &result.layers {
+            println!(
+                "\n\u{1F310} Layer {}: {}",
+                layer.depth,
+                if layer.depth == 0 {
+                    "Observed Symbol"
+                } else {
+                    "Direct Dependencies"
+                }
+            );
+            println!("{}", "=".repeat(40));
+
+            for file in &layer.files {
+                println!("\n  \u{1F4C4} File: {}", file.file_path);
+                for node in &file.nodes {
+                    let display = node.symbol.split('/').next_back().unwrap_or(&node.symbol);
+                    println!("    Symbol: {} ({} tokens)", display, node.context_size);
+                    println!(
+                        "    Lines: {}-{}",
+                        node.span.start_line_1based, node.span.end_line_1based
+                    );
+                    if let Some(lines) = &node.code {
+                        println!("    Code:");
+                        for l in lines {
+                            println!("      {:4} | {}", l.line_number, l.text);
+                        }
                     }
                 }
             }

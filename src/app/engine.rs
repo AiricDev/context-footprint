@@ -3,9 +3,10 @@ use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
 use crate::adapters::test_detector::UniversalTestDetector;
 use crate::app::dto::*;
 use crate::domain::builder::GraphBuilder;
+use crate::domain::edge::EdgeKind;
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::{Node, NodeId};
-use crate::domain::policy::PruningParams;
+use crate::domain::policy::{PruningDecision, PruningParams};
 use crate::domain::ports::SourceReader;
 use crate::domain::semantic::SemanticData;
 use crate::domain::solver::CfSolver;
@@ -406,11 +407,51 @@ impl ContextEngine {
             layers.push(ContextLayer { depth, files });
         }
 
+        let traversal_steps = if req.show_traversal {
+            let mut steps = Vec::with_capacity(result.traversal_steps.len());
+            for step in &result.traversal_steps {
+                let node = self
+                    .node_id_to_reachable_node_locked(&data, step.node_id)
+                    .ok_or_else(|| {
+                        anyhow!("Internal error: missing node for id {}", step.node_id)
+                    })?;
+                let node_idx = *data.node_id_to_index.get(&step.node_id).ok_or_else(|| {
+                    anyhow!(
+                        "Internal error: missing node_id_to_index for {}",
+                        step.node_id
+                    )
+                })?;
+                let is_signature_complete = match data.graph.node(node_idx) {
+                    Node::Function(f) => Some(f.is_signature_complete()),
+                    _ => None,
+                };
+
+                steps.push(TraversalStepDto {
+                    node,
+                    edge_kind: step
+                        .incoming_edge_kind
+                        .as_ref()
+                        .map(edge_kind_display)
+                        .map(String::from),
+                    decision: step
+                        .decision
+                        .as_ref()
+                        .map(decision_display)
+                        .map(String::from),
+                    is_signature_complete,
+                });
+            }
+            Some(steps)
+        } else {
+            None
+        };
+
         Ok(ContextResponse {
             symbol: req.symbol,
             total_context_size: result.total_context_size,
             reachable_node_count: result.reachable_set.len(),
             layers,
+            traversal_steps,
         })
     }
 
@@ -483,6 +524,24 @@ fn span_dto(span: &crate::domain::node::SourceSpan) -> SpanDto {
         end_column: span.end_column,
         start_line_1based: span.start_line + 1,
         end_line_1based: span.end_line + 1,
+    }
+}
+
+fn edge_kind_display(ek: &EdgeKind) -> &'static str {
+    match ek {
+        EdgeKind::Call => "Call",
+        EdgeKind::Read => "Read",
+        EdgeKind::Write => "Write",
+        EdgeKind::SharedStateWrite => "SharedStateWrite",
+        EdgeKind::CallIn => "CallIn",
+        EdgeKind::Annotates => "Annotates",
+    }
+}
+
+fn decision_display(d: &PruningDecision) -> &'static str {
+    match d {
+        PruningDecision::Boundary => "Boundary",
+        PruningDecision::Transparent => "Transparent",
     }
 }
 
@@ -623,6 +682,7 @@ mod tests {
             visibility: Visibility::Public,
             return_types: vec![],
             is_interface_method: false,
+            is_constructor: false,
         });
 
         let v1 = Node::Variable(VariableNode {
@@ -698,6 +758,7 @@ mod tests {
                 policy: PolicyKind::Academic,
                 max_tokens: None,
                 include_code: true,
+                show_traversal: false,
             })
             .unwrap();
         assert_eq!(ctx.symbol, "sym/func1().");

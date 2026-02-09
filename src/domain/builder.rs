@@ -126,6 +126,21 @@ impl GraphBuilder {
             }
         }
 
+        // Build constructor init map: type_symbol -> init_node_symbol
+        let mut init_map: HashMap<SymbolId, SymbolId> = HashMap::new();
+        for document in &semantic_data.documents {
+            for def in &document.definitions {
+                if def.kind == SymbolKind::Function
+                    && def.name == "__init__"
+                    && let Some(ref enclosing) = def.enclosing_symbol
+                    && type_registry.contains(enclosing)
+                    && node_symbols.contains(&def.symbol_id)
+                {
+                    init_map.insert(enclosing.clone(), def.symbol_id.clone());
+                }
+            }
+        }
+
         // Pass 2: Edge Wiring - Process references to create edges
         let mut state_writers: HashMap<SymbolId, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
         let mut callers: HashMap<SymbolId, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
@@ -154,16 +169,25 @@ impl GraphBuilder {
                     };
 
                     // Handle Call edges
-                    if reference.role == ReferenceRole::Call
-                        && let Some(target_sym) = &target_node_sym
-                        && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
-                        && source_idx != target_idx
-                    {
-                        graph.add_edge(source_idx, target_idx, EdgeKind::Call);
-                        callers
-                            .entry(reference.target_symbol.clone())
-                            .or_default()
-                            .push(source_idx);
+                    if reference.role == ReferenceRole::Call {
+                        let resolved_target = target_node_sym
+                            .as_ref()
+                            .and_then(|sym| graph.get_node_by_symbol(sym))
+                            .map(|idx| (target_node_sym.as_ref().unwrap().clone(), idx))
+                            .or_else(|| {
+                                init_map.get(&reference.target_symbol).and_then(|init_sym| {
+                                    graph
+                                        .get_node_by_symbol(init_sym)
+                                        .map(|idx| (init_sym.clone(), idx))
+                                })
+                            });
+
+                        if let Some((resolved_sym, target_idx)) = resolved_target
+                            && source_idx != target_idx
+                        {
+                            graph.add_edge(source_idx, target_idx, EdgeKind::Call);
+                            callers.entry(resolved_sym).or_default().push(source_idx);
+                        }
                     }
 
                     // Handle Read/Write edges for variable references

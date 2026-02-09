@@ -148,7 +148,7 @@ impl ServerHandler for CfMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Compute Context Footprint (CF) metrics from a pre-built SCIP context graph."
+                "Compute Context Footprint (CF) metrics from a pre-built semantic data context graph."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -216,7 +216,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_tools_smoke() {
         let engine = ContextEngine::from_prebuilt(
-            "index.scip".into(),
+            "semantic_data.json".into(),
             "/repo".into(),
             make_graph(),
             Arc::new(MockReader),

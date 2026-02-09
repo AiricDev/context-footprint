@@ -118,6 +118,19 @@ pub fn type_def(
     }
 }
 
+pub fn method_def(
+    symbol_id: &str,
+    name: &str,
+    enclosing_symbol: &str,
+    documentation: Vec<String>,
+    parameters: Vec<Parameter>,
+    return_type: Option<String>,
+) -> SymbolDefinition {
+    let mut def = function_def(symbol_id, name, documentation, parameters, return_type);
+    def.enclosing_symbol = Some(enclosing_symbol.to_string());
+    def
+}
+
 pub fn call_reference(target: &str, enclosing: &str) -> SymbolReference {
     SymbolReference {
         target_symbol: target.to_string(),
@@ -334,6 +347,30 @@ pub fn create_semantic_data_multiple_callers() -> SemanticData {
             function_def(sym_c, "callee", vec![], vec![], None),
         ],
         references: vec![call_reference(sym_c, sym_a), call_reference(sym_c, sym_b)],
+    }];
+
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
+    }
+}
+
+/// Constructor call to Type: caller invokes MyClass() which targets the Type symbol.
+/// Builder should resolve this to MyClass.__init__ if it exists.
+pub fn create_semantic_data_with_constructor_call() -> SemanticData {
+    let sym_class = "sym::MyClass";
+    let sym_init = "sym::MyClass.__init__";
+    let sym_caller = "sym::caller";
+
+    let documents = vec![DocumentSemantics {
+        relative_path: "ctor.py".into(),
+        language: "python".into(),
+        definitions: vec![
+            type_def(sym_class, "MyClass", vec![], TypeKind::Class, false),
+            method_def(sym_init, "__init__", sym_class, vec![], vec![], None),
+            function_def(sym_caller, "caller", vec![], vec![], None),
+        ],
+        references: vec![call_reference(sym_class, sym_caller)],
     }];
 
     SemanticData {

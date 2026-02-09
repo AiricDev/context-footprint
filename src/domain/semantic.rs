@@ -2,7 +2,7 @@
 //!
 //! # Design Principles
 //!
-//! 1. **Graph-centric**: Designed from CF algorithm needs, not indexer format (SCIP/Pyright)
+//! 1. **Graph-centric**: Designed from CF algorithm needs, not indexer format
 //! 2. **Language-agnostic**: Abstracts away language differences - builder never checks language
 //! 3. **Adapter contract**: Each field has precise semantics that adapter MUST implement correctly
 //! 4. **Three symbol types**: Function, Variable, Type (no locals, no standalone parameters)
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 /// - Must be globally unique across all files
 /// - Should be deterministic (same symbol → same ID across runs)
 /// - Format is adapter-specific but must support equality comparison
-/// - Recommended: hierarchical format like "pkg.module.Class.method" or SCIP format
+/// - Recommended: hierarchical format like "pkg.module.Class.method"
 /// - For builtin types (int, str, etc.): use language-standard names
 pub type SymbolId = String;
 

@@ -34,14 +34,14 @@ CF is computed via **conservative graph traversal** over language-level dependen
 
 ## Supported Languages
 
-The tool consumes code indexed using the **SCIP protocol**, and is therefore language-agnostic in principle.
+The tool consumes **semantic data** (JSON) produced by language-specific extractors (e.g. LSP-based), and is therefore language-agnostic in principle.
 
 Tested languages include:
 
 - Python
 - TypeScript
 
-Support for additional languages depends on the availability and quality of SCIP indexers.
+Support for additional languages depends on the availability of semantic data extractors that output the `SemanticData` JSON format.
 
 ---
 
@@ -50,7 +50,7 @@ Support for additional languages depends on the availability and quality of SCIP
 ### Prerequisites
 
 - Rust 1.70+
-- A SCIP index for the target project
+- A semantic data JSON file for the target project (e.g. from an LSP-based extractor)
 
 ### Build
 
@@ -64,37 +64,33 @@ cargo build --release
 
 ## Basic Usage
 
-### 1. Generate a SCIP index
+### 1. Generate semantic data
 
-Example for Python:
-
-```bash
-scip-python index . --output index.scip
-```
+Use your project's semantic data extractor (e.g. LSP-based) to produce a `SemanticData` JSON file for the target project.
 
 ### 2. Analyze CF distribution
 
 ```bash
-./target/release/context-footprint index.scip stats
+./target/release/cftool semantic_data.json stats
 ```
 
 ### 3. Find symbols with highest CF
 
 ```bash
-./target/release/context-footprint index.scip top --limit 10
+./target/release/cftool semantic_data.json top --limit 10
 ```
 
 ### 4. Query a specific symbol
 
 ```bash
-./target/release/context-footprint index.scip compute \
+./target/release/cftool semantic_data.json compute \
   "<symbol-id>"
 ```
 
 ### 5. Inspect contributing context
 
 ```bash
-./target/release/context-footprint index.scip context \
+./target/release/cftool semantic_data.json context \
   "<symbol-id>"
 ```
 
@@ -118,7 +114,7 @@ Functions - Context Footprint Distribution:
 
 ## How CF Is Computed (Brief)
 
-1. A directed dependency graph is constructed from the SCIP index.
+1. A directed dependency graph is constructed from the semantic data (JSON).
 2. Starting from a target symbol, dependencies are traversed conservatively.
 3. Traversal stops at:
 
@@ -139,7 +135,7 @@ The implementation separates core analysis logic from language-specific adapters
 ```
 src/
 ├─ domain/        # Graph model and traversal logic
-└─ adapters/      # SCIP parsing, size functions, pruning policies
+└─ adapters/      # Size functions, doc scoring, test detection
 ```
 
 ---
@@ -152,4 +148,4 @@ Apache 2.0
 
 ## Acknowledgements
 
-This tool builds on the SCIP protocol developed by Sourcegraph.
+Semantic data is consumed as JSON (e.g. from LSP-based extractors).

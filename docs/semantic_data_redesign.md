@@ -38,10 +38,9 @@
   cftool build-from-json <semantic.json> [--symbol <symbol_id>]
   ```
 
-### 5. **SCIP Adapter Temporarily Disabled**
-- **Files**: `src/adapters/mod.rs`, `src/app/engine.rs`
-- **Reason**: Needs migration to new SemanticData format
-- **Status**: Code preserved for future migration
+### 5. **Semantic Data from JSON (No SCIP)**
+- **Files**: `src/app/engine.rs`
+- **Status**: Engine loads semantic data from JSON only (e.g. produced by LSP-based extractors). SCIP adapter has been removed.
 
 ## 🧪 Test Results
 
@@ -137,11 +136,10 @@ context-footprint/
 │   │   ├── semantic_old.rs      # Backup of old version
 │   │   └── builder.rs           # ✅ Updated
 │   ├── adapters/
-│   │   ├── mod.rs               # ⚠️  SCIP adapter disabled
-│   │   └── scip/                # ⚠️  Needs migration
-│   ├── cli.rs                   # ✅ Added build_from_json
-│   ├── main.rs                  # ✅ Added BuildFromJson command
-│   └── app/engine.rs            # ⚠️  SCIP loading disabled
+│   │   └── mod.rs               # No SCIP; semantic data from JSON
+│   ├── cli.rs                   # ✅ JSON path → load_from_json
+│   ├── main.rs                  # ✅ SemanticData JSON path
+│   └── app/engine.rs            # ✅ load_from_json only
 ├── scripts/
 │   └── extract_python_semantics.py  # ✨ New extractor (590+ lines)
 ├── tests/fixtures/
@@ -210,10 +208,7 @@ print(f\"References: {sum(len(doc['references']) for doc in d['documents'])}\")
    - Check why references aren't creating edges
    - May need to adjust symbol ID format
 
-3. **When ready to migrate SCIP adapter**:
-   - See `SEMANTIC_MIGRATION.md` for detailed guide
-   - Re-enable in `src/adapters/mod.rs`
-   - Fix compilation errors systematically
+3. **Semantic data source**: Use LSP-based or other extractors that output `SemanticData` JSON; SCIP adapter has been removed.
 
 4. **Consider future enhancements**:
    - Use pyright/mypy for better type information

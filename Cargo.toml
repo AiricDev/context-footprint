@@ -6,7 +6,7 @@ description = "A static analysis tool for measuring architectural context exposu
 license = "Apache-2.0"
 repository = "https://github.com/AiricDev/context-footprint"
 readme = "README.md"
-keywords = ["static-analysis", "metrics", "context", "scip", "code-architect"]
+keywords = ["static-analysis", "metrics", "context", "code-architect", "semantic-data"]
 categories = ["development-tools"]
 
 [[bin]]

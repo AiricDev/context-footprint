@@ -21,6 +21,7 @@ target
 /tests/fixtures/fastapi/
 /tests/fixtures/LLMRelay/
 /tests/fixtures/*/index.scip
+/tests/fixtures/*/semantic_data.json
 
 # Coverage Reports
 tarpaulin-report.html

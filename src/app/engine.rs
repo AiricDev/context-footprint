@@ -1,12 +1,15 @@
-// use crate::adapters::scip::adapter::ScipDataSourceAdapter;
+use crate::adapters::doc_scorer::heuristic::HeuristicDocScorer;
+use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
 use crate::adapters::test_detector::UniversalTestDetector;
 use crate::app::dto::*;
+use crate::domain::builder::GraphBuilder;
 use crate::domain::graph::ContextGraph;
 use crate::domain::node::{Node, NodeId};
 use crate::domain::policy::PruningParams;
 use crate::domain::ports::SourceReader;
+use crate::domain::semantic::SemanticData;
 use crate::domain::solver::CfSolver;
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,7 +21,7 @@ pub struct ContextEngine {
 }
 
 struct EngineData {
-    scip_path: PathBuf,
+    semantic_path: PathBuf,
     project_root: PathBuf,
     project_root_override: Option<PathBuf>,
     graph: Arc<ContextGraph>,
@@ -28,99 +31,11 @@ struct EngineData {
 }
 
 impl ContextEngine {
-    pub fn load_from_scip<P: AsRef<Path>>(scip_path: P) -> Result<Self> {
-        Self::load_from_scip_internal(scip_path.as_ref().to_path_buf(), None)
-    }
-
-    /// Load from SCIP, optionally overriding the project root used to resolve `Document.relative_path`.
-    ///
-    /// Precedence:
-    /// - If `project_root_override` is provided, use it (after stripping `file://`).
-    /// - Else, if the SCIP index provides `Index.metadata.project_root`, use it.
-    /// - Else, fall back to the `.scip` file's parent directory.
-    pub fn load_from_scip_with_project_root<P: AsRef<Path>>(
-        scip_path: P,
-        project_root_override: Option<&str>,
-    ) -> Result<Self> {
-        let override_path = project_root_override.and_then(|s| {
-            let normalized = s.strip_prefix("file://").unwrap_or(s).trim();
-            if normalized.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(normalized))
-            }
-        });
-        Self::load_from_scip_internal(scip_path.as_ref().to_path_buf(), override_path)
-    }
-
-    fn load_from_scip_internal(
-        _scip_path: PathBuf,
-        _project_root_override: Option<PathBuf>,
-    ) -> Result<Self> {
-        anyhow::bail!(
-            "SCIP adapter temporarily disabled. Use build-from-json CLI command with extract_python_semantics.py"
-        )
-
-        // Old implementation moved to _old_scip_impl below
-    }
-
-    #[allow(dead_code, unused_variables)]
-    fn _old_scip_impl(
-        _scip_path: PathBuf,
-        _project_root_override: Option<PathBuf>,
-    ) -> Result<Self> {
-        unimplemented!("SCIP loading disabled during migration")
-    }
-
-    /* Old SCIP implementation preserved for future migration:
-    fn _old_scip_impl_real(
-        scip_path: PathBuf,
-        project_root_override: Option<PathBuf>,
-    ) -> Result<Self> {
-        let data_source = ScipDataSourceAdapter::new(&scip_path);
-        let source_reader: Arc<dyn SourceReader> = Arc::new(FileSourceReader::new());
-        let size_function = Box::new(TiktokenSizeFunction::new());
-        let doc_scorer = Box::new(HeuristicDocScorer::new());
-
-        let mut semantic_data = data_source.load()?;
-
-        let project_root = if let Some(override_path) = project_root_override.clone() {
-            override_path
-        } else if !semantic_data.project_root.is_empty() {
-            PathBuf::from(&semantic_data.project_root)
-        } else {
-            scip_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."))
-        };
-
-        semantic_data.project_root = project_root.to_string_lossy().to_string();
-
-        let builder = crate::domain::builder::GraphBuilder::new(size_function, doc_scorer);
-        let build_result = builder.build(semantic_data, source_reader.as_ref())?;
-
-        let (node_id_to_index, node_id_to_symbol) = build_node_maps(&build_result);
-
-        Ok(Self {
-            inner: Arc::new(RwLock::new(EngineData {
-                scip_path,
-                project_root,
-                project_root_override,
-                graph: Arc::new(build_result),
-                node_id_to_index,
-                node_id_to_symbol,
-                source_reader,
-            })),
-        })
-    }
-    */
-
     /// Construct an engine from an already-built graph.
     ///
-    /// This is primarily useful for testing or when the graph is built by a non-SCIP adapter.
+    /// Used for testing or when the graph is built by an external semantic data source (e.g. LSP extractor).
     pub fn from_prebuilt(
-        scip_path: PathBuf,
+        semantic_path: PathBuf,
         project_root: PathBuf,
         graph: ContextGraph,
         source_reader: Arc<dyn SourceReader>,
@@ -128,7 +43,7 @@ impl ContextEngine {
         let (node_id_to_index, node_id_to_symbol) = build_node_maps(&graph);
         Self {
             inner: Arc::new(RwLock::new(EngineData {
-                scip_path,
+                semantic_path,
                 project_root,
                 project_root_override: None,
                 graph: Arc::new(graph),
@@ -139,12 +54,75 @@ impl ContextEngine {
         }
     }
 
+    pub fn load_from_json(json_path: &Path) -> Result<Self> {
+        let json_content =
+            std::fs::read_to_string(json_path).context("Failed to read JSON file")?;
+        let semantic_data: SemanticData =
+            serde_json::from_str(&json_content).context("Failed to parse SemanticData JSON")?;
+
+        let project_root = PathBuf::from(&semantic_data.project_root);
+
+        struct SimpleSourceReader {
+            project_root: String,
+        }
+
+        impl SourceReader for SimpleSourceReader {
+            fn read(&self, path: &Path) -> Result<String> {
+                let full_path = Path::new(&self.project_root).join(path);
+                std::fs::read_to_string(&full_path)
+                    .with_context(|| format!("Failed to read source file: {}", full_path.display()))
+            }
+
+            fn read_lines(
+                &self,
+                path: &str,
+                start_line: usize,
+                end_line: usize,
+            ) -> Result<Vec<String>> {
+                let content = self.read(Path::new(path))?;
+                let lines: Vec<String> = content
+                    .lines()
+                    .skip(start_line.saturating_sub(1))
+                    .take(end_line - start_line + 1)
+                    .map(String::from)
+                    .collect();
+                Ok(lines)
+            }
+        }
+
+        let source_reader: Arc<dyn SourceReader> = Arc::new(SimpleSourceReader {
+            project_root: semantic_data.project_root.clone(),
+        });
+
+        let size_function = Box::new(TiktokenSizeFunction::new());
+        let doc_scorer = Box::new(HeuristicDocScorer);
+        let builder = GraphBuilder::new(size_function, doc_scorer);
+
+        let graph = builder
+            .build(semantic_data, source_reader.as_ref())
+            .context("Failed to build context graph")?;
+
+        let (node_id_to_index, node_id_to_symbol) = build_node_maps(&graph);
+
+        Ok(Self {
+            inner: Arc::new(RwLock::new(EngineData {
+                semantic_path: json_path.to_path_buf(),
+                project_root,
+                project_root_override: None,
+                graph: Arc::new(graph),
+                node_id_to_index,
+                node_id_to_symbol,
+                source_reader,
+            })),
+        })
+    }
+
     pub fn reload(&self) -> Result<HealthResponse> {
-        let (scip_path, project_root_override) = {
+        let path = {
             let data = self.inner.read().unwrap();
-            (data.scip_path.clone(), data.project_root_override.clone())
+            data.semantic_path.clone()
         };
-        let new_engine = Self::load_from_scip_internal(scip_path, project_root_override)?;
+        let new_engine = Self::load_from_json(&path)?;
         let new_data = new_engine.inner.read().unwrap();
 
         let mut data = self.inner.write().unwrap();
@@ -156,7 +134,7 @@ impl ContextEngine {
         data.source_reader = new_data.source_reader.clone();
 
         Ok(HealthResponse {
-            scip_path: data.scip_path.to_string_lossy().to_string(),
+            semantic_path: data.semantic_path.to_string_lossy().to_string(),
             project_root: data.project_root.to_string_lossy().to_string(),
             node_count: data.graph.graph.node_count(),
             edge_count: data.graph.graph.edge_count(),
@@ -166,7 +144,7 @@ impl ContextEngine {
     pub fn health(&self) -> HealthResponse {
         let data = self.inner.read().unwrap();
         HealthResponse {
-            scip_path: data.scip_path.to_string_lossy().to_string(),
+            semantic_path: data.semantic_path.to_string_lossy().to_string(),
             project_root: data.project_root.to_string_lossy().to_string(),
             node_count: data.graph.graph.node_count(),
             edge_count: data.graph.graph.edge_count(),
@@ -665,7 +643,7 @@ mod tests {
     #[test]
     fn test_engine_health_and_compute() {
         let engine = ContextEngine::from_prebuilt(
-            PathBuf::from("index.scip"),
+            PathBuf::from("semantic_data.json"),
             PathBuf::from("/repo"),
             test_graph(),
             Arc::new(MockReader),
@@ -690,7 +668,7 @@ mod tests {
     #[test]
     fn test_engine_search_and_top() {
         let engine = ContextEngine::from_prebuilt(
-            PathBuf::from("index.scip"),
+            PathBuf::from("semantic_data.json"),
             PathBuf::from("/repo"),
             test_graph(),
             Arc::new(MockReader),
@@ -709,7 +687,7 @@ mod tests {
     #[test]
     fn test_engine_context_include_code() {
         let engine = ContextEngine::from_prebuilt(
-            PathBuf::from("index.scip"),
+            PathBuf::from("semantic_data.json"),
             PathBuf::from("/repo"),
             test_graph(),
             Arc::new(MockReader),

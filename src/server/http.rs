@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_health_and_compute() {
         let engine = ContextEngine::from_prebuilt(
-            "index.scip".into(),
+            "semantic_data.json".into(),
             "/repo".into(),
             make_graph(),
             Arc::new(MockReader),

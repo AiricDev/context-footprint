@@ -19,17 +19,17 @@
 **Decision**: Strict separation between domain logic (`src/domain/`) and external integrations (`src/adapters/`)
 
 **Rationale**:
-- Domain algorithms must be testable without external dependencies (SCIP, file I/O)
-- Future language support (TypeScript, Java) only requires new adapters
+- Domain algorithms must be testable without external dependencies (file I/O, indexers)
+- Future language support (TypeScript, Java) only requires new semantic data extractors
 - Policy experimentation (different pruning strategies) isolated from core traversal
 
 **Implementation**:
 ```
 Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
-  ├─ graph.rs                    ├─ scip/          (SCIP parsing)
-  ├─ solver.rs                   ├─ policy/        (pruning strategies)
-  ├─ builder.rs                  ├─ size_function/ (token counting)
-  └─ ports.rs (traits)  ←───────┴─ doc_scorer/    (doc quality)
+  ├─ graph.rs                    ├─ doc_scorer/    (doc quality)
+  ├─ solver.rs                   ├─ size_function/ (token counting)
+  ├─ builder.rs                  └─ test_detector/
+  └─ ports.rs (traits)  ←──────── (semantic data: JSON from LSP extractor, etc.)
 ```
 
 **Constraints**:
@@ -43,13 +43,13 @@ Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
 **Decision**: Build graph in three sequential passes (not single-pass)
 
 **Rationale**:
-- SCIP indexes may reference symbols before they're defined (forward references)
+- Semantic data may reference symbols before they're defined (forward references)
 - Dynamic edges (SharedStateWrite, CallIn) require full static graph first
 - Metrics (`context_size`, `doc_score`) need source file access at node creation
 
 **Passes**:
-1. **Allocate nodes** from SCIP definitions → compute metrics via source spans
-2. **Wire static edges** from SCIP occurrences → standard dependencies
+1. **Allocate nodes** from semantic definitions → compute metrics via source spans
+2. **Wire static edges** from semantic references → standard dependencies
 3. **Add dynamic edges** → reverse lookups for state writers and callers
 
 **File**: `src/domain/builder.rs`
@@ -76,14 +76,14 @@ Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
 
 ### ADR-004: Semantic Data Abstraction
 
-**Decision**: Define SCIP-agnostic `SemanticData` model in domain layer
+**Decision**: Define indexer-agnostic `SemanticData` model in domain layer
 
 **Rationale**:
-- SCIP is implementation detail (protobuf, Sourcegraph-specific)
-- Future: support other indexers (Kythe, LSP, custom analyzers)
-- Testing: generate semantic data without SCIP files
+- Semantic data is consumed as JSON (e.g. from LSP-based extractors)
+- Enables testing without external indexers; graph built from in-memory or file JSON
+- Future: support other formats or indexers without changing domain
 
-**Boundary**: `SemanticData` (domain) ← `ScipDataSourceAdapter` (adapter)
+**Boundary**: `SemanticData` (domain) ← JSON file / LSP extractor output
 
 ## 🗂️ Key Domain Concepts
 
@@ -97,7 +97,7 @@ Domain Layer (src/domain/)     Adapters Layer (src/adapters/)
 | `CfSolver` | BFS traversal with conditional pruning | `src/domain/solver.rs` |
 | `PruningParams` | doc_threshold + treat_typed_documented_function_as_boundary; CfSolver parameter | `src/domain/policy.rs` |
 | `evaluate` | Core pruning algorithm (domain) | `src/domain/policy.rs` |
-| `SemanticData` | SCIP-agnostic semantic model | `src/domain/semantic.rs` |
+| `SemanticData` | Indexer-agnostic semantic model | `src/domain/semantic.rs` |
 
 ### Critical Node Attributes
 
@@ -139,9 +139,9 @@ cargo test --lib --tests
 |-----------|-------------|----------|
 | Unit | Inline helpers | `#[cfg(test)]` modules in source files |
 | Integration | Mock fixtures | `tests/common/fixtures.rs` generators |
-| E2E | Real SCIP | `tests/fixtures/simple_python/`, `fastapi/` |
+| E2E | Real semantic data JSON | `tests/fixtures/simple_python/`, etc. |
 
-**Key Convention**: E2E tests gracefully skip if SCIP index missing (CI-friendly).
+**Key Convention**: E2E tests gracefully skip if semantic data file missing (CI-friendly).
 
 ## 🔄 Development Workflow
 
@@ -180,12 +180,11 @@ cargo clippy --all-targets -- -D warnings  # No warnings
 **Adapters grouped by concern** (not by implementation):
 ```
 src/adapters/
-  ├─ scip/
-  ├─ doc_scorer/
-  ├─ size_function/
-  └─ test_detector/
+ ├─ doc_scorer/
+ ├─ size_function/
+ └─ test_detector/
 ```
-(Pruning is domain-only; no policy adapters.)
+(Semantic data is loaded from JSON, e.g. produced by LSP extractors. Pruning is domain-only.)
 
 ### Testing Helpers
 
@@ -210,10 +209,9 @@ src/adapters/
 
 ### Adding New Language Support
 
-1. Create adapter in `src/adapters/scip/<language>.rs` (or use external indexer)
-2. Implement `SemanticDataSource` trait
-3. Map language-specific constructs to domain model
-4. Add E2E test in `tests/fixtures/<language>/`
+1. Implement a semantic data extractor (e.g. LSP-based) that outputs `SemanticData` JSON
+2. Use `ContextEngine::load_from_json(path)` or build graph via `GraphBuilder` with domain `SemanticData`
+3. Add E2E test in `tests/fixtures/<language>/` with a sample JSON fixture
 
 ## 📊 Quality Standards
 
@@ -232,11 +230,9 @@ All commits must pass (`.github/workflows/test.yml`):
 
 ## 🚨 Known Issues
 
-### Generated SCIP Code
+### Doc Tests
 
-**Issue**: `scip.rs` doc tests fail (protobuf artifacts)
-
-**Workaround**: Skip doc tests via `cargo test --lib --tests`
+**Workaround**: Use `cargo test --lib --tests` if any doc tests are skipped.
 
 **Fix applied**: `#[allow(clippy::doc_overindented_list_items)]` in `src/lib.rs`
 
@@ -254,7 +250,7 @@ All commits must pass (`.github/workflows/test.yml`):
 
 ### External Resources
 
-- [SCIP Protocol](https://github.com/sourcegraph/scip) (semantic indexing format)
+- Semantic data is JSON-serialized `SemanticData` (e.g. from LSP-based extractors)
 - [petgraph](https://docs.rs/petgraph/) (Rust graph library)
 
 ---
@@ -267,4 +263,4 @@ All commits must pass (`.github/workflows/test.yml`):
 | **Boundary Node** | Well-abstracted code (typed + documented) where traversal stops |
 | **Transparent Node** | Leaky abstraction (untyped/undocumented) where traversal continues |
 | **Dynamic Expansion** | Reverse edges (SharedStateWrite, CallIn) added in Pass 3 |
-| **Semantic Data** | Domain model abstraction over SCIP (enables testing without protobuf) |
+| **Semantic Data** | Domain model for definitions/references (JSON from LSP or other extractors) |

@@ -7,20 +7,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "context-footprint")]
+#[command(name = "cftool")]
 #[command(about = "Analyze code coupling via Context Footprint metric", long_about = None)]
 struct Cli {
-    /// Path to SCIP index file
-    #[arg(default_value = "index.scip")]
-    scip_path: String,
-
-    /// Override the project root used to resolve `Document.relative_path`.
-    ///
-    /// By default, we trust `Index.metadata.project_root` from the SCIP index.
-    /// Use this flag when the index was generated elsewhere or the sources live
-    /// in a different location on disk.
-    #[arg(long)]
-    project_root: Option<String>,
+    /// Path to SemanticData JSON file
+    semantic_data_path: PathBuf,
 
     #[command(subcommand)]
     command: Commands,
@@ -28,6 +19,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Debug: build graph from SemanticData and print graph structure as JSON
+    DebugGraphData {},
+
     /// Compute CF for specific symbols (union)
     Compute {
         /// Symbols to analyze
@@ -88,20 +82,6 @@ enum Commands {
     },
     /// Start an MCP server over stdio
     Mcp {},
-
-    /// Debug: print SemanticData built from SCIP index as JSON (for manual inspection)
-    DebugSemanticData {},
-
-    /// Build graph from SemanticData JSON file (output from extract_python_semantics.py)
-    BuildFromJson {
-        /// Path to SemanticData JSON file
-        #[arg(required = true)]
-        json_path: PathBuf,
-
-        /// Symbol to compute CF for (optional, for testing)
-        #[arg(long)]
-        symbol: Option<String>,
-    },
 }
 
 #[tokio::main]
@@ -113,36 +93,23 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let json_path = &cli.semantic_data_path;
 
-    match &cli.command {
-        Commands::DebugSemanticData {} => {
-            return cli::debug_semantic_data(&cli.scip_path);
-        }
-        Commands::BuildFromJson { json_path, symbol } => {
-            return cli::build_from_json(json_path, symbol.as_deref());
-        }
-        _ => {}
+    if let Commands::DebugGraphData {} = &cli.command {
+        return cli::debug_graph_data(json_path);
     }
 
-    println!("Loading SCIP index from: {}", cli.scip_path);
-
-    println!("Building context graph...");
-    let engine = ContextEngine::load_from_scip_with_project_root(
-        &cli.scip_path,
-        cli.project_root.as_deref(),
-    )?;
+    println!("Loading SemanticData from {}...", json_path.display());
+    let engine = ContextEngine::load_from_json(json_path)?;
     let health = engine.health();
 
-    println!("Graph Summary:");
+    println!("Graph built:");
     println!("  Nodes: {}", health.node_count);
     println!("  Edges: {}", health.edge_count);
     println!();
 
     match &cli.command {
-        Commands::BuildFromJson { .. } => {
-            // Already handled above, this path unreachable
-            unreachable!()
-        }
+        Commands::DebugGraphData {} => unreachable!(),
         Commands::Compute { symbols } => {
             cli::compute_cf_for_symbols(&engine, symbols)?;
         }
@@ -182,7 +149,6 @@ async fn main() -> Result<()> {
             println!("Starting MCP stdio server...");
             server::mcp::CfMcpServer::new(engine).serve_stdio().await?;
         }
-        Commands::DebugSemanticData {} => unreachable!(),
     }
 
     Ok(())

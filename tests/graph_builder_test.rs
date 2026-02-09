@@ -4,10 +4,12 @@ mod common;
 
 use context_footprint::domain::builder::GraphBuilder;
 use context_footprint::domain::edge::EdgeKind;
+use petgraph::visit::EdgeRef;
 
 use common::fixtures::{
     create_semantic_data_empty_document, create_semantic_data_multiple_callers,
-    create_semantic_data_simple, create_semantic_data_two_files, create_semantic_data_with_cycle,
+    create_semantic_data_simple, create_semantic_data_two_files,
+    create_semantic_data_with_constructor_call, create_semantic_data_with_cycle,
     create_semantic_data_with_shared_state, source_reader_for_semantic_data,
 };
 use common::mock::{MockDocScorer, MockSizeFunction};
@@ -147,5 +149,27 @@ fn test_multiple_callers_all_connected_to_callee() {
     assert_eq!(
         call_in_count, 2,
         "Callee C should have CallIn edges to caller A and B"
+    );
+}
+
+#[test]
+fn test_constructor_call_to_type_resolves_to_init() {
+    let semantic_data = create_semantic_data_with_constructor_call();
+    let reader = source_reader_for_semantic_data(&semantic_data, DUMMY_SOURCE);
+
+    let size_fn = Box::new(MockSizeFunction::new());
+    let doc_scorer = Box::new(MockDocScorer::new());
+    let builder = GraphBuilder::new(size_fn, doc_scorer);
+    let graph = builder.build(semantic_data, &reader).unwrap();
+
+    let caller_idx = graph.get_node_by_symbol("sym::caller").unwrap();
+    let init_idx = graph.get_node_by_symbol("sym::MyClass.__init__").unwrap();
+
+    let has_call_edge = graph.graph.edge_references().any(|e| {
+        e.source() == caller_idx && e.target() == init_idx && matches!(e.weight(), EdgeKind::Call)
+    });
+    assert!(
+        has_call_edge,
+        "Constructor call to Type should resolve to __init__ Call edge"
     );
 }

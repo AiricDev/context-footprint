@@ -90,7 +90,7 @@ mod tests {
         let d = UniversalTestDetector::new();
         // Python
         assert!(d.is_test_code("", "tests/foo.py"));
-        assert!(d.is_test_code("module/test_foo().", "src/module.py"));
+        assert!(d.is_test_code("module.test_foo#Function", "src/module.py"));
         // Rust
         assert!(d.is_test_code("", "tests/bar.rs"));
         assert!(d.is_test_code("", "crate/bar_test.rs"));
@@ -101,19 +101,6 @@ mod tests {
         assert!(d.is_test_code("", "src/test/java/ExampleTest.java"));
         // Go
         assert!(d.is_test_code("", "pkg/foo_test.go"));
-    }
-
-    #[test]
-    fn test_universal_fallback_when_no_extension() {
-        let d = UniversalTestDetector::new();
-        // Unknown extension: fallback to "any detector matches"
-        assert!(d.is_test_code("", "some/path/tests/script"));
-        assert!(d.is_test_code("scip-python ... `m`/test_foo().", "noext"));
-    }
-
-    #[test]
-    fn test_universal_default_constructs() {
-        let d = UniversalTestDetector::default();
         assert!(!d.is_test_code("", "src/main.go"));
     }
 }

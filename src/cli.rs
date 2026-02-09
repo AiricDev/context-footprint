@@ -1,48 +1,20 @@
-// use crate::adapters::scip::adapter::ScipDataSourceAdapter;
 use crate::adapters::doc_scorer::heuristic::HeuristicDocScorer;
 use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
 use crate::app::dto::{ComputeRequest, ContextRequest, PolicyKind};
 use crate::app::engine::ContextEngine;
 use crate::domain::builder::GraphBuilder;
+use crate::domain::node::Node;
 use crate::domain::ports::SourceReader;
 use crate::domain::semantic::SemanticData;
 use anyhow::{Context as _, Result};
 use std::path::Path;
 
-/// Load SemanticData from SCIP index and print as JSON for manual inspection.
-pub fn debug_semantic_data(_scip_path: &str) -> Result<()> {
-    anyhow::bail!(
-        "SCIP adapter temporarily disabled during SemanticData migration. Use BuildFromJson with extract_python_semantics.py instead."
-    )
-}
-
-/// Build graph from SemanticData JSON file and optionally compute CF for a symbol
-pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()> {
-    println!("Loading SemanticData from {}...", json_path.display());
-
-    // Read and parse JSON
+/// Build graph from SemanticData JSON file and print the graph structure as JSON.
+pub fn debug_graph_data(json_path: &Path) -> Result<()> {
     let json_content = std::fs::read_to_string(json_path).context("Failed to read JSON file")?;
     let semantic_data: SemanticData =
         serde_json::from_str(&json_content).context("Failed to parse SemanticData JSON")?;
 
-    println!("SemanticData loaded:");
-    println!("  Project root: {}", semantic_data.project_root);
-    println!("  Documents: {}", semantic_data.documents.len());
-    let total_defs: usize = semantic_data
-        .documents
-        .iter()
-        .map(|d| d.definitions.len())
-        .sum();
-    let total_refs: usize = semantic_data
-        .documents
-        .iter()
-        .map(|d| d.references.len())
-        .sum();
-    println!("  Total definitions: {}", total_defs);
-    println!("  Total references: {}", total_refs);
-    println!();
-
-    // Create source reader
     struct SimpleSourceReader {
         project_root: String,
     }
@@ -75,8 +47,6 @@ pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()
         project_root: semantic_data.project_root.clone(),
     };
 
-    // Build graph
-    println!("Building context graph...");
     let size_function = Box::new(TiktokenSizeFunction::new());
     let doc_scorer = Box::new(HeuristicDocScorer);
     let builder = GraphBuilder::new(size_function, doc_scorer);
@@ -85,57 +55,75 @@ pub fn build_from_json(json_path: &Path, test_symbol: Option<&str>) -> Result<()
         .build(semantic_data, &source_reader)
         .context("Failed to build context graph")?;
 
-    println!("Graph built successfully:");
-    println!("  Nodes: {}", graph.graph.node_count());
-    println!("  Edges: {}", graph.graph.edge_count());
-    println!("  Types in registry: {}", graph.type_registry.len());
-    println!();
+    let mut nodes = Vec::new();
+    for idx in graph.graph.node_indices() {
+        let node = graph.node(idx);
+        let core = node.core();
+        let node_type = match node {
+            Node::Function(_) => "function",
+            Node::Variable(_) => "variable",
+        };
 
-    // If test symbol provided, compute CF
-    if let Some(symbol) = test_symbol {
-        println!("Computing CF for symbol: {}", symbol);
+        let mut edges_out = Vec::new();
+        for (target_idx, edge_kind) in graph.neighbors(idx) {
+            let target_node = graph.node(target_idx);
+            edges_out.push(serde_json::json!({
+                "target": target_node.core().name,
+                "target_symbol": graph.symbol_to_node.iter()
+                    .find(|&(_, &v)| v == target_idx)
+                    .map(|(k, _)| k.as_str())
+                    .unwrap_or("unknown"),
+                "kind": format!("{:?}", edge_kind),
+            }));
+        }
 
-        if let Some(node_idx) = graph.get_node_by_symbol(symbol) {
-            use crate::domain::policy::PruningParams;
-            use crate::domain::solver::CfSolver;
-            use std::sync::Arc;
+        let mut node_json = serde_json::json!({
+            "id": core.id,
+            "name": core.name,
+            "type": node_type,
+            "file": core.file_path,
+            "span": format!("{}:{}-{}:{}", core.span.start_line, core.span.start_column, core.span.end_line, core.span.end_column),
+            "context_size": core.context_size,
+            "doc_score": core.doc_score,
+            "is_external": core.is_external,
+            "edges": edges_out,
+        });
 
-            let params = PruningParams::academic(0.5);
-            let graph_arc = Arc::new(graph);
-            let mut solver = CfSolver::new(graph_arc.clone(), params);
-            let result = solver.compute_cf(&[node_idx], None);
+        if let Some(scope) = &core.scope {
+            node_json["scope"] = serde_json::json!(scope);
+        }
 
-            println!("  CF: {} tokens", result.total_context_size);
-            println!("  Reachable nodes: {}", result.reachable_set.len());
-
-            // Show first few reachable nodes
-            if !result.reachable_nodes_ordered.is_empty() {
-                println!("\n  First 5 reachable nodes (ordered):");
-                for (i, &node_id) in result.reachable_nodes_ordered.iter().take(5).enumerate() {
-                    // Find node by ID
-                    for &idx in graph_arc.symbol_to_node.values() {
-                        let node = graph_arc.node(idx);
-                        if node.core().id == node_id {
-                            println!(
-                                "    {}. {} (size: {})",
-                                i + 1,
-                                node.core().name,
-                                node.core().context_size
-                            );
-                            break;
-                        }
-                    }
-                }
+        if let Node::Function(f) = node {
+            node_json["is_async"] = serde_json::json!(f.is_async);
+            node_json["is_interface_method"] = serde_json::json!(f.is_interface_method);
+            node_json["visibility"] = serde_json::json!(format!("{:?}", f.visibility));
+            if !f.parameters.is_empty() {
+                node_json["param_count"] = serde_json::json!(f.parameters.len());
             }
-        } else {
-            println!("  Symbol not found in graph!");
-            println!("\n  Available symbols:");
-            for (sym, _) in graph.symbol_to_node.iter().take(10) {
-                println!("    - {}", sym);
+            if !f.return_types.is_empty() {
+                node_json["return_types"] = serde_json::json!(f.return_types);
             }
         }
+
+        let symbol = graph
+            .symbol_to_node
+            .iter()
+            .find(|&(_, &v)| v == idx)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_default();
+        node_json["symbol"] = serde_json::json!(symbol);
+
+        nodes.push(node_json);
     }
 
+    let output = serde_json::json!({
+        "node_count": graph.graph.node_count(),
+        "edge_count": graph.graph.edge_count(),
+        "type_registry_count": graph.type_registry.len(),
+        "nodes": nodes,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 

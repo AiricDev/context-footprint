@@ -25,7 +25,7 @@ impl TestDetector for RustTestDetector {
             return true;
         }
 
-        // Note: #[test] annotations are not visible in SCIP symbols
+        // Note: #[test] annotations may not be visible in semantic symbol data
         // We rely on file/directory structure
 
         false

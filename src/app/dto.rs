@@ -12,7 +12,7 @@ pub enum PolicyKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HealthResponse {
-    pub scip_path: String,
+    pub semantic_path: String,
     pub project_root: String,
     pub node_count: usize,
     pub edge_count: usize,

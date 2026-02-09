@@ -30,32 +30,26 @@ impl TestDetector for PythonTestDetector {
             return true;
         }
 
-        // Check symbol patterns
-        // Python test functions: test_*
-        if symbol.contains("/test_") || symbol.contains("#test_") {
+        // Check symbol patterns (semantic data format: module.name#Kind, module.Class#Type, module.Class.method#Function)
+        let (name_part, kind_suffix) = match symbol.split_once('#') {
+            Some((n, k)) => (n, k),
+            None => return false,
+        };
+        let segments: Vec<&str> = name_part.split('.').collect();
+
+        // Python test functions: name segment starts with test_
+        if segments.last().is_some_and(|s| s.starts_with("test_")) {
             return true;
         }
 
-        // Python test classes: Test*
-        if symbol.contains("/Test") {
-            // More precise: check if it's a class definition
-            if symbol.contains("#") {
-                // This is a method, check if class name starts with Test
-                if symbol.split('#').next().is_some_and(|class_part| {
-                    class_part
-                        .split('/')
-                        .next_back()
-                        .is_some_and(|class_name| class_name.starts_with("Test"))
-                }) {
-                    return true;
-                }
-            } else if symbol
-                .split('/')
-                .next_back()
-                .is_some_and(|s| s.starts_with("Test"))
-            {
-                return true;
-            }
+        // Python test classes: Type symbol whose name segment starts with Test
+        if kind_suffix == "Type" && segments.last().is_some_and(|s| s.starts_with("Test")) {
+            return true;
+        }
+
+        // Python test methods: Function symbol with a segment starting with Test (method of Test* class)
+        if kind_suffix == "Function" && segments.iter().any(|s| s.starts_with("Test")) {
+            return true;
         }
 
         false
@@ -97,12 +91,13 @@ mod tests {
     #[test]
     fn test_detects_test_function() {
         let detector = PythonTestDetector;
+        // Semantic data format: module.name#Function
         assert!(detector.is_test_code(
-            "scip-python python myapp ... `module`/test_my_function().",
+            "module.test_my_function#Function",
             "src/module.py"
         ));
         assert!(!detector.is_test_code(
-            "scip-python python myapp ... `module`/my_function().",
+            "module.my_function#Function",
             "src/module.py"
         ));
     }
@@ -110,16 +105,17 @@ mod tests {
     #[test]
     fn test_detects_test_class() {
         let detector = PythonTestDetector;
+        // Semantic data format: module.Class#Type, module.Class.method#Function
         assert!(detector.is_test_code(
-            "scip-python python myapp ... `module`/TestMyClass#",
+            "module.TestMyClass#Type",
             "src/module.py"
         ));
         assert!(detector.is_test_code(
-            "scip-python python myapp ... `module`/TestMyClass#test_method().",
+            "module.TestMyClass.test_method#Function",
             "src/module.py"
         ));
         assert!(!detector.is_test_code(
-            "scip-python python myapp ... `module`/MyClass#",
+            "module.MyClass#Type",
             "src/module.py"
         ));
     }

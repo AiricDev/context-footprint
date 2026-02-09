@@ -2,13 +2,6 @@
 
 Minimal Python project for context-footprint E2E tests.
 
-## Regenerating the SCIP index
+## Semantic data for E2E tests
 
-If you have [scip-python](https://github.com/sourcegraph/scip-python) installed:
-
-```bash
-cd tests/fixtures/simple_python
-scip-python index . --output index.scip
-```
-
-Without `index.scip`, the E2E test that uses this fixture will skip (no failure).
+Place a `semantic_data.json` file here (produced by your LSP-based or other semantic data extractor). Without it, the E2E tests that use this fixture will skip (no failure).

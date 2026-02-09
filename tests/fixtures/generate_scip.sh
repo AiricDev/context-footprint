@@ -1,11 +1,7 @@
 #!/bin/bash
-# Generate SCIP index for simple_python fixture. Requires scip-python on PATH.
-set -e
-cd "$(dirname "$0")/simple_python"
-if command -v scip-python &>/dev/null; then
-  scip-python index . --output index.scip
-  echo "Generated index.scip"
-else
-  echo "scip-python not found; install it to generate index.scip"
-  exit 1
-fi
+# Generate semantic data for simple_python fixture.
+# Use your LSP-based or other extractor to produce semantic_data.json in simple_python/.
+# Example (if you have an extractor script):
+#   cd "$(dirname "$0")/simple_python"
+#   your-extractor --output semantic_data.json .
+echo "Place semantic_data.json in tests/fixtures/simple_python/ using your semantic data extractor (e.g. LSP-based)."

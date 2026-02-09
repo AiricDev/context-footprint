@@ -4,7 +4,7 @@ use crate::domain::type_registry::TypeRegistry;
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 
-/// Symbol identifier (SCIP symbol string)
+/// Symbol identifier (globally unique symbol string)
 pub type SymbolId = String;
 
 /// Context Graph - the core data structure

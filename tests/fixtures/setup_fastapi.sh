@@ -1,6 +1,6 @@
 #!/bin/bash
 # Setup FastAPI fixture for E2E testing.
-# Clones FastAPI repository and generates SCIP index.
+# Clones FastAPI repository. Generate semantic_data.json with your LSP-based extractor and place in fastapi/.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,19 +17,4 @@ else
     echo "FastAPI directory already exists at $FASTAPI_DIR"
 fi
 
-# Check if scip-python is available
-if ! command -v scip-python &>/dev/null; then
-    echo "ERROR: scip-python not found in PATH"
-    echo "Install it with: pip install scip-python"
-    exit 1
-fi
-
-# Generate SCIP index
-echo "Generating SCIP index for FastAPI..."
-cd "$FASTAPI_DIR"
-
-# Index the main fastapi package
-scip-python index . --project-name fastapi --output index.scip
-
-echo "SCIP index generated at $FASTAPI_DIR/index.scip"
-echo "E2E test test_fastapi_project is now ready to run"
+echo "Generate semantic_data.json in $FASTAPI_DIR using your LSP-based extractor, then run the E2E test."

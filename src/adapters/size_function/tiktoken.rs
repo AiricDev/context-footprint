@@ -117,7 +117,7 @@ fn count_tokens_approx(text: &str) -> u32 {
         .sum::<usize>() as u32
 }
 
-/// Convert a SCIP/LSP-style column offset to a safe UTF-8 byte index.
+/// Convert an LSP-style column offset to a safe UTF-8 byte index.
 ///
 /// Different indexers use different `Document.position_encoding` values (UTF-8 bytes,
 /// UTF-16 code units, UTF-32 code points). We currently don't thread that encoding

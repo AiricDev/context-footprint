@@ -70,7 +70,7 @@ pub fn is_abstract_factory(
     let Node::Function(f) = function_node else {
         return false;
     };
-    if f.return_types.is_empty() || !f.is_signature_complete() {
+    if f.return_types.is_empty() || !f.is_signature_complete_with_registry(type_registry) {
         return false;
     }
 
@@ -87,9 +87,13 @@ pub fn is_abstract_factory(
     false
 }
 
-fn call_in_source_decision(params: &PruningParams, source: &Node) -> PruningDecision {
+fn call_in_source_decision(
+    params: &PruningParams,
+    source: &Node,
+    type_registry: &TypeRegistry,
+) -> PruningDecision {
     if let Node::Function(f) = source
-        && f.is_signature_complete()
+        && f.is_signature_complete_with_registry(type_registry)
         && f.core.doc_score >= params.doc_threshold
     {
         return PruningDecision::Boundary;
@@ -109,7 +113,7 @@ pub fn evaluate(
     // 1. Dynamic expansion edges
     match edge_kind {
         EdgeKind::SharedStateWrite => return PruningDecision::Transparent,
-        EdgeKind::CallIn => return call_in_source_decision(params, source),
+        EdgeKind::CallIn => return call_in_source_decision(params, source, &graph.type_registry),
         _ => {}
     }
 
@@ -134,14 +138,16 @@ pub fn evaluate(
             }
         }
         Node::Function(f) => {
+            let sig_complete = f.is_signature_complete_with_registry(&graph.type_registry);
+
             // DI-wired function with complete signature: boundary (no doc requirement)
-            if f.is_di_wired && f.is_signature_complete() {
+            if f.is_di_wired && sig_complete {
                 return PruningDecision::Boundary;
             }
 
             // Interface/abstract methods: boundary if signature complete and documented
             if f.is_interface_method {
-                if f.is_signature_complete() && f.core.doc_score >= params.doc_threshold {
+                if sig_complete && f.core.doc_score >= params.doc_threshold {
                     return PruningDecision::Boundary;
                 }
                 // Undocumented interface method is a leaky abstraction
@@ -149,7 +155,7 @@ pub fn evaluate(
             }
 
             // Constructor with complete signature: boundary (no doc requirement)
-            if f.is_constructor && f.is_signature_complete() {
+            if f.is_constructor && sig_complete {
                 return PruningDecision::Boundary;
             }
 
@@ -157,7 +163,7 @@ pub fn evaluate(
                 return PruningDecision::Boundary;
             }
             if params.treat_typed_documented_function_as_boundary
-                && f.is_signature_complete()
+                && sig_complete
                 && f.core.doc_score >= params.doc_threshold
             {
                 return PruningDecision::Boundary;
@@ -199,6 +205,7 @@ mod tests {
     use crate::domain::edge::EdgeKind;
     use crate::domain::graph::ContextGraph;
     use crate::domain::node::{FunctionNode, Node, NodeCore, SourceSpan, Visibility};
+    use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeVarInfo};
 
     fn test_node(doc_score: f32) -> Node {
         let core = NodeCore::new(
@@ -353,5 +360,142 @@ mod tests {
                 mutability
             );
         }
+    }
+
+    fn make_func_with_typevar_param(param_type: &str, doc_score: f32) -> Node {
+        let core = NodeCore::new(
+            0,
+            "f".to_string(),
+            None,
+            10,
+            SourceSpan {
+                start_line: 0,
+                start_column: 0,
+                end_line: 1,
+                end_column: 5,
+            },
+            doc_score,
+            false,
+            "test.py".to_string(),
+        );
+        Node::Function(FunctionNode {
+            core,
+            parameters: vec![crate::domain::node::Parameter {
+                name: "x".to_string(),
+                param_type: Some(param_type.to_string()),
+            }],
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec!["int#".to_string()],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        })
+    }
+
+    fn register_typevar(
+        graph: &mut ContextGraph,
+        type_id: &str,
+        type_var_info: Option<TypeVarInfo>,
+    ) {
+        graph.type_registry.register(
+            type_id.to_string(),
+            TypeInfo {
+                definition: TypeDefAttribute {
+                    type_kind: crate::domain::type_registry::TypeKind::TypeVar,
+                    is_abstract: false,
+                    type_param_count: 0,
+                    type_var_info,
+                },
+                context_size: 0,
+                doc_score: 0.0,
+            },
+        );
+    }
+
+    #[test]
+    fn test_unbounded_typevar_makes_signature_incomplete() {
+        let mut graph = ContextGraph::new();
+        register_typevar(
+            &mut graph,
+            "T#",
+            Some(TypeVarInfo {
+                bound: None,
+                constraints: Vec::new(),
+            }),
+        );
+
+        let source = test_node(0.0);
+        let target = make_func_with_typevar_param("T#", 0.8);
+        let edge = EdgeKind::Call;
+        let params = PruningParams::academic(0.5);
+
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Transparent
+        ));
+    }
+
+    #[test]
+    fn test_bounded_typevar_keeps_signature_complete() {
+        let mut graph = ContextGraph::new();
+        register_typevar(
+            &mut graph,
+            "T#",
+            Some(TypeVarInfo {
+                bound: Some("Protocol#".to_string()),
+                constraints: Vec::new(),
+            }),
+        );
+
+        let source = test_node(0.0);
+        let target = make_func_with_typevar_param("T#", 0.8);
+        let edge = EdgeKind::Call;
+        let params = PruningParams::academic(0.5);
+
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Boundary
+        ));
+    }
+
+    #[test]
+    fn test_constrained_typevar_keeps_signature_complete() {
+        let mut graph = ContextGraph::new();
+        register_typevar(
+            &mut graph,
+            "T#",
+            Some(TypeVarInfo {
+                bound: None,
+                constraints: vec!["int#".to_string(), "str#".to_string()],
+            }),
+        );
+
+        let source = test_node(0.0);
+        let target = make_func_with_typevar_param("T#", 0.8);
+        let edge = EdgeKind::Call;
+        let params = PruningParams::academic(0.5);
+
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Boundary
+        ));
+    }
+
+    #[test]
+    fn test_typevar_no_info_makes_signature_incomplete() {
+        let mut graph = ContextGraph::new();
+        register_typevar(&mut graph, "T#", None);
+
+        let source = test_node(0.0);
+        let target = make_func_with_typevar_param("T#", 0.8);
+        let edge = EdgeKind::Call;
+        let params = PruningParams::academic(0.5);
+
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Transparent
+        ));
     }
 }

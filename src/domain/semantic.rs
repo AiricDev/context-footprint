@@ -555,6 +555,7 @@ pub enum TypeKind {
     TypeAlias,
     Union,        // Union types (e.g., `int | str`)
     Intersection, // Intersection types (e.g., `A & B`)
+    TypeVar,      // Generic type variable (e.g., T in List[T])
 }
 
 /// Field information

@@ -10,7 +10,9 @@ use crate::domain::semantic::{
     Mutability, ReferenceRole, SemanticData, SourceSpan as SemanticSpan, SymbolDefinition,
     SymbolDetails, SymbolId, SymbolKind, VariableScope as SemanticVarScope, Visibility,
 };
-use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeKind, TypeRegistry};
+use crate::domain::type_registry::{
+    TypeDefAttribute, TypeInfo, TypeKind, TypeRegistry, TypeVarInfo,
+};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -471,6 +473,7 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
     let mut type_kind = TypeKind::Class;
     let mut is_abstract = false;
     let mut type_param_count = 0;
+    let mut type_var_info = None;
 
     if let SymbolDetails::Type(type_details) = &def.details {
         type_kind = match type_details.kind {
@@ -479,6 +482,23 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
             crate::domain::semantic::TypeKind::Struct => TypeKind::Struct,
             crate::domain::semantic::TypeKind::Enum => TypeKind::Enum,
             crate::domain::semantic::TypeKind::TypeAlias => TypeKind::TypeAlias,
+            crate::domain::semantic::TypeKind::TypeVar => {
+                if let Some(tp) = type_details.type_params.first() {
+                    let bound = tp.bounds.first().cloned();
+                    let constraints = if tp.bounds.len() > 1 {
+                        tp.bounds.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    type_var_info = Some(TypeVarInfo { bound, constraints });
+                } else {
+                    type_var_info = Some(TypeVarInfo {
+                        bound: None,
+                        constraints: Vec::new(),
+                    });
+                }
+                TypeKind::TypeVar
+            }
             _ => TypeKind::Class,
         };
         is_abstract = type_details.is_abstract;
@@ -490,6 +510,7 @@ fn create_type_info(def: &SymbolDefinition, context_size: u32, doc_score: f32) -
             type_kind,
             is_abstract,
             type_param_count,
+            type_var_info,
         },
         context_size,
         doc_score,

@@ -16,6 +16,20 @@ pub enum TypeKind {
     FunctionType, // (int, int) -> bool
     Union,        // A | B
     Intersection, // A & B
+    TypeVar,      // T, U (generic type parameters)
+}
+
+/// Information about a type variable (generic type parameter)
+#[derive(Debug, Clone)]
+pub struct TypeVarInfo {
+    pub bound: Option<TypeId>,
+    pub constraints: Vec<TypeId>,
+}
+
+impl TypeVarInfo {
+    pub fn is_effectively_typed(&self) -> bool {
+        self.bound.is_some() || !self.constraints.is_empty()
+    }
 }
 
 /// Type definition attributes (stored in TypeRegistry, not in graph nodes)
@@ -24,7 +38,7 @@ pub struct TypeDefAttribute {
     pub type_kind: TypeKind,
     pub is_abstract: bool,
     pub type_param_count: u32,
-    // We can add more type-specific metadata here (e.g., generic constraints)
+    pub type_var_info: Option<TypeVarInfo>,
 }
 
 /// Type identifier (symbol string)
@@ -39,6 +53,12 @@ pub struct TypeInfo {
     pub context_size: u32,
     /// Documentation score of the type
     pub doc_score: f32,
+}
+
+impl TypeInfo {
+    pub fn is_type_var(&self) -> bool {
+        self.definition.type_kind == TypeKind::TypeVar
+    }
 }
 
 /// Type Registry - stores all type definitions
@@ -99,6 +119,7 @@ mod tests {
                 type_kind: TypeKind::Class,
                 is_abstract: false,
                 type_param_count: 0,
+                type_var_info: None,
             },
             context_size: 100,
             doc_score: 0.8,

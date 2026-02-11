@@ -1,3 +1,5 @@
+use crate::domain::type_registry::TypeRegistry;
+
 /// Unique identifier for a node in the graph
 pub type NodeId = u32;
 
@@ -99,6 +101,15 @@ impl FunctionNode {
             .count()
     }
 
+    /// Count parameters that are effectively typed, considering TypeVar bounds.
+    /// A parameter typed with an unbounded TypeVar is NOT effectively typed.
+    pub fn effectively_typed_param_count(&self, type_registry: &TypeRegistry) -> usize {
+        self.parameters
+            .iter()
+            .filter(|p| is_param_effectively_typed(p, type_registry))
+            .count()
+    }
+
     /// Total parameter count
     pub fn param_count(&self) -> usize {
         self.parameters.len()
@@ -109,9 +120,17 @@ impl FunctionNode {
         !self.return_types.is_empty()
     }
 
-    /// Check if function signature is complete (all params typed + has return type)
+    /// Check if function signature is complete (all params typed + has return type).
+    /// This is the legacy check without TypeVar awareness.
     pub fn is_signature_complete(&self) -> bool {
         self.typed_param_count() == self.param_count() && self.has_return_type()
+    }
+
+    /// Check if function signature is complete with TypeVar awareness.
+    /// Parameters typed with unbounded TypeVars are NOT considered effectively typed.
+    pub fn is_signature_complete_with_registry(&self, type_registry: &TypeRegistry) -> bool {
+        self.effectively_typed_param_count(type_registry) == self.param_count()
+            && self.has_return_type()
     }
 
     /// Get return type IDs
@@ -127,6 +146,27 @@ pub struct Parameter {
     /// Type ID (symbol) of the parameter type, stored in TypeRegistry
     pub param_type: Option<String>,
     // We could add default value presence, etc.
+}
+
+/// Check if a parameter is effectively typed, considering TypeVar bounds.
+/// A param typed with an unbounded TypeVar (no bound, no constraints) is NOT effectively typed.
+pub fn is_param_effectively_typed(param: &Parameter, type_registry: &TypeRegistry) -> bool {
+    let Some(ref type_id) = param.param_type else {
+        return false;
+    };
+
+    let Some(type_info) = type_registry.get(type_id) else {
+        return true;
+    };
+
+    if type_info.is_type_var() {
+        match &type_info.definition.type_var_info {
+            Some(tv) => tv.is_effectively_typed(),
+            None => false,
+        }
+    } else {
+        true
+    }
 }
 
 /// Mutability

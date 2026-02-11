@@ -820,17 +820,19 @@ export class PythonExtractor extends ExtractorBase {
                     if (initId) enclosingSymbolId = initId;
                   }
 
-                  this.references.push({
-                    target_symbol: actualTarget,
-                    enclosing_symbol: enclosingSymbolId,
-                    role,
-                    receiver,
-                    location: {
-                      file_path: relativePath(this.options.projectRoot, pos.filePath),
-                      line: pos.range.start.line,
-                      column: pos.range.start.character
-                    }
-                  });
+                  if (actualTarget !== enclosingSymbolId) {
+                    this.references.push({
+                      target_symbol: actualTarget,
+                      enclosing_symbol: enclosingSymbolId,
+                      role,
+                      receiver,
+                      location: {
+                        file_path: relativePath(this.options.projectRoot, pos.filePath),
+                        line: pos.range.start.line,
+                        column: pos.range.start.character
+                      }
+                    });
+                  }
                 }
               } else {
                 // Definition not in our symbol index: external (e.g. functools.wraps) or at import line
@@ -889,20 +891,22 @@ export class PythonExtractor extends ExtractorBase {
                               isDecoratorForNestedDef(lines, pos.range.start.line)
                             )
                           ) {
-                            this.references.push({
-                              target_symbol: projectSymbolId,
-                              enclosing_symbol: enclosing.symbolId,
-                              role,
-                              receiver: undefined,
-                              location: {
-                                file_path: relativePath(
-                                  this.options.projectRoot,
-                                  pos.filePath
-                                ),
-                                line: pos.range.start.line,
-                                column: pos.range.start.character
-                              }
-                            });
+                            if (projectSymbolId !== enclosing.symbolId) {
+                              this.references.push({
+                                target_symbol: projectSymbolId,
+                                enclosing_symbol: enclosing.symbolId,
+                                role,
+                                receiver: undefined,
+                                location: {
+                                  file_path: relativePath(
+                                    this.options.projectRoot,
+                                    pos.filePath
+                                  ),
+                                  line: pos.range.start.line,
+                                  column: pos.range.start.character
+                                }
+                              });
+                            }
                           }
                         }
                       }
@@ -939,17 +943,19 @@ export class PythonExtractor extends ExtractorBase {
                   role !== null &&
                   !(role === ReferenceRole.Decorate && isDecoratorForNestedDef(lines, pos.range.start.line))
                 ) {
-                  this.references.push({
-                    target_symbol: resolvedTarget,
-                    enclosing_symbol: enclosing.symbolId,
-                    role,
-                    receiver,
-                    location: {
-                      file_path: relativePath(this.options.projectRoot, pos.filePath),
-                      line: pos.range.start.line,
-                      column: pos.range.start.character
-                    }
-                  });
+                  if (resolvedTarget !== enclosing.symbolId) {
+                    this.references.push({
+                      target_symbol: resolvedTarget,
+                      enclosing_symbol: enclosing.symbolId,
+                      role,
+                      receiver,
+                      location: {
+                        file_path: relativePath(this.options.projectRoot, pos.filePath),
+                        line: pos.range.start.line,
+                        column: pos.range.start.character
+                      }
+                    });
+                  }
                 }
               } else if (enclosing) {
                 // Fallback 2: resolve to a project symbol via imports
@@ -979,17 +985,19 @@ export class PythonExtractor extends ExtractorBase {
                           isDecoratorForNestedDef(lines, pos.range.start.line)
                         )
                       ) {
-                        this.references.push({
-                          target_symbol: projectSymbolId,
-                          enclosing_symbol: enclosing.symbolId,
-                          role,
-                          receiver: undefined,
-                          location: {
-                            file_path: relativePath(this.options.projectRoot, pos.filePath),
-                            line: pos.range.start.line,
-                            column: pos.range.start.character
-                          }
-                        });
+                        if (projectSymbolId !== enclosing.symbolId) {
+                          this.references.push({
+                            target_symbol: projectSymbolId,
+                            enclosing_symbol: enclosing.symbolId,
+                            role,
+                            receiver: undefined,
+                            location: {
+                              file_path: relativePath(this.options.projectRoot, pos.filePath),
+                              line: pos.range.start.line,
+                              column: pos.range.start.character
+                            }
+                          });
+                        }
                       }
                     }
                   }

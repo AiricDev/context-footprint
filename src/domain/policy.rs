@@ -154,11 +154,6 @@ pub fn evaluate(
                 return PruningDecision::Transparent;
             }
 
-            // Constructor with complete signature: boundary (no doc requirement)
-            if f.is_constructor && sig_complete {
-                return PruningDecision::Boundary;
-            }
-
             if is_abstract_factory(target, &graph.type_registry, params.doc_threshold) {
                 return PruningDecision::Boundary;
             }

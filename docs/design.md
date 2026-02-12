@@ -207,7 +207,7 @@ The implementation uses a directed graph of **nodes** (functions and variables o
 
 **2. Node Types** (only Function and Variable are nodes):
 
-- **Function**: `parameters` (with `param_type`), `return_types`, `is_interface_method`, `is_constructor`
+- **Function**: `parameters` (with `param_type`), `return_types`, `is_interface_method`, `is_constructor` (used for `init_map` resolution, not for pruning)
     - Key method: `is_signature_complete_with_registry(type_registry)` = all params *effectively* typed + has return type. A parameter typed with an unbounded TypeVar is NOT effectively typed.
 - **Variable**: `var_type`, `mutability` (Const/Immutable/Mutable), `variable_kind` (Global/ClassField/Local)
 - **NodeCore** (shared): `context_size`, `doc_score`, `is_external`, `span`, `file_path`
@@ -689,10 +689,6 @@ function evaluate(params, source, target, edge_kind, graph):
                target.core.doc_score >= params.doc_threshold:
                 return Boundary
             return Transparent  // Undocumented interface = leaky abstraction
-
-        // Constructor with complete signature
-        if target.is_constructor AND target.is_signature_complete():
-            return Boundary
 
         // Abstract factory pattern
         if is_abstract_factory(target, graph.type_registry, params.doc_threshold):

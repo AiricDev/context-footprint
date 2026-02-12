@@ -11,7 +11,8 @@ Let a codebase be represented as a directed graph $G = (V, E)$, where:
     - **Control flow**: `Call` (function → function)
     - **Data flow**: `Read`, `Write` (function → variable)
     - **Dynamic expansion (reverse deps)**: `SharedStateWrite` (reader → writer of shared mutable state), `CallIn` (callee → caller for underspecified functions)
-    - **Annotations**: `Annotates { is_behavioral }` (decorated → decorator)
+    - **Interface implementation**: `ImplementedBy` (interface method → concrete implementation method)
+    - **Annotations**: `Annotates` (decorated → decorator)
 
 Type usage (param type, return type, field type, variable type) and type hierarchy (inherits, implements) are represented via node attributes and the Type Registry, not as graph edges.
 
@@ -123,6 +124,18 @@ If $u$ has incomplete specification (missing type annotations, loosely typed par
 - **Traversal Rule**: Call-in edges traverse only when source $u$ (the callee) lacks complete specification. If $u$ has full type annotations and documentation, call-in edges are boundaries.
     - *Result*: For under-specified functions, context expands to all callers.
 
+### **ImplementedBy Edges (The Interface Implementation Gap)**
+
+When an interface method has `is_interface_method == true` but fails the boundary check (insufficient documentation or incomplete signature), the pruning predicate returns **Transparent** — traversal should continue. However, interface method nodes typically have **no outgoing edges** (they are signature-only, with no function body). This creates a dead end that silently under-counts CF.
+
+To close this gap, we introduce `ImplementedBy` edges that connect interface methods to their concrete implementations:
+
+- **Edge Construction**: For each interface method $m$ on interface type $I$, find all concrete types that implement $I$ (via `inherits` or `implements` in type hierarchy). For each concrete type $C$, if $C$ has a method with the same name as $m$, add edge `m → C.m` to the graph.
+- **Pruning Rule**: `ImplementedBy` edges require no special case — the target (concrete implementation) is evaluated using standard function pruning rules. If the implementation is well-documented, it becomes a Boundary; if poorly documented, traversal continues into its body.
+- **Key Property**: `ImplementedBy` edges are **only reachable when the interface method is Transparent**. If the interface method is a Boundary (well-documented), traversal stops there and `ImplementedBy` edges are never followed.
+
+*Result*: An undocumented interface with $N$ implementations produces a high CF, correctly signaling a "leaky" abstraction. Adding documentation to the interface method immediately stops the expansion — good documentation creates context firewalls.
+
 ## **5. Codebase-Level Characterization**
 
 While $CF(u)$ quantifies the context cost of a single code unit, reasoning about architectural quality at the **codebase level** requires examining the distribution of CF values across all units.
@@ -171,6 +184,7 @@ This phase consumes semantic data (e.g. from JSON) to build the in-memory `Conte
 1. **Pass 1: Node Allocation and Type Registry**
     - Iterate over documents and definitions.
     - **Node vs Type**: Only **functions** and **variables** become graph nodes. **Type definitions** (classes, interfaces, structs, enums, etc.) are registered in `TypeRegistry` with attributes (`type_kind`, `is_abstract`, `type_param_count`, `context_size`, `doc_score`).
+    - **Implementor registration**: For each type definition, register implementor relationships from `inherits` and `implements` into `TypeRegistry.implementors` (reverse lookup: interface_type → [concrete_types]).
     - **Node selection**: Functions (including methods, constructors) and variables (global, class field, or local) are converted to nodes; parameters and locals resolve to their nearest enclosing node for edge wiring.
     - **Metrics**: Read source spans to compute `context_size` via `SizeFunction`; for interface/abstract methods, only the signature span is used.
     - **Metadata**: Compute `doc_score` via `DocumentationScorer`.
@@ -178,10 +192,11 @@ This phase consumes semantic data (e.g. from JSON) to build the in-memory `Conte
     - Iterate over references; resolve source/target to nearest node symbol via an enclosing map.
     - **Static edges**: Map reference roles to `Call`, `Read`, `Write`. Collect writers per variable and callers per callee for Pass 3.
     - **Pass 2.5**: Fill type references in nodes from definition details (e.g. function `return_types`, `parameters[].param_type`, variable `var_type`) using `TypeRegistry`.
-3. **Pass 3: Dynamic Expansion (Reverse Edges)**
+3. **Pass 3: Dynamic Expansion (Reverse Edges) and Implementation Edges**
     - Add edges directly to the graph (no persistent side indices):
         - **SharedStateWrite**: For each reader of a **mutable** variable, add edge reader → each writer of that variable.
         - **CallIn**: For each **underspecified** callee (incomplete signature), add edge callee → each caller.
+        - **ImplementedBy**: For each interface method, look up the interface type's implementors in `TypeRegistry.implementors`, then match by method name to find concrete implementations and add edge interface_method → concrete_method.
 
 **Phase 2: Context Analysis (The Solver)**
 
@@ -216,12 +231,14 @@ The implementation uses a directed graph of **nodes** (functions and variables o
 
 - Stores Class, Interface, Struct, Enum, TypeAlias, and **TypeVar** definitions
 - Attributes: `type_kind`, `is_abstract`, `type_param_count`, `type_var_info` (for TypeVar: bound + constraints), `context_size`, `doc_score`
-- Queried during pruning (e.g., abstract factory detection, TypeVar-aware signature completeness)
+- **Implementors map**: `implementors: HashMap<TypeId, Vec<TypeId>>` — reverse lookup from interface type to concrete implementing types, populated during Pass 1 from `inherits`/`implements` in type hierarchy
+- Queried during pruning (e.g., abstract factory detection, TypeVar-aware signature completeness) and during Pass 3 for `ImplementedBy` edge construction
 
 **4. EdgeKind**:
 
 - Forward: `Call`, `Read`, `Write`
 - Reverse (dynamic expansion): `SharedStateWrite`, `CallIn`
+- Interface implementation: `ImplementedBy` (interface method → concrete implementation method)
 - Annotation: `Annotates`
 - Note: Type usage (param/return types) stored as node attributes, not edges
 
@@ -356,7 +373,7 @@ enum EdgeKind {
     SharedStateWrite,   // Reader(Function) → Writer(Function) of shared mutable state
     CallIn,             // Callee(Function) → Caller(Function) for underspecified functions
 
-    Annotates { is_behavioral: bool },  // Decorated → Decorator
+    Annotates,  // Decorated → Decorator
 }
 ```
 
@@ -431,9 +448,15 @@ function build_graph(semantic_data, source_reader, size_function, doc_scorer):
             doc_score = doc_scorer.score(definition, definition.documentation)
 
             if definition.kind == Type:
-                // Register in TypeRegistry (not a graph node)
-                type_info = create_type_info(definition, context_size, doc_score)
-                type_registry.register(definition.symbol_id, type_info)
+                // Register in TypeRegistry (not a graph node)
+                type_info = create_type_info(definition, context_size, doc_score)
+                type_registry.register(definition.symbol_id, type_info)
+
+                // Register implementor relationships for ImplementedBy edges
+                for interface_id in definition.details.implements:
+                    type_registry.register_implementor(interface_id, definition.symbol_id)
+                for base_id in definition.details.inherits:
+                    type_registry.register_implementor(base_id, definition.symbol_id)
 
             else if definition.kind in [Function, Variable]:
                 // Create graph node
@@ -521,21 +544,40 @@ function build_graph(semantic_data, source_reader, size_function, doc_scorer):
                 if definition.details.var_type in type_registry:
                     node.var_type = definition.details.var_type
 
-    // PASS 3: Dynamic Expansion Edges
+    // PASS 3: Dynamic Expansion Edges and Implementation Edges
     // 1. SharedStateWrite: reader -> writers of mutable variables
     for (reader_idx, var_symbol) in readers:
-        if is_variable_mutable(var_symbol, semantic_data):
-            for writer_idx in state_writers[var_symbol]:
-                if reader_idx != writer_idx:
-                    graph.add_edge(reader_idx, writer_idx, EdgeKind.SharedStateWrite)
+        if is_variable_mutable(var_symbol, semantic_data):
+            for writer_idx in state_writers[var_symbol]:
+                if reader_idx != writer_idx:
+                    graph.add_edge(reader_idx, writer_idx, EdgeKind.SharedStateWrite)
 
     // 2. CallIn: underspecified callee -> callers
     for callee_symbol in graph.all_node_symbols():
-        callee_idx = graph.get_node_index(callee_symbol)
-        if is_function_underspecified(callee_symbol, graph):
-            for caller_idx in callers[callee_symbol]:
-                if callee_idx != caller_idx:
-                    graph.add_edge(callee_idx, caller_idx, EdgeKind.CallIn)
+        callee_idx = graph.get_node_index(callee_symbol)
+        if is_function_underspecified(callee_symbol, graph):
+            for caller_idx in callers[callee_symbol]:
+                if callee_idx != caller_idx:
+                    graph.add_edge(callee_idx, caller_idx, EdgeKind.CallIn)
+
+    // 3. ImplementedBy: interface method -> concrete implementation methods
+    // Build lookup: (enclosing_type, method_name) -> [node_indices]
+    method_by_scope = {}
+    for each node in graph.all_nodes():
+        if node is FunctionNode AND node.core.scope is not None:
+            key = (node.core.scope, node.core.name)
+            method_by_scope[key].append(node.index)
+
+    // For each interface method, find concrete implementations
+    for each node in graph.all_nodes():
+        if node is FunctionNode AND node.is_interface_method AND node.core.scope is not None:
+            interface_type_id = node.core.scope
+            concrete_types = type_registry.get_implementors(interface_type_id)
+            for concrete_type_id in concrete_types:
+                key = (concrete_type_id, node.core.name)
+                for concrete_idx in method_by_scope.get(key, []):
+                    if node.index != concrete_idx:
+                        graph.add_edge(node.index, concrete_idx, EdgeKind.ImplementedBy)
 
     graph.type_registry = type_registry
     return graph
@@ -729,10 +771,11 @@ function is_abstract_factory(function_node, type_registry, doc_threshold):
 - Type instantiation references (e.g., `MyClass()`) map to `__init__` method via `init_map`
 - Fallback mechanism: try direct target, then try constructor
 
-**Dynamic Expansion Timing**:
+**Dynamic Expansion and Implementation Edge Timing**:
 
 - `SharedStateWrite` edges added only for mutable variables (checked via semantic data)
 - `CallIn` edges added only for underspecified functions (checked via `is_signature_complete()`)
+- `ImplementedBy` edges added for all interface methods with matching concrete implementations (traversal-time pruning determines whether they are followed)
 
 **Traversal Ordering**:
 

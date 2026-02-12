@@ -16,6 +16,9 @@ pub enum EdgeKind {
     SharedStateWrite, // Reader(Function) → Writer(Function) of shared mutable state
     CallIn,           // Callee(Function) → Caller(Function) for underspecified functions
 
+    // ============ Interface Implementation ============
+    ImplementedBy, // Interface method → Concrete implementation method
+
     // ============ Annotations & Decorators ============
     /// Decorated → Decorator direction (understanding decorated requires decorator)
     Annotates,

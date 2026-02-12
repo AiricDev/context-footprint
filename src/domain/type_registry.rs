@@ -65,6 +65,7 @@ impl TypeInfo {
 #[derive(Debug, Default)]
 pub struct TypeRegistry {
     types: HashMap<TypeId, TypeInfo>,
+    implementors: HashMap<TypeId, Vec<TypeId>>,
 }
 
 impl TypeRegistry {
@@ -106,6 +107,17 @@ impl TypeRegistry {
     /// Check if registry is empty
     pub fn is_empty(&self) -> bool {
         self.types.is_empty()
+    }
+
+    pub fn register_implementor(&mut self, interface_id: TypeId, concrete_id: TypeId) {
+        self.implementors
+            .entry(interface_id)
+            .or_default()
+            .push(concrete_id);
+    }
+
+    pub fn get_implementors(&self, interface_id: &str) -> Option<&Vec<TypeId>> {
+        self.implementors.get(interface_id)
     }
 }
 

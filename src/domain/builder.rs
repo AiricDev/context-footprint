@@ -105,6 +105,20 @@ impl GraphBuilder {
                         // Register in TypeRegistry
                         let type_info = create_type_info(def, context_size, doc_score);
                         type_registry.register(def.symbol_id.clone(), type_info);
+
+                        // Register implementor relationships for ImplementedBy edges
+                        if let SymbolDetails::Type(type_details) = &def.details {
+                            for interface_id in &type_details.implements {
+                                type_registry.register_implementor(
+                                    interface_id.clone(),
+                                    def.symbol_id.clone(),
+                                );
+                            }
+                            for base_id in &type_details.inherits {
+                                type_registry
+                                    .register_implementor(base_id.clone(), def.symbol_id.clone());
+                            }
+                        }
                     }
                     SymbolKind::Function | SymbolKind::Variable => {
                         // Create graph node
@@ -289,6 +303,54 @@ impl GraphBuilder {
                     for &caller_idx in caller_indices {
                         if callee_idx != caller_idx {
                             graph.add_edge(callee_idx, caller_idx, EdgeKind::CallIn);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. ImplementedBy edges: Interface method → Concrete implementation method
+        // Build a lookup: (enclosing_type, method_name) → node_idx for all methods
+        let mut method_by_scope: HashMap<(SymbolId, String), Vec<petgraph::graph::NodeIndex>> =
+            HashMap::new();
+        for &node_idx in graph.symbol_to_node.values() {
+            let node = graph.node(node_idx);
+            if let Node::Function(f) = node
+                && let Some(ref scope) = f.core.scope
+            {
+                method_by_scope
+                    .entry((scope.clone(), f.core.name.clone()))
+                    .or_default()
+                    .push(node_idx);
+            }
+        }
+
+        // For each interface method, find concrete implementations via implementors map
+        let interface_methods: Vec<_> = graph
+            .symbol_to_node
+            .values()
+            .filter_map(|&idx| {
+                let node = graph.node(idx);
+                if let Node::Function(f) = node
+                    && f.is_interface_method
+                    && let Some(ref scope) = f.core.scope
+                {
+                    return Some((idx, scope.clone(), f.core.name.clone()));
+                }
+                None
+            })
+            .collect();
+
+        for (iface_idx, interface_type_id, method_name) in &interface_methods {
+            if let Some(concrete_types) = type_registry.get_implementors(interface_type_id) {
+                let concrete_types = concrete_types.clone();
+                for concrete_type_id in &concrete_types {
+                    let key = (concrete_type_id.clone(), method_name.clone());
+                    if let Some(concrete_indices) = method_by_scope.get(&key) {
+                        for &concrete_idx in concrete_indices {
+                            if *iface_idx != concrete_idx {
+                                graph.add_edge(*iface_idx, concrete_idx, EdgeKind::ImplementedBy);
+                            }
                         }
                     }
                 }

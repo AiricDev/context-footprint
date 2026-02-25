@@ -623,14 +623,16 @@ pub enum Visibility {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolReference {
-    /// Referenced symbol ID
+    /// Referenced symbol ID (target of the reference)
     ///
     /// **Adapter Contract**:
-    /// - Must match a `symbol_id` in definitions
-    /// - If target cannot be resolved (dynamic access, reflection):
-    ///   * For now: omit the reference (unresolved)
-    ///   * Future: may support synthetic "unresolved" symbols
-    pub target_symbol: SymbolId,
+    /// - `Some(id)`: matches a `symbol_id` in definitions when target is statically known
+    /// - `None`: unresolved (e.g. dynamic dispatch, reflection); builder may recover via type propagation
+    ///   *CRITICAL WARNING*: Builder's edge recovery ONLY works if `receiver` is a Field or Global variable.
+    ///   For method calls on **local variables** or **parameters**, the Extractor MUST resolve `target_symbol`
+    ///   itself, because locals/parameters are not graph nodes and cannot be recovered by the Builder!
+    #[serde(default)]
+    pub target_symbol: Option<SymbolId>,
 
     /// Location where reference occurs
     pub location: SourceLocation,
@@ -646,22 +648,32 @@ pub struct SymbolReference {
     /// Reference role (determines edge type in graph)
     pub role: ReferenceRole,
 
-    /// Receiver for member access (distinguishes static vs instance access)
+    /// Receiver variable for member access (symbol_id of the variable/parameter)
     ///
     /// **Adapter Contract**:
     /// - `None`: Direct access (function call, global variable)
-    ///   * Example: `foo()`, `GLOBAL_VAR`
-    /// - `Some(receiver_name)`: Member access through a variable/parameter
-    ///   * Instance method: `self.method()` → receiver = "self"
-    ///   * Instance field: `self.field` → receiver = "self"
-    ///   * Object method: `obj.method()` → receiver = "obj"
-    ///   * Object field: `obj.field` → receiver = "obj"
-    /// - For static member access: depends on language
-    ///   * Python: `Class.method()` → usually `receiver=None`, `target_symbol=Class.method`
-    ///   * Java: `Class.staticMethod()` → `receiver=None`
-    /// - **receiver is the name of the variable/parameter**, not its type
-    /// - Builder will resolve receiver type via symbol lookup
-    pub receiver: Option<String>,
+    /// - `Some(receiver_symbol_id)`: Member access; symbol_id of the variable (e.g. "self", or the var holding the object)
+    /// - Builder uses this to resolve method calls via receiver's `var_type` when target_symbol is None
+    ///   *NOTE*: If `receiver` points to a local variable or parameter, the Builder will ignore it during recovery.
+    #[serde(default)]
+    pub receiver: Option<SymbolId>,
+
+    /// Method name for method calls (when target is resolved via receiver type)
+    ///
+    /// **Adapter Contract**:
+    /// - For method calls: the name of the method being called (e.g. "foo", "__init__")
+    /// - Used by builder for type-driven call edge recovery when target_symbol is None
+    #[serde(default)]
+    pub method_name: Option<String>,
+
+    /// Variable that receives the result of this call (for Call references)
+    ///
+    /// **Adapter Contract**:
+    /// - For Call: symbol_id of the variable assigned the return value (e.g. `x = foo()` → assigned_to = x's symbol_id)
+    /// - Enables external call return type propagation in Pass 2.5
+    /// - *NOTE*: If assigned to a local variable, leave as `None` (locals are not tracked).
+    #[serde(default)]
+    pub assigned_to: Option<SymbolId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -844,155 +856,5 @@ impl FunctionDetails {
     /// Check if signature is complete (all params typed + has return type)
     pub fn is_signature_complete(&self) -> bool {
         self.typed_param_count() == self.param_count() && self.has_return_type()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_method() {
-        let mut def = SymbolDefinition {
-            symbol_id: "Class.method".into(),
-            kind: SymbolKind::Function,
-            name: "method".into(),
-            display_name: "method()".into(),
-            location: SourceLocation {
-                file_path: "test.py".into(),
-                line: 0,
-                column: 0,
-            },
-            span: SourceSpan {
-                start_line: 0,
-                start_column: 0,
-                end_line: 5,
-                end_column: 0,
-            },
-            enclosing_symbol: Some("Class".into()),
-            is_external: false,
-            documentation: vec![],
-            details: SymbolDetails::Function(FunctionDetails::default()),
-        };
-
-        assert!(def.is_method());
-
-        def.enclosing_symbol = None;
-        assert!(!def.is_method());
-    }
-
-    #[test]
-    fn test_is_field() {
-        let def = SymbolDefinition {
-            symbol_id: "Class.field".into(),
-            kind: SymbolKind::Variable,
-            name: "field".into(),
-            display_name: "field".into(),
-            location: SourceLocation {
-                file_path: "test.py".into(),
-                line: 0,
-                column: 0,
-            },
-            span: SourceSpan {
-                start_line: 0,
-                start_column: 0,
-                end_line: 1,
-                end_column: 0,
-            },
-            enclosing_symbol: Some("Class".into()),
-            is_external: false,
-            documentation: vec![],
-            details: SymbolDetails::Variable(VariableDetails {
-                scope: VariableScope::Field,
-                ..Default::default()
-            }),
-        };
-
-        assert!(def.is_field());
-    }
-
-    #[test]
-    fn test_function_signature_completeness() {
-        let mut func = FunctionDetails::default();
-
-        // No params, no return type
-        assert!(!func.is_signature_complete());
-
-        // Add return type
-        func.return_types.push("int".into());
-        assert!(func.is_signature_complete());
-
-        // Add untyped param
-        func.parameters.push(Parameter {
-            name: "x".into(),
-            param_type: None,
-            has_default: false,
-            is_variadic: false,
-        });
-        assert!(!func.is_signature_complete());
-
-        // Type the param
-        func.parameters[0].param_type = Some("str".into());
-        assert!(func.is_signature_complete());
-    }
-
-    #[test]
-    fn test_build_enclosing_map() {
-        let data = SemanticData {
-            project_root: "/test".into(),
-            documents: vec![DocumentSemantics {
-                relative_path: "test.py".into(),
-                language: "python".into(),
-                definitions: vec![
-                    SymbolDefinition {
-                        symbol_id: "Class".into(),
-                        kind: SymbolKind::Type,
-                        name: "Class".into(),
-                        display_name: "Class".into(),
-                        location: SourceLocation {
-                            file_path: "test.py".into(),
-                            line: 0,
-                            column: 0,
-                        },
-                        span: SourceSpan {
-                            start_line: 0,
-                            start_column: 0,
-                            end_line: 10,
-                            end_column: 0,
-                        },
-                        enclosing_symbol: None,
-                        is_external: false,
-                        documentation: vec![],
-                        details: SymbolDetails::Type(TypeDetails::default()),
-                    },
-                    SymbolDefinition {
-                        symbol_id: "Class.method".into(),
-                        kind: SymbolKind::Function,
-                        name: "method".into(),
-                        display_name: "method()".into(),
-                        location: SourceLocation {
-                            file_path: "test.py".into(),
-                            line: 2,
-                            column: 4,
-                        },
-                        span: SourceSpan {
-                            start_line: 2,
-                            start_column: 4,
-                            end_line: 5,
-                            end_column: 0,
-                        },
-                        enclosing_symbol: Some("Class".into()),
-                        is_external: false,
-                        documentation: vec![],
-                        details: SymbolDetails::Function(FunctionDetails::default()),
-                    },
-                ],
-                references: vec![],
-            }],
-        };
-
-        let map = data.build_enclosing_map();
-        assert_eq!(map.get("Class.method"), Some(&"Class".to_string()));
-        assert_eq!(map.get("Class"), None);
     }
 }

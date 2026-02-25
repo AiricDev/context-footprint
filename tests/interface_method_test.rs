@@ -373,7 +373,7 @@ fn test_call_to_interface_method_creates_edge() {
             references: vec![
                 // service() calls DataRepo.save()
                 SymbolReference {
-                    target_symbol: method_id.to_string(),
+                    target_symbol: Some(method_id.to_string()),
                     location: SourceLocation {
                         file_path: "test.py".to_string(),
                         line: 5,
@@ -382,6 +382,8 @@ fn test_call_to_interface_method_creates_edge() {
                     enclosing_symbol: caller_id.to_string(),
                     role: ReferenceRole::Call,
                     receiver: None,
+                    method_name: None,
+                    assigned_to: None,
                 },
             ],
         }],

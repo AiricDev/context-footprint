@@ -135,31 +135,37 @@ pub fn method_def(
 
 pub fn call_reference(target: &str, enclosing: &str) -> SymbolReference {
     SymbolReference {
-        target_symbol: target.to_string(),
+        target_symbol: Some(target.to_string()),
         location: default_location(),
         enclosing_symbol: enclosing.to_string(),
         role: ReferenceRole::Call,
         receiver: None,
+        method_name: None,
+        assigned_to: None,
     }
 }
 
 pub fn read_reference(target: &str, enclosing: &str) -> SymbolReference {
     SymbolReference {
-        target_symbol: target.to_string(),
+        target_symbol: Some(target.to_string()),
         location: default_location(),
         enclosing_symbol: enclosing.to_string(),
         role: ReferenceRole::Read,
         receiver: None,
+        method_name: None,
+        assigned_to: None,
     }
 }
 
 pub fn write_reference(target: &str, enclosing: &str) -> SymbolReference {
     SymbolReference {
-        target_symbol: target.to_string(),
+        target_symbol: Some(target.to_string()),
         location: default_location(),
         enclosing_symbol: enclosing.to_string(),
         role: ReferenceRole::Write,
         receiver: None,
+        method_name: None,
+        assigned_to: None,
     }
 }
 

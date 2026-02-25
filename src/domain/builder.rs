@@ -8,12 +8,14 @@ use crate::domain::policy::{DocumentationScorer, NodeInfo, NodeType, SizeFunctio
 use crate::domain::ports::SourceReader;
 use crate::domain::semantic::{
     Mutability, ReferenceRole, SemanticData, SourceSpan as SemanticSpan, SymbolDefinition,
-    SymbolDetails, SymbolId, SymbolKind, VariableScope as SemanticVarScope, Visibility,
+    SymbolDetails, SymbolId, SymbolKind, SymbolReference, VariableScope as SemanticVarScope,
+    Visibility,
 };
 use crate::domain::type_registry::{
     TypeDefAttribute, TypeInfo, TypeKind, TypeRegistry, TypeVarInfo,
 };
 use anyhow::Result;
+use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -158,21 +160,23 @@ impl GraphBuilder {
         }
 
         // Pass 2: Edge Wiring - Process references to create edges (forward edges only)
+        // Collect unresolved calls (target unknown) and call_assignments (for type propagation)
+        let mut unresolved_calls: Vec<(SymbolReference, NodeIndex)> = Vec::new();
+        let mut call_assignments: HashMap<SymbolId, (NodeIndex, Option<SymbolId>)> = HashMap::new();
+
         for document in &semantic_data.documents {
             for reference in &document.references {
-                // Resolve source symbol to nearest node
                 let source_node_sym = Self::resolve_to_node_symbol(
                     &reference.enclosing_symbol,
                     &node_symbols,
                     &enclosing_map,
                 );
 
-                // Resolve target symbol to nearest node or type
-                let target_node_sym = Self::resolve_to_node_symbol(
-                    &reference.target_symbol,
-                    &node_symbols,
-                    &enclosing_map,
-                );
+                // Resolve target only when target_symbol is Some
+                let target_node_sym = reference
+                    .target_symbol
+                    .as_ref()
+                    .and_then(|t| Self::resolve_to_node_symbol(t, &node_symbols, &enclosing_map));
 
                 if let Some(source_sym) = source_node_sym {
                     let source_idx = match graph.get_node_by_symbol(&source_sym) {
@@ -180,28 +184,35 @@ impl GraphBuilder {
                         None => continue,
                     };
 
-                    // Handle Call edges
                     if reference.role == ReferenceRole::Call {
                         let resolved_target = target_node_sym
                             .as_ref()
                             .and_then(|sym| graph.get_node_by_symbol(sym))
                             .map(|idx| (target_node_sym.as_ref().unwrap().clone(), idx))
                             .or_else(|| {
-                                init_map.get(&reference.target_symbol).and_then(|init_sym| {
-                                    graph
-                                        .get_node_by_symbol(init_sym)
-                                        .map(|idx| (init_sym.clone(), idx))
+                                reference.target_symbol.as_ref().and_then(|t| {
+                                    init_map.get(t).and_then(|init_sym| {
+                                        graph
+                                            .get_node_by_symbol(init_sym)
+                                            .map(|idx| (init_sym.clone(), idx))
+                                    })
                                 })
                             });
 
-                        if let Some((_resolved_sym, target_idx)) = resolved_target
-                            && source_idx != target_idx
-                        {
-                            graph.add_edge(source_idx, target_idx, EdgeKind::Call);
+                        if let Some((resolved_sym, target_idx)) = resolved_target {
+                            if source_idx != target_idx {
+                                graph.add_edge(source_idx, target_idx, EdgeKind::Call);
+                            }
+                            if let Some(assigned_var) = &reference.assigned_to {
+                                call_assignments
+                                    .insert(assigned_var.clone(), (source_idx, Some(resolved_sym)));
+                            }
+                        } else {
+                            // Target could not be resolved; may recover in Pass 3 via type propagation
+                            unresolved_calls.push((reference.clone(), source_idx));
                         }
                     }
 
-                    // Handle Read/Write edges for variable references
                     if matches!(reference.role, ReferenceRole::Read | ReferenceRole::Write)
                         && let Some(target_sym) = &target_node_sym
                         && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
@@ -215,7 +226,6 @@ impl GraphBuilder {
                         graph.add_edge(source_idx, target_idx, edge_kind);
                     }
 
-                    // Handle Decorate edges (decorated → decorator)
                     if reference.role == ReferenceRole::Decorate
                         && let Some(target_sym) = &target_node_sym
                         && let Some(target_idx) = graph.get_node_by_symbol(target_sym)
@@ -256,6 +266,45 @@ impl GraphBuilder {
                         }
                         _ => {}
                     }
+                }
+            }
+        }
+
+        // Pass 2.5: External Call Return Type Propagation
+        // For variables that receive the result of an external call, propagate return type if variable has no type yet
+        for (assigned_var_sym, (_caller_idx, target_sym)) in &call_assignments {
+            let Some(var_idx) = graph.get_node_by_symbol(assigned_var_sym) else {
+                continue;
+            };
+            let Some(target_sym) = target_sym else {
+                continue;
+            };
+            let Some(target_idx) = graph.get_node_by_symbol(target_sym) else {
+                continue;
+            };
+            let (var_has_no_type, target_is_external_with_return) = {
+                let var_node = graph.graph.node_weight(var_idx);
+                let target_node = graph.graph.node_weight(target_idx);
+                let var_empty = matches!(var_node, Some(Node::Variable(v)) if v.var_type.is_none());
+                let target_ok = matches!(
+                    target_node,
+                    Some(Node::Function(f)) if f.core.is_external && !f.return_types.is_empty()
+                );
+                (var_empty, target_ok)
+            };
+            if var_has_no_type && target_is_external_with_return {
+                let first_ret = graph
+                    .graph
+                    .node_weight(target_idx)
+                    .and_then(|n| match n {
+                        Node::Function(f) => f.return_types.first().cloned(),
+                        _ => None,
+                    })
+                    .filter(|id| type_registry.contains(id));
+                if let Some(return_type_id) = first_ret
+                    && let Some(Node::Variable(var_node)) = graph.graph.node_weight_mut(var_idx)
+                {
+                    var_node.var_type = Some(return_type_id);
                 }
             }
         }
@@ -306,6 +355,60 @@ impl GraphBuilder {
                         }
                     }
                 }
+            }
+        }
+
+        // Pass 3: Type-Driven Call Edge Recovery (fixpoint)
+        // Resolve unresolved_calls using receiver's var_type and method_name until no progress
+        loop {
+            let mut resolved_any = false;
+            let mut still_unresolved = Vec::new();
+            for (reference, source_idx) in unresolved_calls {
+                let Some(receiver_sym) = &reference.receiver else {
+                    still_unresolved.push((reference, source_idx));
+                    continue;
+                };
+                let Some(method_name) = &reference.method_name else {
+                    still_unresolved.push((reference, source_idx));
+                    continue;
+                };
+                // Resolve receiver to a node (variable)
+                let receiver_node_sym =
+                    Self::resolve_to_node_symbol(receiver_sym, &node_symbols, &enclosing_map);
+                let Some(receiver_sym) = receiver_node_sym else {
+                    still_unresolved.push((reference, source_idx));
+                    continue;
+                };
+                let Some(receiver_idx) = graph.get_node_by_symbol(&receiver_sym) else {
+                    still_unresolved.push((reference, source_idx));
+                    continue;
+                };
+                let var_type = match graph.graph.node_weight(receiver_idx) {
+                    Some(Node::Variable(v)) => v.var_type.clone(),
+                    _ => {
+                        still_unresolved.push((reference, source_idx));
+                        continue;
+                    }
+                };
+                let Some(type_id) = var_type else {
+                    still_unresolved.push((reference, source_idx));
+                    continue;
+                };
+                let key = (type_id, method_name.clone());
+                if let Some(target_indices) = method_by_scope.get(&key)
+                    && let Some(&target_idx) = target_indices.first()
+                {
+                    if source_idx != target_idx {
+                        graph.add_edge(source_idx, target_idx, EdgeKind::Call);
+                    }
+                    resolved_any = true;
+                    continue;
+                }
+                still_unresolved.push((reference, source_idx));
+            }
+            unresolved_calls = still_unresolved;
+            if !resolved_any {
+                break;
             }
         }
 

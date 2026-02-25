@@ -321,7 +321,7 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
             references: vec![
                 // process_order() calls IPaymentGateway.charge()
                 SymbolReference {
-                    target_symbol: charge_method_id.to_string(),
+                    target_symbol: Some(charge_method_id.to_string()),
                     location: SourceLocation {
                         file_path: "payment.py".to_string(),
                         line: 21,
@@ -330,10 +330,12 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
                     enclosing_symbol: process_order_id.to_string(),
                     role: ReferenceRole::Call,
                     receiver: None,
+                    method_name: None,
+                    assigned_to: None,
                 },
                 // PayPalGateway.charge() calls _call_paypal_api()
                 SymbolReference {
-                    target_symbol: paypal_call_api_id.to_string(),
+                    target_symbol: Some(paypal_call_api_id.to_string()),
                     location: SourceLocation {
                         file_path: "payment.py".to_string(),
                         line: 15,
@@ -342,6 +344,8 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
                     enclosing_symbol: paypal_charge_id.to_string(),
                     role: ReferenceRole::Call,
                     receiver: None,
+                    method_name: None,
+                    assigned_to: None,
                 },
             ],
         }],

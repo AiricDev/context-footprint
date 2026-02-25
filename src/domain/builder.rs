@@ -144,6 +144,69 @@ impl GraphBuilder {
             }
         }
 
+        // Pass 1 (continued): External symbol nodes
+        // External symbols have no project source file. We synthesize a source from their
+        // signature + first few doc lines so size_function can count tokens realistically.
+        for def in &semantic_data.external_symbols {
+            let node_id = graph.graph.node_count() as u32;
+            let doc_texts = def.documentation.clone();
+
+            let signature = extract_signature(def);
+            let synthetic_source = build_external_source(&signature, &doc_texts);
+            let line_count = synthetic_source.lines().count() as u32;
+            let synthetic_span = crate::domain::node::SourceSpan {
+                start_line: 0,
+                start_column: 0,
+                end_line: line_count,
+                end_column: 0,
+            };
+
+            let context_size = self
+                .size_function
+                .compute(&synthetic_source, &synthetic_span, &doc_texts);
+
+            let doc_text = doc_texts.first().map(|s| s.as_str());
+
+            let language = def
+                .location
+                .file_path
+                .split('.')
+                .next_back()
+                .map(|ext| ext.to_lowercase());
+
+            let node_info = NodeInfo {
+                node_type: infer_node_type_from_kind(&def.kind),
+                name: def.name.clone(),
+                signature,
+                language,
+            };
+            let doc_score = self.doc_scorer.score(&node_info, doc_text);
+
+            match def.kind {
+                SymbolKind::Type => {
+                    let type_info = create_type_info(def, context_size, doc_score);
+                    type_registry.register(def.symbol_id.clone(), type_info);
+                }
+                SymbolKind::Function | SymbolKind::Variable => {
+                    node_symbols.insert(def.symbol_id.clone());
+
+                    let core = NodeCore::new(
+                        node_id,
+                        def.name.clone(),
+                        def.enclosing_symbol.clone(),
+                        context_size,
+                        convert_span(&def.span),
+                        doc_score,
+                        true, // always external
+                        def.location.file_path.clone(),
+                    );
+
+                    let node = create_node_from_definition(core, def, false)?;
+                    graph.add_node(def.symbol_id.clone(), node);
+                }
+            }
+        }
+
         // Build constructor init map: type_symbol -> init_node_symbol
         let mut init_map: HashMap<SymbolId, SymbolId> = HashMap::new();
         for document in &semantic_data.documents {
@@ -482,6 +545,26 @@ fn convert_span_for_size(span: &SemanticSpan) -> crate::domain::node::SourceSpan
         start_column: span.start_column,
         end_line: span.end_line,
         end_column: span.end_column,
+    }
+}
+
+/// Build a synthetic source string for an external symbol (no project source file available).
+/// Combines the signature line with up to 5 doc lines so that the size_function and doc_scorer
+/// can assess it like any other function signature.
+fn build_external_source(signature: &Option<String>, doc_texts: &[String]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(sig) = signature {
+        lines.push(sig.clone());
+    }
+    if let Some(doc) = doc_texts.first() {
+        for line in doc.lines().take(5) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    if lines.is_empty() {
+        "pass".to_string()
+    } else {
+        lines.join("\n")
     }
 }
 

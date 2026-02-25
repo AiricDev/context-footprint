@@ -68,6 +68,15 @@ pub struct SemanticData {
     /// - Each document contains definitions and references for that file
     /// - No duplicate files
     pub documents: Vec<DocumentSemantics>,
+
+    /// External symbols (third-party dependencies, standard library, etc.)
+    ///
+    /// **Adapter Contract**:
+    /// - Definitions for symbols not defined in the project source files
+    /// - Used to provide signatures and docs for boundary size calculation
+    /// - Must have `is_external: true`
+    #[serde(default)]
+    pub external_symbols: Vec<SymbolDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -762,9 +771,12 @@ pub struct SourceSpan {
 }
 
 impl SemanticData {
-    /// Get all symbol definitions from all documents
+    /// Get all symbol definitions from all documents and external symbols
     pub fn all_definitions(&self) -> impl Iterator<Item = &SymbolDefinition> {
-        self.documents.iter().flat_map(|doc| doc.definitions.iter())
+        self.documents
+            .iter()
+            .flat_map(|doc| doc.definitions.iter())
+            .chain(self.external_symbols.iter())
     }
 
     /// Build enclosing map (symbol_id → parent_symbol_id)

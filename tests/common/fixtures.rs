@@ -198,6 +198,7 @@ pub fn create_semantic_data_simple() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 
@@ -230,6 +231,7 @@ pub fn create_semantic_data_two_files() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 
@@ -257,6 +259,7 @@ pub fn create_semantic_data_with_cycle() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 
@@ -293,6 +296,7 @@ pub fn create_semantic_data_with_shared_state() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 
@@ -322,6 +326,7 @@ pub fn create_semantic_data_chain_well_documented_middle() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 
@@ -337,6 +342,7 @@ pub fn create_semantic_data_empty_document() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 
@@ -360,6 +366,7 @@ pub fn create_semantic_data_multiple_callers() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 
@@ -384,6 +391,7 @@ pub fn create_semantic_data_with_constructor_call() -> SemanticData {
     SemanticData {
         project_root: "/test".into(),
         documents,
+        external_symbols: vec![],
     }
 }
 

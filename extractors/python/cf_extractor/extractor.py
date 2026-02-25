@@ -19,6 +19,7 @@ from .schema import (
     SymbolDefinition,
     SymbolKind,
     TypeDetails,
+    TypeField,
     TypeKind,
     VariableDetails,
     VariableScope,
@@ -66,18 +67,38 @@ def _get_docstring(node: ast.AST) -> list[str]:
 def _annotation_to_typeref(annotation: Optional[ast.expr]) -> Optional[str]:
     if annotation is None:
         return None
-    if isinstance(annotation, ast.Constant):
-        return str(annotation.value) if annotation.value is not None else None
-    if isinstance(annotation, ast.Name):
-        return annotation.id
-    if isinstance(annotation, ast.Subscript):
-        base = annotation.value
-        if isinstance(base, ast.Name):
-            return base.id
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        return annotation.value
+    try:
+        return ast.unparse(annotation)
+    except Exception:
         return None
-    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-        return None
-    return None
+
+
+def _class_span_excluding_methods(node: ast.ClassDef, source_lines: list[str]) -> SourceSpan:
+    """Calculate class span ending just before the first method to exclude method bodies."""
+    start_line = node.lineno - 1
+    start_col = getattr(node, "col_offset", 0) or 0
+    
+    first_method_line = None
+    for child in node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            first_method_line = child.lineno - 1
+            break
+            
+    if first_method_line is not None:
+        end_lineno = first_method_line
+        end_col = len(source_lines[end_lineno - 1]) if end_lineno > 0 else 0
+    else:
+        end_lineno = getattr(node, "end_lineno", node.lineno)
+        end_col = getattr(node, "end_col_offset", start_col) or start_col
+        
+    return SourceSpan(
+        start_line=start_line,
+        start_column=start_col,
+        end_line=end_lineno,
+        end_column=end_col,
+    )
 
 
 class DefinitionCollector(ast.NodeVisitor):
@@ -89,7 +110,8 @@ class DefinitionCollector(ast.NodeVisitor):
         self.source_lines = source.splitlines()
         self.module_symbol_id = module_symbol_id
         self.definitions: list[SymbolDefinition] = []
-        self._class_stack: list[tuple[str, str]] = []
+        self._class_stack: list[tuple[str, str, TypeDetails]] = []
+        self._func_stack: list[str] = []
 
     def _current_scope_prefix(self) -> str:
         if not self._class_stack:
@@ -108,10 +130,16 @@ class DefinitionCollector(ast.NodeVisitor):
             ast.get_source_segment(self.source, n) == "abstractmethod"
             for dec in node.decorator_list
             for n in [dec] if isinstance(dec, ast.Name)
-        ) or (ast.get_source_segment(self.source, node) or "").find("ABC") >= 0
+        ) or (ast.get_source_segment(self.source, node) or "").find("ABC") >= 0 or "Protocol" in bases
+
+        type_kind = TypeKind.Class
+        if "Enum" in bases or any(b.endswith(".Enum") for b in bases):
+            type_kind = TypeKind.Enum
+        elif "Protocol" in bases or "ABC" in bases or is_abstract:
+            type_kind = TypeKind.Interface
 
         type_details = TypeDetails(
-            kind=TypeKind.Class,
+            kind=type_kind,
             is_abstract=is_abstract,
             is_final=False,
             visibility=_visibility_from_name(node.name),
@@ -120,7 +148,7 @@ class DefinitionCollector(ast.NodeVisitor):
             inherits=bases,
             implements=[],
         )
-        span = _span_from_node(node, self.source_lines)
+        span = _class_span_excluding_methods(node, self.source_lines)
         loc = _location_from_node(node, self.file_path)
         self.definitions.append(
             SymbolDefinition(
@@ -136,7 +164,7 @@ class DefinitionCollector(ast.NodeVisitor):
                 details=type_details,
             )
         )
-        self._class_stack.append((node.name, type_id))
+        self._class_stack.append((node.name, type_id, type_details))
         self.generic_visit(node)
         self._class_stack.pop()
 
@@ -190,6 +218,9 @@ class DefinitionCollector(ast.NodeVisitor):
             for d in node.decorator_list
         )
         is_constructor = node.name == "__init__"
+        if is_constructor and not return_types:
+            return_types = ["None"]
+            
         modifiers = FunctionModifiers(
             is_async=is_async,
             is_generator=any(isinstance(n, ast.Yield) for n in ast.walk(node)),
@@ -221,16 +252,29 @@ class DefinitionCollector(ast.NodeVisitor):
                 ),
             )
         )
+        self._func_stack.append(func_id)
         self.generic_visit(node)
+        self._func_stack.pop()
 
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
             if isinstance(target, ast.Name):
+                if self._func_stack:
+                    continue  # Local variable, ignore
                 if self._class_stack:
                     scope = VariableScope.Field
                     prefix = self._class_stack[-1][1]
                     sym_id = f"{prefix}.{target.id}"
                     enclosing = prefix
+                    self._class_stack[-1][2].fields.append(
+                        TypeField(
+                            name=target.id,
+                            field_type=None,
+                            mutability=Mutability.Mutable,
+                            visibility=_visibility_from_name(target.id),
+                            symbol_id=sym_id,
+                        )
+                    )
                 else:
                     scope = VariableScope.Global
                     sym_id = f"{self.module_symbol_id}.{target.id}"
@@ -256,16 +300,66 @@ class DefinitionCollector(ast.NodeVisitor):
                         ),
                     )
                 )
+            elif isinstance(target, ast.Attribute) and self._func_stack and self._class_stack:
+                if isinstance(target.value, ast.Name) and target.value.id in ("self", "cls"):
+                    scope = VariableScope.Field
+                    prefix = self._class_stack[-1][1]
+                    sym_id = f"{prefix}.{target.attr}"
+                    enclosing = prefix
+                    
+                    if not any(f.name == target.attr for f in self._class_stack[-1][2].fields):
+                        self._class_stack[-1][2].fields.append(
+                            TypeField(
+                                name=target.attr,
+                                field_type=None,
+                                mutability=Mutability.Mutable,
+                                visibility=_visibility_from_name(target.attr),
+                                symbol_id=sym_id,
+                            )
+                        )
+                        span = _span_from_node(node, self.source_lines)
+                        loc = _location_from_node(node, self.file_path)
+                        self.definitions.append(
+                            SymbolDefinition(
+                                symbol_id=sym_id,
+                                kind=SymbolKind.Variable,
+                                name=target.attr,
+                                display_name=target.attr,
+                                location=loc,
+                                span=span,
+                                enclosing_symbol=enclosing,
+                                is_external=False,
+                                documentation=[],
+                                details=VariableDetails(
+                                    var_type=None,
+                                    mutability=Mutability.Mutable,
+                                    scope=scope,
+                                    visibility=_visibility_from_name(target.attr),
+                                ),
+                            )
+                        )
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if isinstance(node.target, ast.Name):
+            if self._func_stack:
+                self.generic_visit(node)
+                return  # Local variable, ignore
             var_type = _annotation_to_typeref(node.annotation)
             if self._class_stack:
                 scope = VariableScope.Field
                 prefix = self._class_stack[-1][1]
                 sym_id = f"{prefix}.{node.target.id}"
                 enclosing = prefix
+                self._class_stack[-1][2].fields.append(
+                    TypeField(
+                        name=node.target.id,
+                        field_type=var_type,
+                        mutability=Mutability.Mutable,
+                        visibility=_visibility_from_name(node.target.id),
+                        symbol_id=sym_id,
+                    )
+                )
             else:
                 scope = VariableScope.Global
                 sym_id = f"{self.module_symbol_id}.{node.target.id}"
@@ -291,6 +385,45 @@ class DefinitionCollector(ast.NodeVisitor):
                     ),
                 )
             )
+        elif isinstance(node.target, ast.Attribute) and self._func_stack and self._class_stack:
+            if isinstance(node.target.value, ast.Name) and node.target.value.id in ("self", "cls"):
+                var_type = _annotation_to_typeref(node.annotation)
+                scope = VariableScope.Field
+                prefix = self._class_stack[-1][1]
+                sym_id = f"{prefix}.{node.target.attr}"
+                enclosing = prefix
+                
+                if not any(f.name == node.target.attr for f in self._class_stack[-1][2].fields):
+                    self._class_stack[-1][2].fields.append(
+                        TypeField(
+                            name=node.target.attr,
+                            field_type=var_type,
+                            mutability=Mutability.Mutable,
+                            visibility=_visibility_from_name(node.target.attr),
+                            symbol_id=sym_id,
+                        )
+                    )
+                    span = _span_from_node(node, self.source_lines)
+                    loc = _location_from_node(node, self.file_path)
+                    self.definitions.append(
+                        SymbolDefinition(
+                            symbol_id=sym_id,
+                            kind=SymbolKind.Variable,
+                            name=node.target.attr,
+                            display_name=node.target.attr,
+                            location=loc,
+                            span=span,
+                            enclosing_symbol=enclosing,
+                            is_external=False,
+                            documentation=[],
+                            details=VariableDetails(
+                                var_type=var_type,
+                                mutability=Mutability.Mutable,
+                                scope=scope,
+                                visibility=_visibility_from_name(node.target.attr),
+                            ),
+                        )
+                    )
         self.generic_visit(node)
 
 

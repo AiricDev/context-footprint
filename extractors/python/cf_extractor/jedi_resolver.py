@@ -19,11 +19,18 @@ def _add_parents(tree: ast.AST) -> None:
 
 from .schema import (
     DocumentSemantics,
+    FunctionDetails,
+    Mutability,
+    Parameter,
     ReferenceRole,
     SourceLocation,
+    SourceSpan,
     SymbolDefinition,
     SymbolKind,
     SymbolReference,
+    TypeDetails,
+    TypeKind,
+    VariableDetails,
 )
 
 
@@ -83,7 +90,85 @@ class ReferenceCollector(ast.NodeVisitor):
         self.module_symbol_id = module_symbol_id
         self.script = script or jedi.Script(source, path=file_path)
         self.references: list[SymbolReference] = []
+        self.external_symbols: list[SymbolDefinition] = []
         self._func_spans: list[tuple[int, int, str]] = []
+
+    def _collect_external_symbol(self, target_sym: str, jedi_def: Any) -> None:
+        if any(d.symbol_id == target_sym for d in self.external_symbols):
+            return
+
+        name = jedi_def.name
+        if not name:
+            return
+
+        doc = []
+        try:
+            doc_str = jedi_def.docstring()
+            if doc_str:
+                doc.append(doc_str)
+        except Exception:
+            pass
+
+        file_path = str(jedi_def.module_path) if jedi_def.module_path else "unknown"
+        # Make path relative to project root if possible to keep it clean, but absolute is fine for external
+        
+        line = max(0, (jedi_def.line or 1) - 1)
+        column = jedi_def.column or 0
+        loc = SourceLocation(file_path=file_path, line=line, column=column)
+        
+        span = SourceSpan(
+            start_line=line,
+            start_column=column,
+            end_line=line + 1,
+            end_column=column,
+        )
+
+        kind = SymbolKind.Function
+        details = None
+
+        if jedi_def.type == "class":
+            kind = SymbolKind.Type
+            details = TypeDetails(kind=TypeKind.Class)
+        elif jedi_def.type == "function":
+            kind = SymbolKind.Function
+            params = []
+            return_types = []
+            try:
+                sigs = jedi_def.get_signatures()
+                if sigs:
+                    sig = sigs[0]
+                    sig_str = sig.to_string()
+                    if "->" in sig_str:
+                        ret = sig_str.rsplit("->", 1)[-1].strip()
+                        if ret:
+                            return_types.append(ret)
+                    for p in sig.params:
+                        p_name = p.name
+                        p_type = None
+                        if p.description and ":" in p.description:
+                            p_type = p.description.split(":", 1)[-1].strip()
+                        params.append(Parameter(name=p_name, param_type=p_type))
+            except Exception:
+                pass
+            details = FunctionDetails(parameters=params, return_types=return_types)
+        else:
+            kind = SymbolKind.Variable
+            details = VariableDetails(mutability=Mutability.Immutable)
+
+        self.external_symbols.append(
+            SymbolDefinition(
+                symbol_id=target_sym,
+                kind=kind,
+                name=name,
+                display_name=jedi_def.full_name or name,
+                location=loc,
+                span=span,
+                enclosing_symbol=None,
+                is_external=True,
+                documentation=doc,
+                details=details,
+            )
+        )
 
     def _enclosing_symbol(self, node: ast.AST) -> Optional[str]:
         line_1 = node.lineno
@@ -100,14 +185,9 @@ class ReferenceCollector(ast.NodeVisitor):
         )
 
     def _resolve_at(self, line: int, column: int):
+        """Resolve the symbol at (line, column) to its definition (goto definition)."""
         try:
             return self.script.goto(line, column)
-        except Exception:
-            return []
-
-    def _infer_at(self, line: int, column: int):
-        try:
-            return self.script.infer(line, column)
         except Exception:
             return []
 
@@ -138,12 +218,16 @@ class ReferenceCollector(ast.NodeVisitor):
                 target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0])
             if not target_sym and defs:
                 target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
         elif isinstance(node, ast.Attribute):
             defs = self._resolve_at(node.lineno, node.col_offset)
             if defs:
                 target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0])
             if not target_sym and defs:
                 target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
         if target_sym or True:
             self.references.append(
                 SymbolReference(
@@ -171,6 +255,8 @@ class ReferenceCollector(ast.NodeVisitor):
                 target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0])
             if not target_sym and defs:
                 target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
         elif isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
             defs = self._resolve_at(node.func.lineno, node.func.col_offset)
@@ -178,6 +264,8 @@ class ReferenceCollector(ast.NodeVisitor):
                 target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0])
             if not target_sym and defs:
                 target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
             if isinstance(node.func.value, ast.Name):
                 receiver_defs = self._resolve_at(node.func.value.lineno, node.func.value.col_offset)
                 if receiver_defs:
@@ -215,39 +303,50 @@ class ReferenceCollector(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load):
             defs = self._resolve_at(node.lineno, node.col_offset)
             target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+            if not target_sym and defs:
+                target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
             if target_sym:
-                for d in self.all_definitions:
-                    if d.symbol_id == target_sym and d.kind == SymbolKind.Variable:
-                        self.references.append(
-                            SymbolReference(
-                                target_symbol=target_sym,
-                                location=self._loc(node),
-                                enclosing_symbol=enc,
-                                role=ReferenceRole.Read,
-                                receiver=None,
-                                method_name=None,
-                                assigned_to=None,
-                            )
+                # Still emit the reference even if it's external (not in all_definitions)
+                # But we only emit Read/Write for variables. If it's external, we might not know if it's a variable.
+                # Let's assume if it's external, we emit it.
+                is_var = any(d.symbol_id == target_sym and d.kind == SymbolKind.Variable for d in self.all_definitions)
+                is_ext = any(d.symbol_id == target_sym and d.is_external for d in self.external_symbols)
+                if is_var or is_ext:
+                    self.references.append(
+                        SymbolReference(
+                            target_symbol=target_sym,
+                            location=self._loc(node),
+                            enclosing_symbol=enc,
+                            role=ReferenceRole.Read,
+                            receiver=None,
+                            method_name=None,
+                            assigned_to=None,
                         )
-                        break
+                    )
         elif isinstance(node.ctx, ast.Store):
             defs = self._resolve_at(node.lineno, node.col_offset)
             target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+            if not target_sym and defs:
+                target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
             if target_sym:
-                for d in self.all_definitions:
-                    if d.symbol_id == target_sym and d.kind == SymbolKind.Variable:
-                        self.references.append(
-                            SymbolReference(
-                                target_symbol=target_sym,
-                                location=self._loc(node),
-                                enclosing_symbol=enc,
-                                role=ReferenceRole.Write,
-                                receiver=None,
-                                method_name=None,
-                                assigned_to=None,
-                            )
+                is_var = any(d.symbol_id == target_sym and d.kind == SymbolKind.Variable for d in self.all_definitions)
+                is_ext = any(d.symbol_id == target_sym and d.is_external for d in self.external_symbols)
+                if is_var or is_ext:
+                    self.references.append(
+                        SymbolReference(
+                            target_symbol=target_sym,
+                            location=self._loc(node),
+                            enclosing_symbol=enc,
+                            role=ReferenceRole.Write,
+                            receiver=None,
+                            method_name=None,
+                            assigned_to=None,
                         )
-                        break
+                    )
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
@@ -258,49 +357,57 @@ class ReferenceCollector(ast.NodeVisitor):
         if isinstance(node.ctx, ast.Load):
             defs = self._resolve_at(node.lineno, node.col_offset)
             target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+            if not target_sym and defs:
+                target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
             if target_sym:
-                for d in self.all_definitions:
-                    if d.symbol_id == target_sym and d.kind == SymbolKind.Variable:
-                        receiver_sym = None
-                        if isinstance(node.value, ast.Name):
-                            rdefs = self._resolve_at(node.value.lineno, node.value.col_offset)
-                            if rdefs:
-                                receiver_sym = _definition_symbol_id_from_jedi(self.all_definitions, rdefs[0])
-                        self.references.append(
-                            SymbolReference(
-                                target_symbol=target_sym,
-                                location=self._loc(node),
-                                enclosing_symbol=enc,
-                                role=ReferenceRole.Read,
-                                receiver=receiver_sym,
-                                method_name=None,
-                                assigned_to=None,
-                            )
+                is_var = any(d.symbol_id == target_sym and d.kind == SymbolKind.Variable for d in self.all_definitions)
+                is_ext = any(d.symbol_id == target_sym and d.is_external for d in self.external_symbols)
+                if is_var or is_ext:
+                    receiver_sym = None
+                    if isinstance(node.value, ast.Name):
+                        rdefs = self._resolve_at(node.value.lineno, node.value.col_offset)
+                        if rdefs:
+                            receiver_sym = _definition_symbol_id_from_jedi(self.all_definitions, rdefs[0])
+                    self.references.append(
+                        SymbolReference(
+                            target_symbol=target_sym,
+                            location=self._loc(node),
+                            enclosing_symbol=enc,
+                            role=ReferenceRole.Read,
+                            receiver=receiver_sym,
+                            method_name=None,
+                            assigned_to=None,
                         )
-                        break
+                    )
         elif isinstance(node.ctx, ast.Store):
             defs = self._resolve_at(node.lineno, node.col_offset)
             target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+            if not target_sym and defs:
+                target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
             if target_sym:
-                for d in self.all_definitions:
-                    if d.symbol_id == target_sym and d.kind == SymbolKind.Variable:
-                        receiver_sym = None
-                        if isinstance(node.value, ast.Name):
-                            rdefs = self._resolve_at(node.value.lineno, node.value.col_offset)
-                            if rdefs:
-                                receiver_sym = _definition_symbol_id_from_jedi(self.all_definitions, rdefs[0])
-                        self.references.append(
-                            SymbolReference(
-                                target_symbol=target_sym,
-                                location=self._loc(node),
-                                enclosing_symbol=enc,
-                                role=ReferenceRole.Write,
-                                receiver=receiver_sym,
-                                method_name=None,
-                                assigned_to=None,
-                            )
+                is_var = any(d.symbol_id == target_sym and d.kind == SymbolKind.Variable for d in self.all_definitions)
+                is_ext = any(d.symbol_id == target_sym and d.is_external for d in self.external_symbols)
+                if is_var or is_ext:
+                    receiver_sym = None
+                    if isinstance(node.value, ast.Name):
+                        rdefs = self._resolve_at(node.value.lineno, node.value.col_offset)
+                        if rdefs:
+                            receiver_sym = _definition_symbol_id_from_jedi(self.all_definitions, rdefs[0])
+                    self.references.append(
+                        SymbolReference(
+                            target_symbol=target_sym,
+                            location=self._loc(node),
+                            enclosing_symbol=enc,
+                            role=ReferenceRole.Write,
+                            receiver=receiver_sym,
+                            method_name=None,
+                            assigned_to=None,
                         )
-                        break
+                    )
         self.generic_visit(node)
 
 
@@ -311,10 +418,12 @@ def collect_references(
     project_root: str,
     all_definitions: list[SymbolDefinition],
     module_symbol_id: str,
-) -> list[SymbolReference]:
+    venv_path: Optional[str] = None,
+) -> tuple[list[SymbolReference], list[SymbolDefinition]]:
     """Run reference collection with Jedi on a single document."""
     abs_path = os.path.join(project_root, doc.relative_path)
-    script = jedi.Script(source, path=abs_path)
+    env = jedi.create_environment(venv_path) if venv_path else None
+    script = jedi.Script(source, path=abs_path, environment=env)
     collector = ReferenceCollector(
         file_path=abs_path,
         source=source,
@@ -326,4 +435,4 @@ def collect_references(
     tree = ast.parse(source, filename=abs_path)
     _add_parents(tree)
     collector.visit(tree)
-    return collector.references
+    return collector.references, collector.external_symbols

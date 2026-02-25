@@ -209,6 +209,7 @@ class DocumentSemantics(BaseModel):
 class SemanticData(BaseModel):
     project_root: str
     documents: list[DocumentSemantics] = PydanticField(default_factory=list)
+    external_symbols: list[SymbolDefinition] = PydanticField(default_factory=list)
 
     def model_dump_json(self, **kwargs: Any) -> str:
         return super().model_dump_json(**kwargs)

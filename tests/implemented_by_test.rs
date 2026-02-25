@@ -349,6 +349,7 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
                 },
             ],
         }],
+        external_symbols: vec![],
     }
 }
 

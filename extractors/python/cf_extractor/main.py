@@ -26,11 +26,12 @@ def find_python_files(project_root: str) -> list[str]:
     return sorted(out)
 
 
-def run_extract(project_root: str) -> SemanticData:
+def run_extract(project_root: str, venv_path: str | None = None) -> SemanticData:
     """Extract SemanticData from a project directory."""
     project_root = os.path.abspath(project_root)
     docs: list[DocumentSemantics] = []
     all_definitions: list[SymbolDefinition] = []
+    external_symbols: dict[str, SymbolDefinition] = {}
 
     py_files = find_python_files(project_root)
     for rel_path in py_files:
@@ -60,14 +61,17 @@ def run_extract(project_root: str) -> SemanticData:
         except Exception:
             continue
         try:
-            refs = collect_references(
+            refs, ext_syms = collect_references(
                 doc,
                 abs_path,
                 source,
                 project_root,
                 all_definitions,
                 module_symbol_id=Path(rel_path).with_suffix("").as_posix().replace("/", ".") or "__main__",
+                venv_path=venv_path,
             )
+            for ext in ext_syms:
+                external_symbols[ext.symbol_id] = ext
             docs[i] = DocumentSemantics(
                 relative_path=doc.relative_path,
                 language=doc.language,
@@ -77,7 +81,11 @@ def run_extract(project_root: str) -> SemanticData:
         except Exception as e:
             print(f"Warning: references {rel_path}: {e}", file=sys.stderr)
 
-    return SemanticData(project_root=project_root, documents=docs)
+    return SemanticData(
+        project_root=project_root,
+        documents=docs,
+        external_symbols=list(external_symbols.values()),
+    )
 
 
 def main() -> None:
@@ -85,17 +93,26 @@ def main() -> None:
     parser.add_argument(
         "project_root",
         nargs="?",
-        help="Project root directory (default: current directory)",
+        required=True,
+        help="Project root directory",
     )
     parser.add_argument(
-        "--pretty",
-        action="store_true",
-        help="Pretty-print JSON output",
+        "--venv",
+        help="Path to virtual environment (auto-detected as .venv in project root if not specified)",
     )
+
     args = parser.parse_args()
-    data = run_extract(args.project_root)
-    kwargs = {"indent": 2} if args.pretty else {}
-    print(data.model_dump_json(**kwargs))
+    project_root = os.path.abspath(args.project_root)
+    
+    venv_path = args.venv
+    if not venv_path:
+        default_venv = os.path.join(project_root, ".venv")
+        if os.path.isdir(default_venv):
+            venv_path = default_venv
+            print(f"Auto-detected venv at: {venv_path}", file=sys.stderr)
+
+    data = run_extract(project_root, venv_path=venv_path)
+    print(data.model_dump_json(indent=2))
 
 
 if __name__ == "__main__":

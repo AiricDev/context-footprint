@@ -1,0 +1,16 @@
+{
+  "folders": [
+    {
+      "name": "root (Rust)",
+      "path": "."
+    },
+    {
+      "name": "extractors/python",
+      "path": "extractors/python"
+    }
+  ],
+  "settings": {},
+  "extensions": {
+    "recommendations": []
+  }
+}

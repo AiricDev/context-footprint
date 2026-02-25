@@ -374,13 +374,13 @@ fn test_implemented_by_edges_created() {
     let neighbors: Vec<_> = graph.neighbors(interface_method_idx).collect();
     let implemented_by_edges: Vec<_> = neighbors
         .iter()
-        .filter(|(_, kind)| matches!(kind, EdgeKind::ImplementedBy))
+        .filter(|(_, kind)| matches!(kind, EdgeKind::OverriddenBy))
         .collect();
 
     assert_eq!(
         implemented_by_edges.len(),
         2,
-        "Should have ImplementedBy edges to both StripeGateway.charge and PayPalGateway.charge"
+        "Should have OverriddenBy edges to both StripeGateway.charge and PayPalGateway.charge"
     );
 }
 
@@ -433,7 +433,7 @@ fn test_documented_interface_stops_at_boundary() {
     let result = solver.compute_cf(&[process_order_idx], None);
 
     // process_order -> IPaymentGateway.charge (Boundary: sig complete + doc_score 0.8 >= 0.5)
-    // Traversal stops at the interface method. ImplementedBy edges are never followed.
+    // Traversal stops at the interface method. OverriddenBy edges are never followed.
     assert_eq!(
         result.reachable_set.len(),
         2,
@@ -449,18 +449,18 @@ fn test_documented_interface_stops_at_boundary() {
 fn test_no_implemented_by_for_non_interface_methods() {
     let graph = build_graph_with_score(0.0);
 
-    // StripeGateway.charge is NOT an interface method, should have no ImplementedBy edges
+    // StripeGateway.charge is NOT an interface method, should have no OverriddenBy edges
     let stripe_charge_idx = graph
         .get_node_by_symbol("test#StripeGateway#charge().")
         .expect("StripeGateway.charge should exist");
 
     let implemented_by_count = graph
         .neighbors(stripe_charge_idx)
-        .filter(|(_, kind)| matches!(kind, EdgeKind::ImplementedBy))
+        .filter(|(_, kind)| matches!(kind, EdgeKind::OverriddenBy))
         .count();
 
     assert_eq!(
         implemented_by_count, 0,
-        "Non-interface methods should not have ImplementedBy edges"
+        "Non-interface methods should not have OverriddenBy edges"
     );
 }

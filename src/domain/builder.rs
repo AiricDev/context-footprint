@@ -106,7 +106,7 @@ impl GraphBuilder {
                         let type_info = create_type_info(def, context_size, doc_score);
                         type_registry.register(def.symbol_id.clone(), type_info);
 
-                        // Register implementor relationships for ImplementedBy edges
+                        // Register implementor relationships for OverriddenBy edges
                         if let SymbolDetails::Type(type_details) = &def.details {
                             for interface_id in &type_details.implements {
                                 type_registry.register_implementor(
@@ -157,11 +157,7 @@ impl GraphBuilder {
             }
         }
 
-        // Pass 2: Edge Wiring - Process references to create edges
-        let mut state_writers: HashMap<SymbolId, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
-        let mut callers: HashMap<SymbolId, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
-        let mut readers: Vec<(petgraph::graph::NodeIndex, SymbolId)> = Vec::new();
-
+        // Pass 2: Edge Wiring - Process references to create edges (forward edges only)
         for document in &semantic_data.documents {
             for reference in &document.references {
                 // Resolve source symbol to nearest node
@@ -198,11 +194,10 @@ impl GraphBuilder {
                                 })
                             });
 
-                        if let Some((resolved_sym, target_idx)) = resolved_target
+                        if let Some((_resolved_sym, target_idx)) = resolved_target
                             && source_idx != target_idx
                         {
                             graph.add_edge(source_idx, target_idx, EdgeKind::Call);
-                            callers.entry(resolved_sym).or_default().push(source_idx);
                         }
                     }
 
@@ -218,15 +213,6 @@ impl GraphBuilder {
                             EdgeKind::Read
                         };
                         graph.add_edge(source_idx, target_idx, edge_kind);
-
-                        if reference.role == ReferenceRole::Write {
-                            state_writers
-                                .entry(reference.target_symbol.clone())
-                                .or_default()
-                                .push(source_idx);
-                        } else {
-                            readers.push((source_idx, reference.target_symbol.clone()));
-                        }
                     }
 
                     // Handle Decorate edges (decorated → decorator)
@@ -274,42 +260,8 @@ impl GraphBuilder {
             }
         }
 
-        // Pass 3: Dynamic Expansion Edges
-        // 1. SharedStateWrite edges: Reader -> Writer
-        for (reader_idx, var_symbol) in readers {
-            // Check if variable is mutable
-            let is_mutable = self.is_variable_mutable(&var_symbol, &semantic_data);
-
-            if is_mutable && let Some(writers) = state_writers.get(&var_symbol) {
-                for &writer_idx in writers {
-                    if reader_idx != writer_idx {
-                        graph.add_edge(reader_idx, writer_idx, EdgeKind::SharedStateWrite);
-                    }
-                }
-            }
-        }
-
-        // 2. CallIn edges: Callee -> Caller for underspecified functions
-        let all_node_symbols: Vec<SymbolId> = graph.symbol_to_node.keys().cloned().collect();
-        for callee_symbol in all_node_symbols {
-            if let (Some(callee_idx), Some(caller_indices)) = (
-                graph.get_node_by_symbol(&callee_symbol),
-                callers.get(&callee_symbol),
-            ) {
-                // Check if function is underspecified
-                let is_underspecified = self.is_function_underspecified(&callee_symbol, &graph);
-
-                if is_underspecified {
-                    for &caller_idx in caller_indices {
-                        if callee_idx != caller_idx {
-                            graph.add_edge(callee_idx, caller_idx, EdgeKind::CallIn);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. ImplementedBy edges: Interface method → Concrete implementation method
+        // Pass 3: OverriddenBy edges (interface/override). Reverse exploration (SharedStateWrite, CallIn) is done at query time.
+        // OverriddenBy edges: Parent method → Child method (interface implementation + concrete override)
         // Build a lookup: (enclosing_type, method_name) → node_idx for all methods
         let mut method_by_scope: HashMap<(SymbolId, String), Vec<petgraph::graph::NodeIndex>> =
             HashMap::new();
@@ -349,7 +301,7 @@ impl GraphBuilder {
                     if let Some(concrete_indices) = method_by_scope.get(&key) {
                         for &concrete_idx in concrete_indices {
                             if *iface_idx != concrete_idx {
-                                graph.add_edge(*iface_idx, concrete_idx, EdgeKind::ImplementedBy);
+                                graph.add_edge(*iface_idx, concrete_idx, EdgeKind::OverriddenBy);
                             }
                         }
                     }
@@ -361,7 +313,8 @@ impl GraphBuilder {
         Ok(graph)
     }
 
-    /// Check if a variable is mutable
+    /// Check if a variable is mutable (kept for future builder logic).
+    #[allow(dead_code)]
     fn is_variable_mutable(&self, symbol: &str, semantic_data: &SemanticData) -> bool {
         for doc in &semantic_data.documents {
             for def in &doc.definitions {
@@ -377,6 +330,7 @@ impl GraphBuilder {
     }
 
     /// Check if a function is underspecified (incomplete signature)
+    #[allow(dead_code)]
     fn is_function_underspecified(&self, symbol: &str, graph: &ContextGraph) -> bool {
         if let Some(node_idx) = graph.get_node_by_symbol(symbol)
             && let Some(Node::Function(func)) = graph.graph.node_weight(node_idx)

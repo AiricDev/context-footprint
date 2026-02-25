@@ -532,9 +532,7 @@ fn edge_kind_display(ek: &EdgeKind) -> &'static str {
         EdgeKind::Call => "Call",
         EdgeKind::Read => "Read",
         EdgeKind::Write => "Write",
-        EdgeKind::SharedStateWrite => "SharedStateWrite",
-        EdgeKind::CallIn => "CallIn",
-        EdgeKind::ImplementedBy => "ImplementedBy",
+        EdgeKind::OverriddenBy => "OverriddenBy",
         EdgeKind::Annotates => "Annotates",
     }
 }

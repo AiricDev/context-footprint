@@ -504,7 +504,7 @@ fn test_leaky_facade_traversed() {
 
 /// Singleton Pattern (Global Mutable State):
 /// Client -> Singleton.getInstance() -> Global State
-/// All writers to the Global State should be included in the context (SharedStateWrite edge).
+/// All writers to the Global State should be included in the context (reverse exploration via incoming Write edges).
 /// This "penalizes" the use of global state by exploding the context size.
 #[test]
 fn test_singleton_global_state_penalty() {
@@ -564,7 +564,7 @@ fn test_singleton_global_state_penalty() {
     assert_reachable(&graph, &result, sym_client);
     assert_reachable(&graph, &result, sym_singleton_get);
 
-    // Writers should be reached via SharedStateWrite edges (Reader -> Writer)
+    // Writers should be reached via reverse exploration (Reader -> Var via Read; Var has incoming Write from W1, W2)
     // sym_singleton_get (Reader) -> sym_writer_1 (Writer)
     assert_reachable(&graph, &result, sym_writer_1);
     assert_reachable(&graph, &result, sym_writer_2);

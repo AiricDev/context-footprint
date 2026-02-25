@@ -1,12 +1,25 @@
 use crate::domain::edge::EdgeKind;
 use crate::domain::graph::ContextGraph;
-use crate::domain::node::NodeId;
-use crate::domain::policy::{PruningDecision, PruningParams, evaluate};
+use crate::domain::node::{Node, NodeId};
+use crate::domain::policy::{
+    PruningDecision, PruningParams, evaluate_forward, should_explore_callers,
+};
 use petgraph::graph::NodeIndex;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
+
+/// How the current node was reached (for edge-aware pruning and reverse exploration).
+#[derive(Debug, Clone)]
+enum ReachedVia {
+    Start,
+    Forward(EdgeKind),
+    /// Reached by following incoming Call edges (call-in exploration).
+    CallIn,
+    /// Reached by following incoming Write edges (shared-state write exploration).
+    SharedStateWrite,
+}
 
 /// Single step in BFS traversal: node plus the edge/decision that led to it.
 #[derive(Debug, Clone)]
@@ -70,15 +83,15 @@ impl CfSolver {
         let mut ordered = Vec::new();
         let mut traversal_steps = Vec::new();
         let mut layers: Vec<Vec<NodeId>> = Vec::new();
-        let mut queue: VecDeque<(NodeIndex, u32, Option<EdgeKind>, Option<PruningDecision>)> =
+        let mut queue: VecDeque<(NodeIndex, u32, ReachedVia, Option<PruningDecision>)> =
             VecDeque::new();
         let mut total_size = 0;
 
         for &start in starts {
-            queue.push_back((start, 0, None, None));
+            queue.push_back((start, 0, ReachedVia::Start, None));
         }
 
-        while let Some((current, depth, incoming_edge, incoming_decision)) = queue.pop_front() {
+        while let Some((current, depth, reached_via, incoming_decision)) = queue.pop_front() {
             let current_node = graph.node(current);
             let current_id = current_node.core().id;
 
@@ -88,10 +101,14 @@ impl CfSolver {
 
             let node_size = current_node.core().context_size;
             total_size += node_size;
+            let step_edge_kind = match &reached_via {
+                ReachedVia::Forward(ek) => Some(ek.clone()),
+                _ => None,
+            };
             ordered.push(current_id);
             traversal_steps.push(TraversalStep {
                 node_id: current_id,
-                incoming_edge_kind: incoming_edge,
+                incoming_edge_kind: step_edge_kind,
                 decision: incoming_decision,
             });
 
@@ -108,21 +125,27 @@ impl CfSolver {
                 break;
             }
 
-            // Get neighbors and sort them by symbol for deterministic traversal
-            let mut neighbors: Vec<_> = graph.neighbors(current).collect();
-            neighbors.sort_by(|(a_idx, _), (b_idx, _)| {
+            // === Forward traversal: outgoing edges ===
+            let mut out_edges: Vec<_> = graph.outgoing_edges(current).collect();
+            out_edges.sort_by(|(a_idx, _), (b_idx, _)| {
                 let a_sym = idx_to_symbol.get(a_idx).copied().unwrap_or("");
                 let b_sym = idx_to_symbol.get(b_idx).copied().unwrap_or("");
                 a_sym.cmp(b_sym)
             });
 
-            for (neighbor, edge_kind) in neighbors {
+            for (neighbor, edge_kind) in out_edges {
                 let neighbor_node = graph.node(neighbor);
                 let neighbor_id = neighbor_node.core().id;
-                let decision = evaluate(params, current_node, neighbor_node, edge_kind, graph);
+                let decision =
+                    evaluate_forward(params, current_node, neighbor_node, edge_kind, graph);
 
                 if matches!(decision, PruningDecision::Transparent) {
-                    queue.push_back((neighbor, depth + 1, Some(edge_kind.clone()), Some(decision)));
+                    queue.push_back((
+                        neighbor,
+                        depth + 1,
+                        ReachedVia::Forward(edge_kind.clone()),
+                        Some(decision),
+                    ));
                 } else {
                     // Boundary: count as reached and include its size, but do not traverse
                     if !visited.contains(&neighbor_id) {
@@ -150,6 +173,40 @@ impl CfSolver {
                             }
                             layers[b_depth as usize].push(neighbor_id);
                         }
+                    }
+                }
+            }
+
+            // === Reverse exploration: call-in (function) ===
+            if let Node::Function(f) = current_node {
+                let incoming_edge = match &reached_via {
+                    ReachedVia::Forward(ek) => Some(ek),
+                    _ => None,
+                };
+                if should_explore_callers(f, incoming_edge, params, &graph.type_registry) {
+                    for (caller_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Call)) {
+                        let caller_id = graph.node(caller_idx).core().id;
+                        if !visited.contains(&caller_id) {
+                            queue.push_back((caller_idx, depth + 1, ReachedVia::CallIn, None));
+                        }
+                    }
+                }
+            }
+
+            // === Reverse exploration: shared-state write (mutable variable reached via Read) ===
+            if let Node::Variable(v) = current_node
+                && v.mutability == crate::domain::node::Mutability::Mutable
+                && matches!(reached_via, ReachedVia::Forward(EdgeKind::Read))
+            {
+                for (writer_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Write)) {
+                    let writer_id = graph.node(writer_idx).core().id;
+                    if !visited.contains(&writer_id) {
+                        queue.push_back((
+                            writer_idx,
+                            depth + 1,
+                            ReachedVia::SharedStateWrite,
+                            None,
+                        ));
                     }
                 }
             }
@@ -196,17 +253,13 @@ impl CfSolver {
 
         let graph = self.graph.as_ref();
         let params = &self.params;
-        // Per-call visited set, keyed by NodeIndex::index().
-        // We keep an incrementally-updated total and a reachable list so we never have to scan
-        // the whole bitset at the end.
         let node_count = graph.graph.node_count();
         let mut visited = vec![false; node_count];
         let mut reachable: Vec<NodeIndex> = Vec::new();
         let mut total_size: u32 = 0;
 
-        let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+        let mut queue: VecDeque<(NodeIndex, ReachedVia)> = VecDeque::new();
 
-        // Helper to add a node exactly once (and keep totals in sync).
         let add_node = |idx: NodeIndex,
                         visited: &mut [bool],
                         reachable: &mut Vec<NodeIndex>,
@@ -223,38 +276,61 @@ impl CfSolver {
         };
 
         add_node(start, &mut visited, &mut reachable, &mut total_size);
-        queue.push_back(start);
+        queue.push_back((start, ReachedVia::Start));
 
-        while let Some(current) = queue.pop_front() {
+        while let Some((current, reached_via)) = queue.pop_front() {
             let current_node = graph.node(current);
 
-            // For totals we don't need deterministic ordering; skip neighbor sorting to save time.
-            for (neighbor, edge_kind) in graph.neighbors(current) {
+            for (neighbor, edge_kind) in graph.outgoing_edges(current) {
                 let neighbor_pos = neighbor.index();
                 if neighbor_pos < visited.len() && visited[neighbor_pos] {
                     continue;
                 }
 
                 let neighbor_node = graph.node(neighbor);
-                let decision = evaluate(params, current_node, neighbor_node, edge_kind, graph);
+                let decision =
+                    evaluate_forward(params, current_node, neighbor_node, edge_kind, graph);
 
-                if matches!(
-                    decision,
-                    crate::domain::policy::PruningDecision::Transparent
-                ) {
+                if matches!(decision, PruningDecision::Transparent) {
                     if let Some(cached_set) = self.memo.reachable.get(&neighbor) {
-                        // Reuse cached reachable set when we are allowed to expand `neighbor`.
                         for &idx in cached_set {
                             add_node(idx, &mut visited, &mut reachable, &mut total_size);
                         }
                     } else {
-                        // Expand normally (BFS) and cache later.
                         add_node(neighbor, &mut visited, &mut reachable, &mut total_size);
-                        queue.push_back(neighbor);
+                        queue.push_back((neighbor, ReachedVia::Forward(edge_kind.clone())));
                     }
                 } else {
-                    // Boundary: include its size, but do not traverse through it.
                     add_node(neighbor, &mut visited, &mut reachable, &mut total_size);
+                }
+            }
+
+            if let Node::Function(f) = current_node {
+                let incoming_edge = match &reached_via {
+                    ReachedVia::Forward(ek) => Some(ek),
+                    _ => None,
+                };
+                if should_explore_callers(f, incoming_edge, params, &graph.type_registry) {
+                    for (caller_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Call)) {
+                        let caller_pos = caller_idx.index();
+                        if caller_pos < visited.len() && !visited[caller_pos] {
+                            add_node(caller_idx, &mut visited, &mut reachable, &mut total_size);
+                            queue.push_back((caller_idx, ReachedVia::CallIn));
+                        }
+                    }
+                }
+            }
+
+            if let Node::Variable(v) = current_node
+                && v.mutability == crate::domain::node::Mutability::Mutable
+                && matches!(reached_via, ReachedVia::Forward(EdgeKind::Read))
+            {
+                for (writer_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Write)) {
+                    let writer_pos = writer_idx.index();
+                    if writer_pos < visited.len() && !visited[writer_pos] {
+                        add_node(writer_idx, &mut visited, &mut reachable, &mut total_size);
+                        queue.push_back((writer_idx, ReachedVia::SharedStateWrite));
+                    }
                 }
             }
         }
@@ -425,24 +501,50 @@ mod tests {
 
     #[test]
     fn test_shared_state_write_expansion() {
+        // Reader R reads mutable var V; W1 and W2 write to V. Reverse exploration from V follows incoming Write to W1, W2.
         let mut graph = ContextGraph::new();
         let r = graph.add_node("sym::r".into(), test_node(0, "r", 10));
-        let w1 = graph.add_node("sym::w1".into(), test_node(1, "w1", 20));
-        let w2 = graph.add_node("sym::w2".into(), test_node(2, "w2", 30));
-        graph.add_edge(r, w1, EdgeKind::SharedStateWrite);
-        graph.add_edge(r, w2, EdgeKind::SharedStateWrite);
+        let v_span = crate::domain::node::SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 1,
+            end_column: 5,
+        };
+        let v_core = crate::domain::node::NodeCore::new(
+            1,
+            "v".to_string(),
+            None,
+            1,
+            v_span,
+            0.0,
+            false,
+            "test.py".to_string(),
+        );
+        let var = Node::Variable(crate::domain::node::VariableNode {
+            core: v_core,
+            var_type: Some("int#".to_string()),
+            mutability: crate::domain::node::Mutability::Mutable,
+            variable_kind: crate::domain::node::VariableKind::Global,
+        });
+        let var_idx = graph.add_node("sym::v".into(), var);
+        let w1 = graph.add_node("sym::w1".into(), test_node(2, "w1", 20));
+        let w2 = graph.add_node("sym::w2".into(), test_node(3, "w2", 30));
+        graph.add_edge(r, var_idx, EdgeKind::Read);
+        graph.add_edge(w1, var_idx, EdgeKind::Write);
+        graph.add_edge(w2, var_idx, EdgeKind::Write);
         let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[r], None);
-        assert_eq!(result.reachable_set.len(), 3);
-        assert_eq!(result.total_context_size, 10 + 20 + 30);
+        assert_eq!(result.reachable_set.len(), 4); // r, v, w1, w2
+        assert_eq!(result.total_context_size, 10 + 1 + 20 + 30);
     }
 
     #[test]
     fn test_call_in_expansion() {
+        // Caller --Call--> Callee. Start at Callee; call-in exploration follows incoming Call to Caller.
         let mut graph = ContextGraph::new();
         let callee = graph.add_node("sym::callee".into(), test_node(0, "callee", 10));
         let caller = graph.add_node("sym::caller".into(), test_node(1, "caller", 25));
-        graph.add_edge(callee, caller, EdgeKind::CallIn);
+        graph.add_edge(caller, callee, EdgeKind::Call);
         let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[callee], None);
         assert_eq!(result.reachable_set.len(), 2);
@@ -496,6 +598,7 @@ mod tests {
 
     #[test]
     fn test_start_at_middle_of_chain() {
+        // A -> B -> C. Start at B. B has incomplete spec so call-in exploration reaches A.
         let mut graph = ContextGraph::new();
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
@@ -504,8 +607,8 @@ mod tests {
         graph.add_edge(b, c, EdgeKind::Call);
         let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[b], None);
-        assert_eq!(result.reachable_set.len(), 2);
-        assert_eq!(result.total_context_size, 20 + 30);
+        assert_eq!(result.reachable_set.len(), 3); // B, then C (forward), A (call-in)
+        assert_eq!(result.total_context_size, 10 + 20 + 30);
     }
 
     #[test]

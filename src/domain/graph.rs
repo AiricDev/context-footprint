@@ -52,13 +52,38 @@ impl ContextGraph {
         &self.graph[idx]
     }
 
-    pub fn neighbors(&self, idx: NodeIndex) -> impl Iterator<Item = (NodeIndex, &EdgeKind)> {
+    /// Outgoing edges from `idx` (forward traversal).
+    pub fn outgoing_edges(&self, idx: NodeIndex) -> impl Iterator<Item = (NodeIndex, &EdgeKind)> {
         self.graph
             .neighbors_directed(idx, petgraph::Direction::Outgoing)
             .map(move |neighbor| {
                 let edge = self.graph.find_edge(idx, neighbor).unwrap();
                 (neighbor, self.graph.edge_weight(edge).unwrap())
             })
+    }
+
+    /// Incoming edges to `idx` (reverse exploration). Optionally filter by edge kind.
+    pub fn incoming_edges(
+        &self,
+        idx: NodeIndex,
+        filter: Option<EdgeKind>,
+    ) -> impl Iterator<Item = (NodeIndex, &EdgeKind)> {
+        self.graph
+            .neighbors_directed(idx, petgraph::Direction::Incoming)
+            .map(move |source| {
+                let edge = self.graph.find_edge(source, idx).unwrap();
+                (source, self.graph.edge_weight(edge).unwrap())
+            })
+            .filter(move |(_, kind)| {
+                filter
+                    .as_ref()
+                    .is_none_or(|f| std::mem::discriminant(*kind) == std::mem::discriminant(f))
+            })
+    }
+
+    /// Alias for [Self::outgoing_edges] (backward compatibility).
+    pub fn neighbors(&self, idx: NodeIndex) -> impl Iterator<Item = (NodeIndex, &EdgeKind)> {
+        self.outgoing_edges(idx)
     }
 }
 
@@ -121,10 +146,10 @@ mod tests {
         let idx_b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
         graph.add_edge(idx_a, idx_b, EdgeKind::Call);
         assert_eq!(graph.graph.edge_count(), 1);
-        let neighbors: Vec<_> = graph.neighbors(idx_a).collect();
-        assert_eq!(neighbors.len(), 1);
-        assert_eq!(neighbors[0].0, idx_b);
-        assert!(matches!(neighbors[0].1, EdgeKind::Call));
+        let out: Vec<_> = graph.outgoing_edges(idx_a).collect();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, idx_b);
+        assert!(matches!(out[0].1, EdgeKind::Call));
     }
 
     #[test]
@@ -150,7 +175,7 @@ mod tests {
         graph.add_edge(idx_a, idx_b, EdgeKind::Call);
         graph.add_edge(idx_a, idx_c, EdgeKind::Call);
         let mut out: Vec<_> = graph
-            .neighbors(idx_a)
+            .outgoing_edges(idx_a)
             .map(|(i, k)| (i, k.clone()))
             .collect();
         out.sort_by_key(|(i, _)| i.index());
@@ -184,7 +209,7 @@ mod tests {
     fn test_empty_neighbors() {
         let mut graph = ContextGraph::new();
         let idx = graph.add_node("sym::sink".into(), test_node(0, "sink", 5));
-        let count = graph.neighbors(idx).count();
+        let count = graph.outgoing_edges(idx).count();
         assert_eq!(count, 0);
     }
 
@@ -215,9 +240,9 @@ mod tests {
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 10));
         graph.add_edge(a, b, EdgeKind::Read);
-        let neighbors: Vec<_> = graph.neighbors(a).collect();
-        assert_eq!(neighbors.len(), 1);
-        assert!(matches!(neighbors[0].1, EdgeKind::Read));
+        let out: Vec<_> = graph.outgoing_edges(a).collect();
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].1, EdgeKind::Read));
     }
 
     #[test]
@@ -241,8 +266,8 @@ mod tests {
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 10));
         graph.add_edge(a, b, EdgeKind::Call);
-        assert_eq!(graph.neighbors(a).count(), 1);
-        assert_eq!(graph.neighbors(b).count(), 0);
+        assert_eq!(graph.outgoing_edges(a).count(), 1);
+        assert_eq!(graph.outgoing_edges(b).count(), 0);
     }
 
     #[test]
@@ -255,8 +280,8 @@ mod tests {
         graph.add_edge(i2, i3, EdgeKind::Call);
         assert_eq!(graph.graph.node_count(), 3);
         assert_eq!(graph.graph.edge_count(), 2);
-        assert_eq!(graph.neighbors(i1).count(), 1);
-        assert_eq!(graph.neighbors(i2).count(), 1);
-        assert_eq!(graph.neighbors(i3).count(), 0);
+        assert_eq!(graph.outgoing_edges(i1).count(), 1);
+        assert_eq!(graph.outgoing_edges(i2).count(), 1);
+        assert_eq!(graph.outgoing_edges(i3).count(), 0);
     }
 }

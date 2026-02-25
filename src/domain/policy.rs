@@ -87,37 +87,38 @@ pub fn is_abstract_factory(
     false
 }
 
-fn call_in_source_decision(
+/// Whether to explore callers of the current function (call-in exploration).
+/// Used when traversing: if true, follow incoming Call edges from this function.
+pub fn should_explore_callers(
+    func_node: &crate::domain::node::FunctionNode,
+    incoming_edge: Option<&EdgeKind>,
     params: &PruningParams,
-    source: &Node,
     type_registry: &TypeRegistry,
-) -> PruningDecision {
-    if let Node::Function(f) = source
-        && f.is_signature_complete_with_registry(type_registry)
-        && f.core.doc_score >= params.doc_threshold
-    {
-        return PruningDecision::Boundary;
+) -> bool {
+    // Already arrived via Call — caller context is known
+    if matches!(incoming_edge, Some(EdgeKind::Call)) {
+        return false;
     }
-    PruningDecision::Transparent
+    // Specification complete — no need to check usage
+    if func_node.is_signature_complete_with_registry(type_registry)
+        && func_node.core.doc_score >= params.doc_threshold
+    {
+        return false;
+    }
+    true
 }
 
-/// Core pruning algorithm: evaluates Boundary vs Transparent.
-/// Order: edge handling → external → node dispatch; uses [PruningParams] (doc_threshold + mode).
-pub fn evaluate(
+/// Forward-edge pruning: evaluates Boundary vs Transparent for outgoing edges only.
+/// Reverse exploration (call-in, shared-state write) is decided in the solver via
+/// should_explore_callers and mutability + Read.
+pub fn evaluate_forward(
     params: &PruningParams,
-    source: &Node,
+    _source: &Node,
     target: &Node,
     edge_kind: &EdgeKind,
     graph: &ContextGraph,
 ) -> PruningDecision {
-    // 1. Dynamic expansion edges
-    match edge_kind {
-        EdgeKind::SharedStateWrite => return PruningDecision::Transparent,
-        EdgeKind::CallIn => return call_in_source_decision(params, source, &graph.type_registry),
-        _ => {}
-    }
-
-    // 2. External dependencies are always boundaries
+    // 1. External dependencies are always boundaries
     if target.core().is_external {
         return PruningDecision::Boundary;
     }
@@ -166,6 +167,17 @@ pub fn evaluate(
             PruningDecision::Transparent
         }
     }
+}
+
+/// Legacy name: delegates to evaluate_forward (all edges are now forward in the graph).
+pub fn evaluate(
+    params: &PruningParams,
+    source: &Node,
+    target: &Node,
+    edge_kind: &EdgeKind,
+    graph: &ContextGraph,
+) -> PruningDecision {
+    evaluate_forward(params, source, target, edge_kind, graph)
 }
 
 // SourceSpan is defined in node.rs

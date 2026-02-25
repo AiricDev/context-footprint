@@ -2,25 +2,19 @@
 
 Coupling metrics are widely used as proxies for software maintainability, yet the dominant approach in research and practice quantifies coupling by counting dependencies—implicitly assuming all dependencies impose equal reasoning cost. This assumption ignores a fundamental distinction: dependencies mediated by narrow interfaces expose far less information than dependencies on concrete implementations, even when the edge count is identical.
 
-We introduce **Context-Footprint (CF)**, a static coupling metric that estimates the *total context volume* required to reason soundly about a code unit. CF models abstraction boundaries—interfaces, immutable types, and explicit specifications—as cut points that limit dependency traversal, yielding a conservative upper bound on reasoning scope. The metric is grounded in principles of *local reasoning* from programming language research, which emphasize confining analysis to a well-defined footprint of state and specification.
+We argue that a more fundamental measure of coupling is the *total context volume* required to reason soundly about a code unit—not the number of its dependencies, but the extent of information they expose. Building on this perspective, we introduce Context-Footprint (CF), a static metric that estimates this reasoning scope by modeling abstraction boundaries—interfaces, immutable types, and explicit specifications—as cut points that limit dependency traversal. The metric is grounded in principles of *local reasoning* and *information hiding* from programming language research, which emphasize confining analysis to a well-defined footprint of state and specification.
 
-We evaluate CF through two empirical studies: a controlled ablation experiment isolating abstraction effects on code modifiability, and a large-scale observational analysis on realistic maintenance benchmarks. **[Placeholder: Key findings—e.g., "Results show that CF explains X% additional variance in task success beyond traditional metrics such as CBO."]**
-
-CF complements existing coupling metrics by capturing a dimension they systematically overlook: the *magnitude* of information exposure, not merely the *presence* of dependencies.
+We evaluate CF through an empirical study on 500 real-world software maintenance tasks from SWE-bench Verified, examining whether CF predicts LLM-based repair success beyond what traditional metrics capture. **[Placeholder: Key findings—e.g., "Results show that CF explains X% additional variance in task success beyond traditional metrics such as CBO."]**
 
 ## **1. Introduction**
 
 Coupling has long been recognized as a central factor affecting software maintainability, modifiability, and comprehension. Consequently, a large body of software engineering research has proposed coupling metrics to quantify the degree of interdependence between software units. The dominant metrics in both research and practice, however, share a common simplifying assumption: dependencies are treated as uniform edges, and coupling is approximated by counting their number or structural arrangement. While a smaller body of work has explored information-flow-aware approaches (e.g., Vovel metrics), these remain peripheral to mainstream adoption and do not directly address the question of *how much context* is required for sound reasoning.
 
-The assumption that dependencies are interchangeable—that each edge in a dependency graph carries equal weight—obscures an important practical distinction. Different dependencies expose substantially different amounts of information to a developer attempting to understand or modify a piece of code. A dependency mediated by a narrow interface or abstract specification typically requires reasoning about far less external information than a dependency on concrete implementation details. As a result, two code units with an identical number of dependencies may impose very different reasoning scopes during maintenance tasks.
+This paper argues that coupling metrics should explicitly account for the variation in reasoning scope across dependencies. We adopt the notion of an *information footprint*, defined as the set of program elements that may need to be considered to reason soundly about a given code unit. This notion is closely related to principles of *local reasoning* studied in programming language research, which emphasize confining reasoning to a limited and well-defined footprint. In this tradition, information hiding—restricting access to implementation details behind well-specified interfaces (Parnas, 1972)—is the primary mechanism that enables local reasoning: when a boundary successfully hides internal decisions, reasoning about a dependent unit can proceed without crossing that boundary. To clarify scope: we do not aim to establish a formal correspondence between coupling metrics and proof systems such as separation logic. Rather, local reasoning serves as a *motivating perspective*—a principled lens for distinguishing dependencies by the amount of information they expose, without requiring formal verification machinery.
 
-This paper argues that coupling metrics should explicitly account for this variation in reasoning scope. We adopt the notion of an *information footprint*, defined as the set of program elements that may need to be considered to reason soundly about a given code unit. This notion is closely related to principles of *local reasoning* studied in programming language research, which emphasize confining reasoning to a limited and well-defined footprint. To clarify scope: we do not aim to establish a formal correspondence between coupling metrics and proof systems such as separation logic. Rather, local reasoning serves as a *motivating perspective*—a principled lens for distinguishing dependencies by the amount of information they expose, without requiring formal verification machinery.
+Building on this perspective, we introduce **Context-Footprint (CF)**, a static coupling metric that estimates the information footprint induced by a code unit’s dependencies. CF treats abstraction boundaries—such as interfaces, abstract classes, and immutable value objects—as potential cut points that limit dependency traversal. Because static analysis cannot precisely determine which external information will be required in all future modification scenarios, CF is deliberately defined as a conservative approximation. This design choice prioritizes robustness and interpretability over maximal precision.
 
-Building on this perspective, we introduce **Context-Footprint (CF)**, a static coupling metric that estimates the information footprint induced by a code unit’s dependencies. CF treats abstraction boundaries—such as interfaces, abstract classes, and immutable value objects—as potential cut points that limit dependency traversal. Because static analysis cannot precisely determine which external information will be required in all future modification scenarios, CF is deliberately defined as a conservative upper bound. This design choice prioritizes robustness and interpretability over maximal precision.
-
-The goal of this work is not to replace existing coupling metrics, but to complement them by capturing a dimension of coupling that edge-counting metrics systematically ignore. To evaluate whether CF provides additional explanatory value, we conduct an empirical study combining controlled experiments and large-scale observational analysis. These experiments examine whether CF is associated with code modifiability in AI-assisted programming tasks, and whether this association persists after accounting for traditional coupling measures.
-
----
+The goal of this work is to complement existing coupling metrics by capturing a dimension of coupling that edge-counting metrics systematically ignore. To evaluate whether CF provides additional explanatory value, we conduct an empirical study on real-world software maintenance tasks. The study examines whether CF predicts code modifiability in AI-assisted programming tasks, and whether this predictive power persists after accounting for traditional coupling measures.
 
 ### **Contributions**
 
@@ -28,171 +22,131 @@ This paper makes the following contributions:
 
 1. **A reasoning-scope perspective on coupling.**
     
-    We identify a fundamental limitation of dependency-counting metrics: they conflate dependencies with vastly different reasoning costs, treating a reference to a 500-line implementation identically to a reference to a 10-line interface.
+    We argue that the *volume of context* required for sound local reasoning is a more fundamental measure of coupling than edge count alone. This perspective reframes coupling as a question of information exposure: how much external detail must be consulted to understand a code unit, rather than how many dependencies it has.
     
 2. **The Context-Footprint (CF) metric.**
     
-    We propose CF, a static coupling metric that estimates the information footprint induced by dependencies, explicitly accounting for abstraction boundaries and specification strength. CF is deliberately defined as a conservative upper bound to ensure robustness under incomplete static information.
+    We propose CF, a static coupling metric that operationalizes the reasoning-scope perspective: CF estimates the total information footprint induced by a code unit's dependencies, using abstraction boundaries as traversal cut points that distinguish high-exposure dependencies from well-encapsulated ones.
     
 3. **Empirical evidence of CF's explanatory value.**
     
-    We provide empirical evidence that CF captures a dimension of coupling not explained by existing metrics, using controlled experiments and observational analysis on realistic software maintenance tasks. [Placeholder: summarize key finding, e.g., "CF explains X% additional variance in task success beyond CBO."]
+    We provide empirical evidence that CF captures a dimension of coupling not explained by existing metrics, using a large-scale study on realistic software maintenance tasks. [Placeholder: summarize key finding, e.g., "CF explains X% additional variance in task success beyond CBO."]
     
 
-Together, these contributions position CF as a practical and theoretically motivated addition to the existing family of coupling metrics.
+Together, these contributions demonstrate that coupling can be meaningfully quantified not merely by counting dependencies, but by estimating the reasoning context they impose—and that this distinction has measurable consequences for real-world software maintenance.
 
 ## 2. Problem Statement
 
 ### 2.1 What Existing Metrics Fail to Capture
 
-The core limitation of existing coupling metrics is not that they are incorrect, but that they are *information-agnostic*. By treating all dependencies as equivalent edges, these metrics fail to capture the variation in reasoning scope induced by different forms of abstraction.
-
-This limitation leads to two practical issues, both recognized in the empirical literature:
+The information-agnostic nature of edge-counting metrics leads to two practical consequences, both documented in the empirical literature:
 
 - **Incomplete prediction of modification effort.** Coupling values derived from edge-counting metrics explain only part of the variance in actual maintenance cost. For example, Wilkie and Kitchenham [2000] found that CBO alone is "inadequate to predict those classes prone to change ripples," because it ignores how much information flows through each dependency. More recent work on Vovel metrics [2021] demonstrates that incorporating information volume significantly improves fault prediction beyond CBO, confirming that edge counts miss a consequential dimension.
 - **Limited actionable guidance.** Edge-counting metrics can indicate that a module is "highly coupled," but cannot explain whether this coupling arises from unavoidable domain interactions or from avoidable leakage of implementation details. Consequently, they offer little insight into *how* coupling might be reduced without changing system behavior.
 
 From the perspective of local reasoning, the relevant quantity is not the number of dependencies, but the *extent of external context* that a developer—or an automated agent—may need to inspect to reason soundly about a change. Existing metrics do not attempt to estimate this quantity.
 
-To clarify scope: context volume is not the only dimension affecting modification difficulty. Intra-unit complexity (e.g., cyclomatic complexity, nesting depth) also contributes to reasoning burden. CF is designed to capture a dimension that edge-counting metrics *systematically ignore*—the magnitude of external information exposure—rather than to subsume all factors influencing modifiability. In our empirical evaluation, we control for cyclomatic complexity to isolate CF's unique contribution.
-
----
-
 ### 2.2 Problem Scope and Design Goals
 
 This work addresses the following problem:
 
-> How can we define a coupling metric that estimates the total context volume required for sound local reasoning about a code unit, while remaining practical to compute using static analysis?
+> *What quantity should a coupling metric estimate to capture reasoning cost, rather than merely dependency count? And how can this quantity be approximated practically using static analysis?*
 > 
 
 We deliberately constrain the scope of this problem in three ways:
 
-- **Static analysis.** While dynamic information may refine estimates of actual runtime behavior, static metrics are more broadly applicable and better aligned with existing tooling and empirical studies.
-- **Conservative upper bound.** Because future modification tasks are unknown, the metric should err on the side of including potentially relevant context rather than attempting precise but brittle predictions.
-- **Pragmatic locality.** We do not seek a formally verified notion of locality. Instead, we draw inspiration from local reasoning principles to guide the identification of abstraction boundaries that plausibly limit dependency traversal in practice.
+- **Static analysis.** CF targets the reasoning scope encountered during code comprehension and modification—activities performed over source code as written, not over runtime program states. Both human developers and AI agents read and reason about static artifacts; consequently, a metric grounded in static dependencies directly reflects the information an agent must process. Dynamic information (e.g., actual call frequencies or runtime object graphs) may refine estimates of execution behavior, but lies outside the scope of the reasoning task CF is designed to characterize.
+- **Syntactic approximation of boundary strength.** Whether an abstraction boundary genuinely supports local reasoning is a semantic judgment that automated analysis cannot make—it would require understanding intent, behavioral contracts, and implicit assumptions. In this work, we approximate boundary strength through syntactic criteria: the presence of type annotations, documentation, and structural patterns such as immutability. This makes the boundary predicate a deliberate extension point in the CF framework; future implementations may employ more sophisticated strategies (e.g., LLM-based evaluation of specification quality) to narrow the gap between syntactic proxy and semantic reality.
+- **Pragmatic locality.** We use local reasoning principles as an engineering heuristic for identifying plausible abstraction boundaries, not as a formal verification criterion.
 
-These design goals lead to **Context-Footprint (CF)**, a coupling metric that estimates the information footprint induced by a code unit’s dependencies. CF explicitly distinguishes dependencies based on how much external context they expose, rather than treating all dependencies as equal.
+**One explicit non-goal deserves mention:** context volume is not the only dimension affecting modification difficulty—intra-unit complexity (e.g., cyclomatic complexity, nesting depth) also contributes to reasoning burden. CF is designed to capture the magnitude of external information exposure, a dimension that edge-counting metrics systematically ignore, rather than to subsume all factors influencing modifiability. In our empirical evaluation, we control for cyclomatic complexity to isolate CF's unique contribution.
+
+*Section 3 introduces Context-Footprint (CF), a metric designed to satisfy these goals.*
 
 ## 3. Context-Footprint Metric
 
-### 3.1 Intuition: Context as a Traversable Dependency Space
+### 3.1 Overview and Intuition
 
-The Context-Footprint (CF) metric is designed to estimate the total program context—including the target unit itself and its transitively reachable dependencies—that may be required to reason soundly about a given code unit. Intuitively, this context corresponds to the portion of the dependency graph that cannot be safely ignored when the unit is inspected or modified.
+The Context-Footprint metric estimates the total volume of program context that may need to be consulted to reason soundly about a given code unit. Rather than counting dependencies, CF asks: *how much source code must an agent—human or automated—potentially read to understand this unit's behavior?*
 
-From a local reasoning perspective, a dependency limits reasoning scope if it enforces a stable abstraction boundary. When such a boundary is respected, reasoning about a code unit can proceed without inspecting the internal structure of its dependencies. Conversely, when a dependency exposes internal representation details or mutable shared state, reasoning may require traversing beyond the immediate dependency to understand its effects.
+CF is built on three key ideas.
 
-CF operationalizes this intuition by treating dependencies as *potentially traversable edges* in a dependency graph. Whether traversal continues across an edge depends on the strength of the abstraction boundary it represents.
+**Conditional traversal over a dependency graph.** CF models a codebase as a directed graph of functions and variables, connected by edges representing reading dependencies—relationships where understanding one unit may require consulting another. Given a target unit, CF traverses this graph outward, accumulating the source code volume of each reachable node. However, not all edges are traversed unconditionally: traversal is *selective*, governed by the strength of abstraction boundaries encountered along the way.
 
----
+**Abstraction boundaries as cut points.** The central mechanism that controls CF's traversal is *information hiding*. When a dependency is mediated by a well-specified abstraction—an interface with documented behavioral contracts, an immutable value whose state is fully determined at construction—the abstraction boundary acts as a *cut point*: traversal stops, and the implementation behind the boundary is excluded from the context footprint. Conversely, when a dependency exposes implementation details—through under-specified interfaces, mutable shared state, or missing type annotations—the boundary fails, and traversal continues into the dependency's internals. In this way, CF directly rewards architectural practices that confine reasoning to narrow, well-defined boundaries, and penalizes designs that leak internal complexity.
 
-### 3.2 Modeling Dependencies and Traversal
+**Syntactic boundary approximation.** Because true specification completeness cannot be assessed by automated analysis (Section 2.2), CF approximates boundary strength through syntactic criteria—type annotations, documentation coverage, and structural patterns such as immutability. This makes boundary evaluation an extensible component of the framework, and different implementations may employ heuristics of varying sophistication.
 
-We model a software system as a directed graph $G = (V, E)$, where each node $v \in V$ represents a program element. In this work, we distinguish three kinds of elements: **functions** (or methods), **type definitions** (classes, interfaces, structs), and **variables** (module-level or class-level state). Each directed edge $(u, v) \in E$ represents a *reading dependency*: to fully understand $u$, one may need to consult $v$.
+### 3.2 Dependency Graph
 
-Critically, this notion of dependency differs from the compile-time or call-graph dependencies used in traditional coupling metrics. Rather than asking "does $u$ invoke $v$?", we ask: **"does understanding** $u$ **require reading** $v$**?"** This cognitive framing leads to edges that traditional metrics do not capture.
+We model a software system as a directed graph $G = (V, E)$, where each node $v \in V$ represents either a **function** (or method) or a **variable** (module-level or class-level state). Type definitions—classes, interfaces, structs, enums—are not graph nodes; instead, they are stored in a separate **Type Registry** and referenced by type identifiers from node attributes (e.g., parameter types, return types, variable types).
 
-Consider a function with a loosely specified parameter list—no type annotations, no documentation, and high degrees of freedom in how arguments may be supplied. To understand what values this function actually receives, a reader must inspect *call sites*: the places where the function is invoked. This induces a **call-in dependency** from the function to its callers—a direction opposite to the usual call-graph edge. Similarly, a function's parameter list induces dependencies on the types of its parameters, because understanding the function's behavior requires knowing what operations those types support.
+This design reflects a functional decomposition of program structure: functions represent *execution logic*, variables represent *state*, and types serve as *descriptive attributes* that constrain the behavior of functions and variables. This separation simplifies the graph model while preserving the information needed for traversal decisions—type information is consulted during boundary evaluation (Section 3.3) without introducing type-level edges into the traversal graph.
 
-Given a target unit $u_0$, the naïve approach to estimating its reasoning context would be to consider all nodes reachable from $u_0$ in $G$. However, this over-approximates the actual reasoning scope, as many dependencies are mediated by abstractions that limit information exposure.
+**Edge types.** Each directed edge $(u, v, k)$ represents a forward dependency from $u$ to $v$ of kind $k$. We define five edge kinds:
 
-CF refines reachability by introducing the notion of *conditional traversal*. An edge $(u, v)$ is traversed only if the dependency does not cross a sufficiently strong abstraction boundary. In other words, traversal proceeds only when understanding $u$ potentially requires inspecting the internal details of $v$.
+- **Call**: $u \to v$ where function $u$ may invoke function $v$.
+- **Read**: $u \to v$ where function $u$ may read variable $v$.
+- **Write**: $u \to v$ where function $u$ may modify variable $v$.
+- **Annotates**: $u \to v$ where code unit $u$ is decorated by $v$ (e.g., Python decorators). The edge points from the decorated unit to the decorator, since the decorator may alter behavior.
+- **ImplementedBy**: $m \to c$ where $m$ is an interface method and $c$ is a concrete implementation of that method. This edge connects functions to functions—not types to types—enabling per-method traversal decisions rather than per-class expansion.
 
-This approach yields a dependency subgraph rooted at $u_0$, representing the maximal external context that may need to be considered under conservative assumptions.
+**Graph construction principle.** The dependency graph must be a conservative over-approximation of all potential forward dependencies. If reasoning about $u$ may require consulting $v$ through any of the five edge kinds above, under any feasible usage context, the corresponding edge must be present. Different analyses may approximate these edges with varying precision (e.g., class hierarchy analysis vs. points-to analysis for Call edges), provided the conservativeness requirement is satisfied.
 
----
+### 3.3 Traversal and Pruning Predicate
 
-### 3.3 Abstraction Boundaries as Cut Points
+The dependency graph defined in Section 3.2 captures all potential forward dependencies between code units. CF computes the reasoning footprint by traversing this graph outward from a target unit—but not all edges are followed unconditionally. This section defines *how* traversal proceeds and *when* it stops.
 
-A key design decision in CF is the identification of abstraction boundaries that terminate dependency traversal. These boundaries are not assumed to be perfect or formally verified; instead, they are treated as *plausible cut points* that typically confine reasoning in practice.
+#### From Invoking to Understanding
 
-Examples of such boundaries include:
+Critically, the notion of "dependency" in CF differs from compile-time or call-graph dependencies used in traditional coupling metrics. Rather than asking "does $u$ invoke $v$?", CF asks: **"does understanding** $u$ **require reading** $v$**?"** This cognitive framing has two consequences for traversal.
 
-- Dependencies through interfaces or abstract base types that do not expose concrete implementations.
-- Immutable value objects whose internal state cannot be modified after construction.
-- Explicit specifications—including documentation, contracts, and type annotations—that constrain observable behavior without revealing representation details.
+First, **forward traversal along outgoing edges** follows the five edge kinds defined in Section 3.2. When function $u$ calls $v$, reads variable $v$, or is decorated by $v$, understanding $u$ may require consulting $v$—so traversal proceeds from $u$ to $v$ along the corresponding edge, subject to boundary evaluation.
 
-Critically, **syntactic abstraction alone is insufficient**. An interface without documentation describing its behavioral contract provides no reasoning boundary: a reader who encounters an undocumented [`Repository.save](http://Repository.save)(entity)` method cannot determine whether it validates input, triggers side effects, or throws exceptions without inspecting the implementation. For CF purposes, such an interface does not constitute a cut point. Only when an abstraction is accompanied by specification sufficient to reason about its behavior—without consulting the implementation—does it qualify as a boundary.
+Second, and less obviously, understanding a unit sometimes requires inspecting entities that *reference* it—a direction opposite to the graph's edge orientation. We call this **reverse exploration**: traversal that follows existing edges *backward*, from target to source. Two situations motivate reverse exploration:
 
-When a dependency crosses such a boundary, CF assumes that traversal may safely stop, and the internal dependencies of the target node are excluded from the context footprint.
+- **Call-in exploration.** Consider a function $v$ with a loosely specified parameter list—no type annotations, no documentation, and high degrees of freedom in how arguments may be supplied. To understand what values $v$ actually receives, a reader must inspect *call sites*: the places where $v$ is invoked. This requires traversing incoming Call edges in reverse—from $v$ to its callers.
+- **Shared-state write exploration.** When a function $u$ reads a mutable variable $S$, understanding $u$ requires knowing the possible values of $S$. This in turn requires inspecting all units that may write to $S$—obtained by traversing incoming Write edges of $S$ in reverse.
 
-This design choice reflects a bias toward soundness. If a boundary is incorrectly identified as strong when it is not, CF may underestimate the true reasoning scope. To mitigate this risk, CF adopts conservative criteria for boundary recognition, favoring false positives (continued traversal) over false negatives (premature termination).
+Neither call-in nor shared-state write exploration introduces new edge types into the graph. Both are traversal strategies over the existing edge set: call-in exploration follows Call edges backward; shared-state write exploration follows Write edges backward from a variable node to its writers.
 
----
+#### Edge-Aware Pruning Predicate
 
-### 3.4 Conservative Upper-Bound Semantics
+Not all reachable edges should be traversed. CF controls traversal through an **edge-aware pruning predicate** $P(E_{in}, v, E_{out})$, which determines, for each candidate next step, whether traversal should continue. Here $v$ is the current node, $E_{in}$ is the edge through which $v$ was reached, and $E_{out}$ is the candidate outgoing edge (or reverse exploration) being considered.
 
-CF is deliberately defined as a conservative upper bound on reasoning scope. The metric does not attempt to predict the minimal context required for a specific future modification task. Instead, it estimates the maximal context that *may* be required across a plausible range of tasks.
+The predicate is edge-aware rather than node-level because *how a node was reached affects what should be explored next*. For example, a function $v$ with incomplete type annotations would normally trigger call-in exploration to understand its usage context. But if $v$ was reached via a Call edge from some caller $u$, the calling context is already known—we know what arguments $u$ passes—and call-in exploration would be redundant. This context-sensitivity cannot be captured by a per-node predicate.
 
-This choice is motivated by two considerations.
+$P$ evaluates to **true** (continue traversal) or **false** (stop; the edge acts as a cut point). The predicate operates with a fundamental asymmetry between forward and reverse directions:
 
-First, future modification scenarios are inherently unknown at measurement time. Any attempt to precisely predict task-specific reasoning scope would rely on assumptions that are difficult to validate empirically.
+**Core asymmetry.** Forward edges check *target* specification; reverse exploration checks *source* specification. This reflects the cognitive reality of code comprehension: forward dependencies ask "what does this thing I'm calling do?", while reverse exploration asks "what inputs might I receive?" or "what state might I observe?"
 
-Second, conservative upper bounds align better with the interpretability of coupling metrics. A higher CF value indicates that more external information might be required in the worst case, providing a monotonic signal that can be compared across code units.
+#### Forward Edge Rules: Target Specification Completeness
 
-As a result, CF prioritizes robustness and consistency over fine-grained precision.
+For forward edges (Call, Read, Annotates, ImplementedBy), traversal stops when the *target* $v$ provides sufficient specification for reasoning without further inspection:
 
-## 3.5 Formal Definition of Context-Footprint
-
-This section formally defines Context-Footprint (CF) as a graph-based metric over code units. The definition specifies the required semantic structure of the dependency graph and the traversal rules used to compute CF, while remaining independent of any particular implementation or tooling.
-
-### 3.5.1 Code Units and Dependency Graph
-
-As defined in Section 3.2, a code unit may be a **function** (or method), a **type definition** (class, interface, struct), or a **variable** (module-level or class-level state). Local variables and parameters are internal to their enclosing function. Anonymous functions (lambdas, closures) are likewise internal to their lexically enclosing unit.
-
-Let $V$ denote the set of code units in a codebase. CF is defined over a directed labeled graph $G = (V, E)$, where each edge $(u, v, k) \in E$ represents a *reading dependency* of kind $k$: understanding $u$ may require consulting $v$ (see Section 3.2 for the cognitive framing of this relation).
-
-**Graph construction principle.** The dependency graph must be a conservative over-approximation of all potential reading dependencies. If reasoning about $u$ may require consulting $v$ under *any* feasible usage context, an edge must be present—regardless of whether that edge will ultimately be traversed during CF computation. Graph construction captures *potential* information flow; traversal decisions are deferred to the boundary predicate (Section 3.5.2).
-
-We distinguish two classes of reading dependencies:
-
-**Forward dependencies** (from a unit to entities it references):
-
-- *Call edges*: $u \to v$ if $u$ may invoke $v$.
-- *Data read edges*: $u \to v$ if $u$ may read a variable or field defined by $v$.
-- *Type dependency edges*: $u \to v$ if reasoning about $u$ requires knowledge of a type defined in $v$ (e.g., parameter types, return types, field types).
-- *Inheritance edges*: $u \to v$ if $u$ depends on behavioral contracts defined in $v$ via inheritance or interface implementation.
-
-**Reverse dependencies** (from a unit to entities that affect it indirectly):
-
-- *Call-in edges*: $u \to v$ if $v$ is a caller of $u$. These edges capture the possibility that understanding $u$'s behavior may require inspecting how it is invoked.
-- *Shared-state write edges*: $u \to v$ if $u$ reads a mutable variable $S$ whose scope exceeds $u$'s own scope (e.g., module-level variables, class fields, global state), and $v$ may write to $S$. This rule effectively **penalizes broad variable scope**: the wider $S$'s scope, the more potential writers exist, and the more edges are added to the graph.
-
-These edge kinds are semantic categories; different analyses may approximate them with varying precision, provided the conservativeness requirement is satisfied.
-
-### 3.5.2 Boundary Predicate
-
-CF incorporates abstraction boundaries through a boundary predicate $B(u, v, k)$, which determines whether traversal along an edge $(u, v, k)$ should stop. Intuitively, $B$ evaluates to true when the dependency relationship provides sufficient specification to reason about behavior without further traversal.
-
-The boundary predicate operates differently for forward and reverse dependencies, reflecting their distinct roles in the dependency graph.
-
-**Core asymmetry.** Forward edges check *target* specification; reverse edges check *source* specification. This reflects the cognitive reality of code comprehension: forward dependencies ask "what does this thing I'm calling do?", while reverse dependencies ask "what inputs might I receive?" or "what state might I observe?"
-
-#### Forward Dependencies: Target Specification Completeness
-
-For forward edges (call, data-read, type, inheritance), traversal stops when the *target* $v$ provides sufficient specification. The predicate assesses:
-
-1. **Interface abstraction.** If $v$ is accessed through an interface or abstract type, and that interface is accompanied by documentation describing its behavioral contract (preconditions, postconditions, side effects), traversal stops at the interface. The concrete implementation behind the interface is excluded from the context footprint.
+1. **Interface abstraction.** If $v$ is accessed through an interface or abstract type accompanied by documentation describing its behavioral contract (preconditions, postconditions, side effects), traversal stops at the interface. Concrete implementations behind the interface are excluded from the context footprint.
 2. **Immutability.** If $v$ is an immutable value object (no mutable fields, no observable state changes after construction), its behavior is fully determined by its construction. Traversal stops at $v$.
-3. **Type completeness.** If $v$ is a type definition with fully specified method signatures, documented semantics, and no hidden state mutations, traversal may stop. Conversely, a type with undocumented methods or implicit side effects does not qualify as a boundary.
+3. **Abstract factory.** If $v$ is a function that returns an abstract type (interface or protocol) with sufficient documentation, traversal stops at $v$ regardless of $v$'s own documentation quality. The caller only interacts with the returned interface, not the factory's implementation details.
 
-#### Reverse Dependencies: Source Specification Completeness
+**Write edges** are unconditionally traversed: writing to a variable may affect its state, and the variable node must be evaluated for its own dependencies—including shared-state write exploration if the variable is mutable.
 
-For reverse edges (call-in, shared-state write), the traversal decision depends on the *source* $u$—specifically, whether $u$'s own specification is sufficient to constrain its behavior without inspecting external context.
+#### Reverse Exploration Rules: Source Specification Completeness
 
-1. **Call-in edges.** Traversal along a call-in edge $u \to v$ (where $v$ calls $u$) proceeds only when $u$'s specification is *incomplete*:
-    - **Traverse** if $u$ lacks type annotations, has loosely typed parameters (e.g., `Any`, `Object`), or has no documentation constraining valid inputs. In such cases, understanding $u$ requires inspecting how it is actually invoked.
-    - **Stop** if $u$ has a complete specification: fully typed parameters, documented preconditions, and explicit contracts. The specification alone supports reasoning about $u$'s behavior.
-2. **Shared-state write edges.** Shared-state write edges exist only when $S$ is mutable and externally scoped. If such an edge is present in the graph, traversal always proceeds—understanding $u$ requires knowing the possible values of $S$, which in turn requires inspecting all units that may write to $S$.
+For reverse exploration (call-in, shared-state write), the decision depends on whether the *current node*'s own specification is sufficient to constrain its behavior without inspecting external context.
 
-#### Conservative Approximation Principle
+**Call-in exploration.** When the traversal reaches a function $v$, it considers whether to explore $v$'s callers (by following incoming Call edges in reverse). The decision depends on both $v$'s specification quality and how $v$ was reached:
 
-Implementations must approximate $B$ conservatively: it is acceptable to treat fewer edges as boundaries than an ideal oracle would (resulting in continued traversal and higher CF values), but implementations must not treat edges as boundaries unless the specification genuinely supports reasoning without further inspection.
+- **If** $v$ **was reached via a Call edge** → Do not explore callers. The calling context is already known from the incoming edge.
+- **If** $v$ **has a complete specification** (fully typed parameters, documented preconditions) → Do not explore callers. The specification suffices to understand $v$'s expected inputs.
+- **Otherwise** → Explore all callers. The specification is insufficient, and call-site inspection is needed to understand $v$'s usage context.
 
-When in doubt, traverse. This principle ensures that CF remains a sound upper bound on reasoning scope, even when specification quality is ambiguous or difficult to assess automatically.
+**Shared-state write exploration.** When traversal reaches a mutable variable $S$ (via a Read edge), it explores all writers of $S$—obtained by following incoming Write edges of $S$ in reverse. This exploration is unconditional: if $S$ is mutable and externally scoped, understanding any reader of $S$ requires knowing what values $S$ may hold, which requires inspecting all units that may write to $S$. This mechanism directly penalizes broad variable scope: the wider $S$'s scope, the more writers exist, and the larger the context footprint.
 
-### 3.5.3 Context-Footprint Computation
+### 3.4 Context-Footprint Computation
 
-Given a target unit $u_0$, CF is computed by traversing the dependency graph starting from $u_0$, following all outgoing edges not cut by the boundary predicate. Let $R(u_0)$ denote the set of units reachable from $u_0$ under these traversal rules.
+CF is defined for **function nodes only**. Variable nodes participate in the dependency graph as structural connectors—mediating Read, Write, and shared-state write exploration—but are not themselves targets of CF computation. This reflects the metric's purpose: CF measures the reasoning cost of understanding a function's behavior, while variables serve as state that links functions together.
+
+Given a target function $u_0$, CF is computed by traversing the dependency graph starting from $u_0$, following all forward edges and reverse explorations not cut by the pruning predicate $P$ (Section 3.3). Let $R(u_0)$ denote the set of nodes visited during this traversal—including $u_0$ itself and all reachable function and variable nodes. Note that $R(u_0)$ may contain variable nodes encountered during traversal; their $size(v)$ contributes to the total footprint, since reading a variable's declaration is part of the reasoning cost.
 
 **Cycle handling.** If traversal encounters a node that has already been visited, it stops at that node—its context volume has already been counted. This standard graph traversal rule ensures $R(u_0)$ is well-defined even in the presence of cycles (e.g., mutual recursion, circular type references).
 
@@ -202,236 +156,253 @@ $$
 CF(u_0) = \sum_{v \in R(u_0)} size(v)
 $$
 
-where $size(v)$ is a non-negative measure of the information content of unit $v$. In this work, we instantiate $size(v)$ as the token count of $v$'s source code. Alternative measures (e.g., AST node count, cyclomatic complexity) are permissible provided they are consistently applied.
+where $size(v)$ is a non-negative measure of the information content of unit $v$. In this work, we instantiate $size(v)$ as the LLM token count of $v$'s source code—i.e., the number of tokens produced by a language model tokenizer (e.g., BPE). This choice directly reflects the context window cost when an LLM agent loads the unit into its prompt. Alternative measures (e.g., AST node count, lexical token count) are permissible provided they are consistently applied.
 
-By definition, $R(u_0)$ includes $u_0$ itself. Consequently, CF measures the *total* context volume required for reasoning about $u_0$—comprising both the target unit and its transitively reachable dependencies. This aligns with the local reasoning perspective: the footprint for sound reasoning includes the focal code, not merely its external dependencies.
+**Note on identifier verbosity.** Using LLM token count as $size(v)$ introduces a potential confound: BPE tokenizers split long identifiers into multiple subword tokens, so good engineering practice—descriptive names like `calculateMonthlyRevenue` vs. terse `calc`—inflates token counts without increasing semantic complexity. This means CF may penalize well-named code relative to cryptic code. However, this effect may be partially self-correcting within the CF framework: a more sophisticated specification completeness evaluator (Section 3.5) that recognizes descriptive function names as implicit specification—e.g., `calculateMonthlyRevenue` conveys behavioral intent that `calc` does not—would more readily classify well-named functions as qualified boundaries, terminating traversal and excluding their entire downstream subgraph from the footprint. In such implementations, the token count inflation from verbose identifiers is offset, potentially substantially, by the CF reduction from stronger boundary recognition. Nonetheless, for implementations using simple syntactic heuristics, normalization strategies—such as replacing identifiers with canonical placeholders before counting, or using AST node counts that are identifier-length-agnostic—remain advisable to decouple CF from naming conventions.
 
-**Note on specification size.** When a unit $v$ serves as a boundary (i.e., traversal stops at $v$), only $v$'s specification contributes to CF, not its implementation. In practice, this means counting the size of the interface or contract rather than the concrete class behind it.
+This definition is independent of how the dependency graph is constructed or how the pruning predicate is approximated, provided the semantic requirements above are satisfied.
 
-This definition is independent of how the dependency graph is constructed or how the boundary predicate is approximated, provided the semantic requirements above are satisfied.
+### 3.5 Permissible Implementation Variations
 
-**Note on identifier verbosity (Threat to Validity).** Using token count as $size(v)$ introduces a potential confound: good engineering practice encourages descriptive, verbose identifier names (e.g., `calculateMonthlyRevenue` vs. `calc`), which inflate token counts without increasing semantic complexity. This means CF may penalize well-named code relative to terse, cryptic code. Future work should explore normalization strategies—such as replacing identifiers with canonical placeholders before counting, or using AST node counts that are identifier-length-agnostic—to decouple CF from naming conventions.
+CF allows flexibility in how its components are instantiated. The algorithm defines two explicit extension points and one source of implementation-dependent precision:
 
-### 3.5.4 Permissible Implementation Variations
+- **Size function.** The choice of $size(v)$ (LLM token count, AST node count, etc.) affects absolute CF values but not relative comparisons within a consistently-measured codebase.
+- **Specification completeness assessment.** The pruning predicate requires judging whether a unit's specification is "sufficient for reasoning." In this work, we approximate completeness via simple coverage heuristics (e.g., presence of docstrings, type annotations). In practice, implementations may employ more sophisticated approaches—including LLM-based semantic evaluation of documentation, or recognition of descriptive naming as implicit specification (Section 3.4)—to narrow the gap between syntactic proxy and semantic reality.
+- **Graph construction precision.** The dependency graph must satisfy the conservativeness requirement of Section 3.2, but implementations may vary in the precision of their static analysis—particularly for alias and effect analysis (which determines the set of writers in shared-state write exploration), and for dynamic language features such as reflection, dynamic dispatch, or higher-order functions. Greater precision reduces false edges without violating conservativeness.
 
-CF allows flexibility in how dependency information is obtained and approximated. Implementations may vary in:
-
-- **Call graph precision.** Different call graph construction techniques (e.g., class hierarchy analysis, points-to analysis) yield different levels of precision. More precise analyses produce tighter CF estimates; less precise analyses remain valid but more conservative.
-- **Alias and effect analysis.** Shared-state write edges depend on determining which units may write to a given variable. Implementations may use varying levels of alias or effect analysis precision.
-- **Dynamic language features.** Treatment of reflection, dynamic dispatch, or higher-order functions may vary, provided the conservativeness requirement is satisfied.
-- **Size function.** The choice of $size(v)$ (token count, AST node count, etc.) affects absolute CF values but not relative comparisons within a consistently-measured codebase.
-- **Specification completeness assessment.** The boundary predicate requires judging whether a unit's documentation is "sufficient for reasoning." In this work, we approximate completeness via simple coverage heuristics (e.g., presence of docstrings, type annotations). In practice, implementations may employ more sophisticated approaches—including LLM-based semantic evaluation of comments—to assess whether documentation genuinely supports local reasoning without inspecting implementation details.
-
-These variations affect the conservativeness and absolute scale of CF values, but do not alter their qualitative interpretation as upper bounds on reasoning context. For empirical comparisons, implementations should be held constant across conditions.
-
----
+These variations affect the conservativeness and absolute scale of CF values, but do not alter their qualitative interpretation as conservative approximations of reasoning context. For empirical comparisons, implementations should be held constant across conditions.
 
 ## 4. Empirical Evaluation
 
-We evaluate Context-Footprint through two complementary studies. **Study A** is a controlled experiment that isolates the effect of abstraction boundaries on code modifiability by systematically ablating the components that CF treats as traversal cut points. **Study B** is an observational analysis that examines whether CF explains variance in task success on realistic software maintenance benchmarks beyond what traditional coupling and complexity metrics capture.
+We evaluate Context-Footprint through an empirical study on realistic software maintenance tasks. The study examines whether CF explains variance in task success beyond what traditional coupling and complexity metrics capture, using a large-scale benchmark of real-world GitHub issues.
 
-Both studies use large language models (LLMs) as experimental subjects. We justify this choice in Section 4.1, then describe each study's design and present results.
+We use LLM-based agents as experimental subjects (Section 4.1), then describe the study design and present results.
 
----
+### 4.1 LLM-Based Agents as Experimental Subjects
 
-### 4.1 LLMs as Experimental Subjects
+We adopt LLM-based agents as experimental subjects. LLM-based coding assistants (Claude Code, Cursor) and autonomous agents (Devin, OpenHands) are rapidly becoming primary executors of code comprehension, modification, and debugging in production environments. In this context, demonstrating that CF predicts LLM-based agent success is directly valuable—these agents are themselves the end users of code comprehension, and CF provides actionable guidance for writing code that is more maintainable by the agents that will actually maintain it.
 
-We adopt LLMs as controlled experimental subjects rather than human developers. This choice is motivated by methodological considerations, not by a claim that LLMs are cognitive models of human programmers.
-
-**Constraint-Level Alignment.** We observe that LLMs and human developers share analogous constraints at the operational level:
-
-1. **Bounded Context.** LLMs have explicit context windows; humans have working memory limits. In both cases, the *effective* reasoning capacity does not scale linearly with nominal capacity.
-2. **Degradation with Irrelevant Information.** Empirical studies demonstrate that LLM performance degrades when relevant information is buried in long contexts (Liu et al., 2023) or diluted by irrelevant material (Shi et al., 2023)—phenomena analogous to attention limits in human cognition.
-3. **Sensitivity to Specification Quality.** Both humans and LLMs benefit from explicit contracts and documentation that reduce the need to inspect implementation details.
-
-**Experimental Advantages.** Using LLMs provides:
+Beyond direct relevance, LLM-based agents offer methodological advantages as experimental subjects:
 
 - **Consistency:** No fatigue, learning effects, or inter-subject variability.
 - **Reproducibility:** Identical prompts and temperature settings yield comparable runs.
-- **Scalability:** Large-scale experiments are feasible within practical time and cost constraints.
-- **Explicit Constraints:** Context limits are measurable and controllable parameters.
+- **Scalability:** Large-scale experiments (500 tasks × multiple trials) are feasible within practical time and cost constraints.
+- **Explicit constraints:** Context window limits are measurable and controllable parameters, directly aligned with what CF estimates.
 
-We make a limited claim: if architectural patterns designed to support human local reasoning (interface segregation, dependency inversion, explicit specifications) also improve LLM performance, this suggests these patterns may be broadly adaptive for *any* bounded-resource reasoning agent. We do not claim that LLM behavior generalizes to all aspects of human software comprehension.
+**Limitations.** LLM-based agents also introduce experiment-specific concerns. Results are tied to specific model versions and may not generalize across model generations. Agent behavior is sensitive to prompt design and retrieval strategy, which are confounds not present in traditional human studies. Even at low temperature settings, non-determinism remains—we mitigate this through multiple runs per task (Section 4.2.5). These limitations are further discussed in Section 4.3.
 
 ---
 
-### 4.2 Study A: Controlled Ablation Experiment
+### 4.2 Study Design: SWE-bench Verified Correlation Study
 
 #### 4.2.1 Objective
 
-Study A tests the **construct validity** of CF by examining whether the abstraction boundaries that CF treats as traversal cut points—type annotations, documentation, and interface abstraction—have measurable effects on code modifiability.
+This study examines the **predictive validity** of CF: does CF explain variance in real-world software maintenance task success beyond what traditional coupling and complexity metrics capture?
 
-If CF's boundary predicate correctly identifies factors that limit reasoning scope, then *removing* these boundaries should:
+**Core Hypothesis:** CF predicts LLM-based agent repair success rate beyond what traditional metrics (CC, CBO, Vovel) capture.
 
-1. Increase CF values (more context required for reasoning).
-2. Decrease task success rates (modifiability degrades).
+#### 4.2.2 Dataset: SWE-bench Verified
 
-#### 4.2.2 Dataset: BugsInPy
-
-We use **BugsInPy**, a curated benchmark of 493 real-world Python bugs with accompanying test suites. BugsInPy provides:
-
-- **Ecological validity:** Bugs encountered by real developers in production projects.
-- **Ground truth:** Each bug has a verified fix and regression tests.
-- **Appropriate granularity:** Most bugs are localized to individual functions or classes.
-
-**Sample Selection Criteria.** We select a subset of bugs (target: 30–50) satisfying:
-
-1. Bug is localized within a method body (excludes import errors, configuration issues).
-2. Target function has external dependencies (enables inlining transformation).
-3. Context size is moderate (500–2,000 tokens) to avoid floor/ceiling effects.
-
-#### 4.2.3 Experimental Conditions
-
-We construct four experimental conditions through automated code transformations:
-
-| Condition | Transformation | CF Theoretical Effect |
-| --- | --- | --- |
-| **G1: Baseline** | Original code with all type hints, docstrings, and abstractions intact | Low CF |
-| **G2: No-Type** | Remove all type annotations using `strip-hints` | Higher CF (Signature Completeness boundary fails) |
-| **G3: No-Doc** | Remove all docstrings and inline comments | Higher CF (Documentation Completeness boundary fails) |
-| **G4: Inlined** | Inline all called functions into the target using LibCST | Highest CF (Abstraction boundaries eliminated) |
-
-**Transformation Tools:**
-
-- `strip-hints`: Automated type annotation removal.
-- `LibCST`: AST manipulation for docstring removal and function inlining.
-- Custom scripts: CF computation for each variant.
-
-#### 4.2.4 Procedure
-
-For each selected bug and each experimental condition:
-
-1. Apply the corresponding transformation to produce the code variant.
-2. Compute CF for the target function in each variant.
-3. Construct a prompt containing: (a) the transformed code context, (b) the bug description from BugsInPy, and (c) instructions to generate a patch.
-4. Generate patches using an LLM (model: **[Placeholder: e.g., GPT-3.5-Turbo or DeepSeek-V3]**).
-5. Apply each generated patch and run the BugsInPy test suite.
-6. Record: condition, CF value, token count, and pass/fail outcome.
-
-Each condition is run **5 times per bug** (temperature = 0.2) to account for sampling variance. The primary metric is **Pass@1 rate**: the proportion of trials producing a correct fix.
-
-#### 4.2.5 Hypotheses
-
-- **H1:** CF values increase monotonically across conditions: G1 < G2 ≈ G3 < G4.
-- **H2:** Pass@1 rates decrease monotonically: G1 > G2 ≈ G3 > G4.
-- **H3:** Within each condition, higher CF values are associated with lower Pass@1 rates.
-
-#### 4.2.6 Results
-
-**[Placeholder: Results tables and figures to be inserted after experiment completion.]**
-
-**Expected Visualization:** A scatter plot with:
-
-- X-axis: Token consumption (context size)
-- Y-axis: Pass@1 rate
-- Color: Experimental condition (G1–G4)
-
-Predicted pattern: G1 (Baseline) clusters in the upper-left (low tokens, high success); G4 (Inlined) clusters in the lower-right (high tokens, low success).
-
----
-
-### 4.3 Study B: Observational Analysis on SWE-bench
-
-#### 4.3.1 Objective
-
-Study B examines the **predictive validity** of CF: does CF explain variance in real-world software maintenance task success beyond what traditional coupling and complexity metrics capture?
-
-Unlike Study A, Study B does not manipulate code structure. Instead, it analyzes the relationship between pre-existing code characteristics and task outcomes on a standardized benchmark.
-
-#### 4.3.2 Dataset: SWE-bench Lite
-
-**SWE-bench Lite** contains 300 curated software engineering tasks derived from real GitHub issues and pull requests. Each task requires understanding an issue description, locating relevant code, and producing a correct patch.
+**SWE-bench Verified** contains 500 human-validated software engineering tasks derived from real GitHub issues and pull requests across 12 open-source Python repositories. Each task requires understanding an issue description, locating relevant code, and producing a correct patch.
 
 Key advantages:
 
+- **High quality:** Human-validated to confirm solvability.
 - **Realistic tasks:** Derived from actual maintenance workflows.
-- **Standardized evaluation:** Official test suites and published leaderboard results.
-- **Diverse projects:** Tasks span multiple Python repositories with varying architectural styles.
+- **Standardized evaluation:** Official test suites with clear pass/fail criteria.
+- **Difficulty annotations:** Tasks include estimated resolution time (15 min - 1 hour, 1-4 hours, etc.).
+- **Pure Python:** All 500 tasks are Python-only, enabling consistent CF computation.
 
-#### 4.3.3 Variables
+#### 4.2.3 Variables
 
-**Dependent Variable:**
+**Dependent Variables:**
 
-- **Success** (binary): Whether a given model produces a patch that passes all tests for a given task.
-
-**Independent Variables (computed for the target file(s) of each task):**
-
-| Variable | Description | Source |
+| Variable | Definition | Source |
 | --- | --- | --- |
-| **CF** | Context-Footprint of the target function(s) | This work |
-| **LOC** | Lines of code | Baseline size metric |
-| **CC** | Cyclomatic Complexity | Intra-unit complexity control |
-| **CBO** | Coupling Between Objects | Traditional coupling metric (pydeps) |
-| **Fan-out** | Number of outgoing dependencies | Structural coupling |
+| **Success** | Task repair success rate (Pass@k) | Agent experiment (3-5 runs per task) |
+| **Token Usage** | Context tokens consumed by the agent | Agent call logs |
 
-**Control Variables:**
+**Independent Variables:**
 
-- **Project:** Fixed effect for repository (accounts for project-specific difficulty).
-- **Task Type:** Categorical (bug fix, feature addition, refactoring) if available.
+| Variable | Definition | Computation |
+| --- | --- | --- |
+| **CF (Task-level)** | Context-Footprint of the target function(s) | CF algorithm with union for multi-function patches |
+| **CF_p90** | 90th percentile CF across all functions in the codebase | Codebase-level CF distribution |
+| **CBO** | Coupling Between Objects (edge-counting) | pydeps or static analysis |
+| **CC** | Cyclomatic Complexity of target function(s) | Static analysis (radon, lizard) |
+| **Vovel** | Information-volume coupling: sum of parameter/return type sizes across method invocations | Custom implementation or weighted CBO proxy |
 
-#### 4.3.4 Statistical Model
+We include **Vovel** as the information-volume baseline—CF's closest "competitor"—to demonstrate that CF captures a dimension beyond what Vovel measures (transitive context and abstraction boundaries).
 
-We use logistic regression to model the probability of task success:
-
-**Model 1 (Baseline):**
-
-$$
-\text{logit}(P(\text{Success})) = \beta_0 + \beta_1 \cdot \text{LOC} + \beta_2 \cdot \text{CC} + \beta_3 \cdot \text{CBO} + \beta_4 \cdot \text{Fan-out} + \gamma_{\text{project}}
-$$
-
-**Model 2 (CF Added):**
+**Multi-Function CF Computation.** When a task's gold patch modifies multiple functions, we compute:
 
 $$
-\text{logit}(P(\text{Success})) = \beta_0 + \beta_1 \cdot \text{LOC} + \beta_2 \cdot \text{CC} + \beta_3 \cdot \text{CBO} + \beta_4 \cdot \text{Fan-out} + \beta_5 \cdot \text{CF} + \gamma_{\text{project}}
+CF_{task} = |Union(TraversalNodes(f_1), TraversalNodes(f_2), ...)|  
 $$
 
-**Incremental Validity Tests:**
+This union operation avoids double-counting shared dependencies (e.g., common utilities).
 
-1. **Coefficient Significance:** Is $\beta_5$ (CF coefficient) significantly different from zero ($p < 0.05$) in Model 2?
-2. **Likelihood Ratio Test:** Does Model 2 fit significantly better than Model 1?
-3. **AUC Improvement:** Does adding CF increase the area under the ROC curve?
-4. **Effect Size:** What is the odds ratio associated with a one-standard-deviation increase in CF?
+#### 4.2.4 Codebase-Level CF Analysis
 
-#### 4.3.5 Robustness Checks
+Beyond task-level CF, we compute **codebase-level CF distribution** to capture "localization difficulty":
 
-To assess generalizability, we perform stratified analyses:
+| Metric | Definition | Hypothesis |
+| --- | --- | --- |
+| **CF_p50** | Median CF of all public functions in the codebase | Reflects "typical" function complexity; robust to outliers |
+| **CF_p90** | 90th percentile CF in the codebase | Captures complexity of hardest 10% functions; higher → harder to localize |
+| **CF_target_percentile** | Target function's CF percentile in the distribution | Captures relative complexity within project |
 
-- **By task complexity:** Low (LOC < 100), Medium (100–500), High (> 500).
-- **By baseline coupling:** Low-CBO vs. High-CBO projects.
-- **By model:** Separate analyses for different LLM agents (if leaderboard provides per-model results).
+**Note on percentile selection.** We use percentile-based metrics (p50, p90) rather than mean/std because CF distributions are typically heavy-tailed—a few high-coupling functions can dominate mean and inflate std. Percentiles are more robust to outliers. We evaluate multiple percentiles (p75, p90, p95) in the analysis and report the best-performing one, with others shown as robustness checks.
 
-#### 4.3.6 Results
+**Rationale:** Even if a target function has moderate CF, the agent may struggle to *locate* it in a codebase where codebase-level CF is high. Codebase-level metrics help distinguish "CF affects localization" from "CF affects repair."
 
-**[Placeholder: Regression tables, AUC comparison, and stratified analysis to be inserted after data collection.]**
+#### 4.2.5 Experimental Procedure
 
-**Key Metrics to Report:**
+We run LLM experiments ourselves rather than relying on leaderboard results. This enables:
 
-- Model 1 vs. Model 2: Likelihood ratio $chi^2$, $Delta$AUC
-- CF coefficient: $beta_5$, 95% CI, $p$-value, odds ratio
-- Variance explained: McFadden's pseudo-$R^2$ for both models
+- Recording **token usage** (not provided by official leaderboards).
+- Logging **retrieval behavior** (which files the agent accessed).
+- Supporting richer analysis: distinguishing localization failures from repair failures.
+
+**Agent Configuration:**
+
+| **Model** | gpt-oss-120b |  |
+| --- | --- | --- |
+| **Runs per task** | 3-5 |  |
+| **Runs per task** | 3-5 |  |
+| **Temperature** | 0.2 |  |
+
+We use a single mid-tier open-source model (gpt-oss-120b) for the primary experiment. If results warrant further investigation, we may supplement with a SOTA proprietary model to assess whether CF's predictive power varies with agent capability.
+
+#### 4.2.6 Hypotheses
+
+- **H1:** Task-level CF is negatively correlated with repair success rate and positively correlated with agent token consumption.
+- **H2:** CF's predictive power for both Success and Token Usage persists after controlling for CC, CBO, and Vovel.
+- **H3:** Codebase-level CF ($\text{CF}_{p90}$) independently predicts task difficulty and token consumption beyond task-level CF and traditional metrics.
+
+#### 4.2.7 Statistical Models
+
+Each hypothesis is tested through a dedicated statistical comparison. We use two families of models: **logistic regression** for Success (binary) and **linear regression** for Token Usage (continuous). All models include project fixed effects $\gamma_{\text{project}}$ to control for repository-level variation. All continuous predictors are standardized (zero mean, unit variance) prior to model fitting.
+
+#### H1: Marginal Predictive Validity of CF
+
+H1 tests whether task-level CF alone predicts task outcomes, establishing baseline predictive validity before introducing control variables. We fit two univariate models:
+
+**H1a — Success (Logistic):**
+
+$$
+\text{logit}(P(\text{Success})) = \beta_0 + \beta_1 \cdot \text{CF} + \gamma_{\text{project}}
+$$
+
+**H1b — Token Usage (Linear):**
+
+$$
+\text{TokenUsage} = \beta_0 + \beta_1 \cdot \text{CF} + \gamma_{\text{project}} + \epsilon
+$$
+
+**Validation:** $\beta_1$ is significantly negative for Success ($p < 0.05$) and significantly positive for Token Usage. We report AUC for H1a and $R^2$ for H1b.
+
+#### H2: Incremental Validity Beyond Traditional Metrics
+
+H2 tests whether CF provides explanatory power beyond CC, CBO, and Vovel. We compare nested models for each dependent variable:
+
+**Model A (Baseline):**
+
+$$
+\text{logit}(P(\text{Success})) = \beta_0 + \beta_1 \cdot \text{CC} + \beta_2 \cdot \text{CBO} + \beta_3 \cdot \text{Vovel} + \gamma_{\text{project}}
+$$
+
+**Model B (+ CF):**
+
+$$
+\text{logit}(P(\text{Success})) = \beta_0 + \beta_1 \cdot \text{CC} + \beta_2 \cdot \text{CBO} + \beta_3 \cdot \text{Vovel} + \beta_4 \cdot \text{CF} + \gamma_{\text{project}}
+$$
+
+The same nested comparison (Model A′ vs. Model B′) is repeated with Token Usage as the dependent variable using OLS regression.
+
+**Validation:**
+
+1. **Likelihood ratio test (LRT):** Model B significantly improves over Model A ($p < 0.05$).
+2. **Coefficient significance:** $\beta_4$ (CF) is significant after controlling for CC, CBO, Vovel.
+3. **Discrimination / fit improvement:** $\Delta\text{AUC}$ for Success; $\Delta R^2$ for Token Usage.
+4. **Effect size:** Odds ratio for a one-standard-deviation increase in CF (Success); standardized $\beta_4$ (Token Usage).
+
+#### H3: Independent Contribution of Codebase-Level CF
+
+H3 tests whether codebase-level complexity ($\text{CF}_{p90}$) predicts task difficulty beyond task-level CF and traditional metrics.
+
+**Model C (Baseline with task-level CF):**
+
+$$
+\text{logit}(P(\text{Success})) = \beta_0 + \beta_1 \cdot \text{CC} + \beta_2 \cdot \text{CBO} + \beta_3 \cdot \text{Vovel} + \beta_4 \cdot \text{CF} + \gamma_{\text{project}}
+$$
+
+**Model D (+ CF_p90):**
+
+$$
+\text{logit}(P(\text{Success})) = \beta_0 + \beta_1 \cdot \text{CC} + \beta_2 \cdot \text{CBO} + \beta_3 \cdot \text{Vovel} + \beta_4 \cdot \text{CF} + \beta_5 \cdot \text{CF}_{p90} + \gamma_{\text{project}}
+$$
+
+The same nested comparison (Model C′ vs. Model D′) is repeated for Token Usage.
+
+**Validation:**
+
+1. **LRT:** Model D significantly improves over Model C.
+2. **Coefficient significance:** $\beta_5$ ($\text{CF}_{p90}$) is significant after controlling for task-level CF.
+3. **Effect size:** Odds ratio for a one-standard-deviation increase in $\text{CF}_{p90}$.
+
+**Note on project fixed effects and CF_p90.** Because $\text{CF}_{p90}$ is a codebase-level variable and each task belongs to one of 12 repositories, $\text{CF}_{p90}$ varies only across projects—not within projects. If project fixed effects absorb all between-project variance, $\text{CF}_{p90}$ becomes unidentifiable. We address this by using random intercepts for projects (mixed-effects logistic regression) in H3, which partially pool project-level variance and allow $\text{CF}_{p90}$ to be estimated. We report both fixed-effect and mixed-effect specifications as robustness checks.
+
+#### 4.2.8 Supplementary Analyses
+
+1. **Stratified Analysis**
+    - By difficulty: 15 min - 1 hour vs. 1-4 hours tasks
+    - By project: Is CF effect consistent across different repositories?
+2. **Mediation Analysis (Token Usage)**
+    - Does CF's effect on Success operate *through* increased token consumption (mediation), or does CF predict Success even after controlling for Token Usage (direct effect)?
+3. **Localization vs. Repair Analysis** (if retrieval logs available)
+    - Do high-CF tasks show higher rates of incorrect file retrieval?
+    - Does codebase-level CF primarily affect localization stage?
+4. **Patch Size Sensitivity Analysis**
+    - Gold patch size (number of functions modified) is mechanically correlated with $\text{CF}_{task}$ through the union operation and may independently affect task difficulty. However, patch size is a post-hoc variable derived from the ground-truth solution—not observable before the task is attempted—and may function as a mediator (high CF → more code to modify → larger patch → lower success) rather than a confounder. Including it as a primary control risks blocking the causal pathway from CF to Success.
+    - We therefore treat patch size as a sensitivity check rather than a main-model covariate. We re-fit the H2 models (Model A/B) with patch size added as an additional control and report the change in CF's coefficient magnitude and significance. If CF's effect substantially attenuates, this suggests partial mediation through patch scope; if CF remains significant, it confirms that CF captures reasoning difficulty beyond mere modification scope.
+
+#### 4.2.9 Results
+
+**[Placeholder: Results tables and figures to be inserted after experiment completion.]**
+
+**Expected Contributions:**
+
+If hypotheses are supported, we can claim:
+
+1. **CF is a valid predictor:** CF significantly predicts LLM-based agent repair success after controlling for CC, CBO, and Vovel.
+2. **CF captures distinct information:** CF measures "context volume for reasoning"—a dimension not captured by complexity (CC), edge-counting (CBO), or signature-level information volume (Vovel).
+3. **Codebase-level CF affects localization:** High CF_p90 codebases are harder to navigate, independent of target function complexity.
 
 ---
 
-### 4.4 Threats to Validity
+### 4.3 Threats to Validity
 
 #### Construct Validity
 
 - **CF implementation fidelity:** Our CF implementation may not perfectly instantiate the theoretical definition. We mitigate this by documenting all operationalization choices and releasing the implementation.
-- **Token count as size proxy:** As noted in Section 3.5.3, token count may be confounded by identifier naming conventions.
+- **Token count as size proxy:** As noted in Section 3.4, LLM token count may be confounded by identifier naming conventions.
 
 #### Internal Validity
 
-- **Transformation artifacts (Study A):** Automated transformations may introduce subtle changes beyond the intended ablation. We manually inspect a random sample of transformations.
-- **Confounding variables (Study B):** Observational design cannot establish causation. We control for known confounds but cannot rule out unmeasured factors.
+- **Confounding variables:** Observational design cannot establish causation. We control for known confounds (CC, CBO, Vovel, project effects) but cannot rule out unmeasured factors.
+- **Agent retrieval strategy:** Different agents use different retrieval strategies. CF may correlate with retrieval difficulty rather than repair difficulty. We mitigate this by logging retrieval behavior where possible.
+- **Patch size confound.** $\text{CF}_{task}$ is computed over the union of traversal nodes from gold-patch functions; tasks requiring larger patches mechanically produce higher CF values while also being independently harder to fix. Because patch size is derived from the ground-truth solution (not observable a priori) and may lie on the causal path from CF to Success (i.e., act as a mediator rather than a confounder), we do not include it in the primary models. Instead, we report a sensitivity analysis (Section 4.2.8) that re-fits the H2 models with patch size as an additional covariate to quantify how much of CF's effect operates through modification scope.
 
 #### External Validity
 
-- **Language specificity:** Both studies use Python codebases. Generalization to statically-typed languages remains to be validated.
-- **LLM as proxy:** Results may not fully transfer to human developers, though constraint-level alignment provides partial justification.
+- **Language specificity:** This study uses Python codebases exclusively. Generalization to statically-typed languages remains to be validated.
+- **Model generalization:** Results are tied to specific model versions and agent architectures; generalization across model generations remains to be validated.
+- **Dataset scope:** SWE-bench Verified covers 12 Python repositories. Results may not generalize to all software domains.
 
 #### Statistical Conclusion Validity
 
-- **Sample size:** Study A targets 30–50 bugs × 4 conditions × 5 trials = 600–1,000 observations. Study B uses 300 tasks. Power analysis confirms adequate sensitivity for medium effect sizes.
+- **Sample size:** 500 tasks × 3-5 runs = 1,500–2,500 observations. Power analysis confirms adequate sensitivity for medium effect sizes.
 - **Multiple comparisons:** We apply Bonferroni correction for stratified analyses.
 
 ---
@@ -472,12 +443,14 @@ The term "footprint" in our metric name is a deliberate nod to this tradition. I
 
 **Information Hiding as Boundary Construction.** Earlier, Parnas [1972] argued that modules should hide "design decisions likely to change," and Liskov & Guttag [1986] formalized this through Abstract Data Types. These are not merely coding conventions—they are boundary-construction techniques that enable local reasoning by limiting what external observers need to know.
 
+**Complexity as a Unifying Lens.** More recently, Ousterhout [2018] offered a practitioner-oriented synthesis of these ideas, defining software complexity as "anything related to the structure of a software system that makes it hard to understand and modify the system," and identifying two root causes: *dependencies* and *obscurity*. This framing aligns directly with the local reasoning perspective: dependencies determine how far reasoning must extend beyond a focal unit, while obscurity—the absence of specification sufficient for local reasoning—determines whether a dependency can be safely abstracted away. CF can be viewed as an operationalization of this complexity model: dependencies correspond to edges in the traversal graph, and obscurity corresponds to the failure of the pruning predicate $P$, which forces traversal to continue.
+
 **CF's Relationship to These Ideas.** We do not claim that CF is a formal verification method or that it inherits the mathematical guarantees of Separation Logic. Rather, CF is an *engineering heuristic* inspired by the same underlying principle: **the quality of a boundary determines how much information must cross it for reasoning to succeed**.
 
 - Separation Logic asks: "What memory does this code touch?"
 - CF asks: "What information must an agent load to understand this code?"
 
-Both questions seek to minimize the scope of reasoning. The key difference is that CF trades formal precision for practical measurability—we accept a conservative upper bound in exchange for applicability to real-world, dynamically-typed codebases where formal verification is often infeasible.
+Both questions seek to minimize the scope of reasoning. The key difference is that CF trades formal precision for practical measurability—we accept a conservative approximation in exchange for applicability to real-world, dynamically-typed codebases where formal verification is often infeasible.
 
 ### 5.3 Vovel Metrics: CF's Closest Relative
 
@@ -503,6 +476,4 @@ The **Vovel metrics** (Vovel-in, Vovel-out) are CF's closest intellectual relati
 | Information flow (Henry-Kafura) | Fan-in × Fan-out intensity | CF models abstraction as traversal boundaries |  |
 | **Vovel** | **Parameter/return type volume** | **CF includes transitive context + abstraction cut points** |  |
 
-CF bridges classical coupling theory with PL research on local reasoning. By explicitly modeling abstraction boundaries and providing a conservative upper bound on reasoning scope, CF addresses a question prior metrics do not: *How much external information must an agent load to achieve semantic completeness for local reasoning?*
-
----
+CF bridges classical coupling theory with PL research on local reasoning. By explicitly modeling abstraction boundaries and providing a conservative approximation of reasoning scope, CF addresses a question prior metrics do not: *How much external information must an agent load to achieve semantic completeness for local reasoning?*

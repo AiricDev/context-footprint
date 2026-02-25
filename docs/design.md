@@ -1,800 +1,526 @@
-## **1. Formal Definition: The Context Graph**
+## Architecture Overview
 
-To provide an objective, mathematically rigorous definition, we model the software system as a directed graph.
+CF 的实现分为三个独立模块，通过两个数据协议（Schema）隔离复杂度：
 
-### **1.1 The Graph Model**
+```
+Semantic Data Schema              Graph Schema
+       ↓                              ↓
+[Part 3: Extractor]  →  [Part 2: Graph Builder]  →  [Part 1: CF Query]
+ (language-specific)      (language-agnostic)         (graph algorithm)
+```
 
-Let a codebase be represented as a directed graph $G = (V, E)$, where:
+- **Graph Schema**（`ContextGraph` + `TypeRegistry`）：Part 1 和 Part 2 之间的数据协议。定义了图的节点、边、类型注册表的完整结构。
+- **Semantic Data Schema**（`SemanticData` JSON）：Part 2 和 Part 3 之间的数据协议。定义了语言无关的语义提取结果结构。
 
-- $V$ **(Nodes)**: The set of relevant code units that are **functions** and **variables** only. Type definitions are not graph nodes; they are stored in a separate **Type Registry** and referenced by type IDs from nodes (e.g. function return types, parameter types, variable types).
-- $E$ **(Edges)**: The set of dependency relationships, where $(u, v) \in E$ implies $u$ depends on $v$. Edge types in the implementation are:
-    - **Control flow**: `Call` (function → function)
-    - **Data flow**: `Read`, `Write` (function → variable)
-    - **Dynamic expansion (reverse deps)**: `SharedStateWrite` (reader → writer of shared mutable state), `CallIn` (callee → caller for underspecified functions)
-    - **Interface implementation**: `ImplementedBy` (interface method → concrete implementation method)
-    - **Annotations**: `Annotates` (decorated → decorator)
-
-Type usage (param type, return type, field type, variable type) and type hierarchy (inherits, implements) are represented via node attributes and the Type Registry, not as graph edges.
-
-Each node $u \in V$ has intrinsic physical and semantic properties:
-
-- $S(u)$: The **context size** of unit $u$. This is an abstract measure of information volume, typically implemented as a token count using a standard tokenizer (e.g., `cl100k_base`) or a word-based approximation.
-- $D(u)$: The **documentation score** of unit $u$, a value in range $[0.0, 1.0]$ representing documentation quality.
-- $E(u)$: A boolean flag indicating if the node is **external** (3rd-party library).
-
-### **1.2 Context as a Subgraph**
-
-We define the **Context** of a unit $u$, denoted as $R(u)$, as a **specific subset of nodes** $R(u) \subseteq V$ that must be loaded to satisfy Information Completeness. This set is computed via conditional traversal from $u$ (see Section 2).
-
-The **Context Footprint (CF)** is the total volume of all reached nodes:
-
-$$CF(u) = \sum_{v \in R(u)} size(v)$$
-
-where $size(v)$ is the context size of unit $v$. By definition, $R(u)$ includes $u$ itself, and significantly, it **includes the boundary nodes** themselves (representing the interface being consumed) but not their implementation details.
-
-This definition removes subjective "cognitive weights." The metric is purely **volumetric**: it measures the exact volume of tokens that is **contextually reachable** from $u$.
+每个模块只依赖其输入侧的 Schema，不需要了解其他模块的内部逻辑。
 
 ---
 
-## **2. Reachability and Pruning Rules**
+## Part 1: CF Query
 
-The core of the algorithm is defining the Reachability Function that determines the set $C(u)$. Unlike a standard transitive closure (which would include the entire system), Context Reachability is **conditional**.
+基于 Graph Schema 定义的图结构，实现 CF 的遍历与计算。
 
-We define a **Pruning Function** $P(v)$ that determines whether a node acts as a "Context Boundary."
+### 1.1 Graph Definition
 
-### **2.1 The Traversal Algorithm**
+将代码库建模为有向图 $G = (V, E)$：
 
-The set $C(u)$ is the set of all nodes visited by the following traversal:
+**Nodes** $V$：代码单元，仅包含 **函数** 和 **变量**。类型定义不是图节点，存储在独立的 **Type Registry** 中，由节点通过 type ID 引用。
 
-1. **Start** at $u$. Mark $u$ as visited. Add $u$ to $R(u)$.
-2. **For each neighbor** $v$ of $u$:
-    - If $v$ is visited, skip (Cycle Handling).
-    - Add $v$ to $R(u)$.
-    - **Check Boundary Condition** $B(u, v, k)$ for edge kind $k$:
-        - If $B(u, v, k) = \text{true}$ (boundary), **STOP**. Do not traverse outgoing edges from $v$.
-        - If $B(u, v, k) = \text{false}$ (transparent), **CONTINUE**. Recursively traverse from $v$.
+**Edges** $E$：所有边均为 **正向依赖**（forward dependency），从使用者指向被使用者。五种边类型：
 
-### **2.2 The Pruning Predicate $P(v)$**
-
-To capture the nuance of human code reading (where a "well-documented interface" stops our reading, but a "poorly documented one" forces us to check the implementation), we define the boundary predicate $B(u, v, k)$ which determines whether traversal along edge $(u, v)$ of kind $k$ should stop.
-
-**Core Asymmetry:** Forward edges check *target* specification; reverse edges check *source* specification. This reflects cognitive reality: forward dependencies ask "what does this thing I'm calling do?", while reverse dependencies ask "what inputs might I receive?" or "what state might I observe?"
-
-### **Forward Dependencies (Call, Type, Data-Read, Inheritance)**
-
-Traversal stops when the *target* $v$ provides sufficient specification:
-
-- **Interface abstraction**: $v$ is accessed through an interface/abstract type with documented behavioral contract
-- **Immutability**: $v$ is an immutable value object
-- **Type completeness**: $v$ has fully specified signatures and documented semantics
-
-### **Reverse Dependencies (Call-in, Shared-state Write)**
-
-Traversal decision depends on the *source* $u$:
-
-- **Call-in edges**: Traverse only if $u$ lacks complete specification (missing type annotations, loosely typed parameters, no documentation)
-- **Shared-state write edges**: Always traverse—understanding $u$ requires knowing possible values of mutable shared state
-
-**Conservative Principle:** When in doubt, traverse. This ensures CF remains a sound upper bound.
-
-### **Micro-Decision Logic Table (Forward Dependencies)**
-
-In the implementation, graph nodes are only **Function** and **Variable**; types live in TypeRegistry. The table below describes boundary decisions for the *target* node $v$ (and for CallIn/SharedStateWrite, the *source* $u$).
-
-| **Target Type** | **Condition** | **$B(u,v,k)$ (Is Boundary?)** |
+| **Edge Kind** | **Direction** | **Semantics** |
 | --- | --- | --- |
-| **Any** | `is_external == true` | **TRUE** (3rd-party always stops) |
-| **Function** | `is_abstract_factory` (return type in TypeRegistry is abstract & doc ≥ threshold) | **TRUE\*** |
-| **Function** | `is_interface_method && sig_complete && doc_score >= threshold` | **TRUE** |
-| **Function** | `sig_complete && doc_score >= threshold` (Academic mode) | **TRUE** |
-| **Function** | otherwise | **FALSE** |
-| **Variable** | `Read` and (Const or Immutable) | **TRUE** |
-| **Variable** | `Read` and Mutable, or `Write` | **FALSE** (transparent / expand to writers) |
+| `Call` | Function → Function | 函数调用 |
+| `Read` | Function → Variable | 读取变量值 |
+| `Write` | Function → Variable | 修改变量值 |
+| `OverriddenBy` | Parent Method → Child Method | 方法覆盖（统一处理 interface implementation 和 concrete override） |
+| `Annotates` | Decorated → Decorator | 装饰器关系 |
 
-> *Where `sig_complete` = `effectively_typed_param_count == param_count && has_return_type`. A parameter is "effectively typed" if it has a type annotation AND the type is not an unbounded TypeVar. An unbounded TypeVar (no bound, no constraints) is equivalent to `Any` and does not count as a valid annotation (see TypeVar handling in Section 6.2).*
-> 
-> - **Abstract Factory Rule**: A function whose return type (looked up in TypeRegistry) is an abstract type (Interface/Protocol/Trait) with doc_score ≥ threshold is a boundary, regardless of its own documentation.
-
-> *Key Insight*: An undocumented interface is not a valid abstraction. In the implementation, type "abstraction" is checked via TypeRegistry when evaluating a function target (e.g. abstract factory); there are no type nodes in the graph.
+> **关键变更**：不再有 `SharedStateWrite` 和 `CallIn` 边类型。反向探索（shared-state write exploration 和 call-in exploration）在遍历时通过访问节点的 **incoming edges** 实现，不需要预先物化为图中的边。
 > 
 
----
+**Type Registry**：存储类型定义（Class, Interface, Struct, Enum, TypeAlias, TypeVar），提供类型属性查询（`is_abstract`, `type_param_count`, `type_var_info`）和 `implementors` 反向索引（parent type → child types，包含 interface implementation 和 concrete inheritance）。
 
-### **2.3. Reverse Dependencies and Dynamic Expansion**
+**Node Attributes**：
 
-Certain architectural patterns introduce dependencies that flow *opposite* to the usual call-graph direction. These **reverse dependencies** are required for understanding because they represent information that affects the target unit's behavior.
+- $size(v)$：节点的上下文大小（token count）
+- $doc\_score(v)$：文档质量评分 $\in [0.0, 1.0]$
+- $is\_external(v)$：是否为第三方库节点
+- Function 节点额外属性：`parameters`（含 `param_type`）, `return_types`, `is_interface_method`（仅影响 `context_size` 计算：interface method 仅用 signature span）
+- Variable 节点额外属性：`var_type`, `mutability`（Const/Immutable/Mutable）, `variable_kind`
 
-### **Shared-State Write Edges (The Global State Problem)**
+### 1.2 Traversal Algorithm
 
-If $u$ reads a mutable variable $S$ whose scope exceeds $u$'s own scope (module-level, class field, global state):
+CF 通过 BFS 遍历计算从起点 $u_0$ 可达的节点集 $R(u_0)$。遍历包含两个方向：
 
-- Standard static analysis shows forward edge `u → S`.
-- **Reverse Edge Construction**: To understand the possible values of $S$, we must know who writes to it.
-- For all `w in WriteSet(S)`, add edge `u → w` to the graph.
-- **Traversal Rule**: Shared-state write edges always traverse (no boundary stops them).
-    - *Result*: All functions that may modify $S$ are pulled into the context. This **penalizes broad variable scope**: wider scope means more potential writers.
+**Forward traversal**：沿出边（outgoing edges）遍历，覆盖五种正向依赖。
 
-### **Call-in Edges (The Dynamic Typing Problem)**
+**Reverse exploration**：在特定条件下，沿入边（incoming edges）反向探索。两种场景：
 
-If $u$ has incomplete specification (missing type annotations, loosely typed parameters like `Any` or `Object`, no documentation):
+1. **Call-in exploration**：当到达一个规范不完整的函数 $v$，且 $v$ 不是通过 Call 边到达时，沿 $v$ 的 incoming Call edges 反向遍历到所有调用者——理解 $v$ 实际接收什么参数。
+2. **Shared-state write exploration**：当到达一个可变变量 $S$（通过 Read 边），沿 $S$ 的 incoming Write edges 反向遍历到所有写入者——理解 $S$ 的可能取值。
 
-- We cannot determine the contract of $u$ locally.
-- **Reverse Edge Construction**: We must check call sites to understand actual usage.
-- For all callers `v` of function $u$, add edge `u → v` to the graph.
-- **Traversal Rule**: Call-in edges traverse only when source $u$ (the callee) lacks complete specification. If $u$ has full type annotations and documentation, call-in edges are boundaries.
-    - *Result*: For under-specified functions, context expands to all callers.
+> 这两种 reverse exploration 不引入新的边类型，而是在遍历时访问现有边的反方向。
+> 
 
-### **ImplementedBy Edges (The Interface Implementation Gap)**
+**CF 计算**：
 
-When an interface method has `is_interface_method == true` but fails the boundary check (insufficient documentation or incomplete signature), the pruning predicate returns **Transparent** — traversal should continue. However, interface method nodes typically have **no outgoing edges** (they are signature-only, with no function body). This creates a dead end that silently under-counts CF.
+$$
+CF(u_0) = \sum_{v \in R(u_0)} size(v)
+$$
 
-To close this gap, we introduce `ImplementedBy` edges that connect interface methods to their concrete implementations:
+### 1.3 Edge-Aware Pruning Predicate $P(E_{in}, v, E_{out})$
 
-- **Edge Construction**: For each interface method $m$ on interface type $I$, find all concrete types that implement $I$ (via `inherits` or `implements` in type hierarchy). For each concrete type $C$, if $C$ has a method with the same name as $m$, add edge `m → C.m` to the graph.
-- **Pruning Rule**: `ImplementedBy` edges require no special case — the target (concrete implementation) is evaluated using standard function pruning rules. If the implementation is well-documented, it becomes a Boundary; if poorly documented, traversal continues into its body.
-- **Key Property**: `ImplementedBy` edges are **only reachable when the interface method is Transparent**. If the interface method is a Boundary (well-documented), traversal stops there and `ImplementedBy` edges are never followed.
+对于当前节点 $v$ 的每条候选探索路径（无论是正向出边还是反向入边），根据到达 $v$ 的入边 $E_{in}$ 独立判断是否继续。返回 **Boundary**（停止）或 **Transparent**（继续）。
 
-*Result*: An undocumented interface with $N$ implementations produces a high CF, correctly signaling a "leaky" abstraction. Adding documentation to the interface method immediately stops the expansion — good documentation creates context firewalls.
+**Core Asymmetry**：正向边检查 *目标* 的规范完整性；反向探索检查 *来源* 的规范完整性。但 incoming edge 的上下文可以 override 这些默认规则。
 
-## **5. Codebase-Level Characterization**
+#### Forward Edge Rules
 
-While $CF(u)$ quantifies the context cost of a single code unit, reasoning about architectural quality at the **codebase level** requires examining the distribution of CF values across all units.
+**Call edge** → 检查 target 函数 $v$：
 
-We characterize a codebase by its **CF Distribution**:
+- $v$ is external → **Boundary**
+- $v$ is interface method with complete signature + doc → **Boundary**
+- $v$ is abstract factory（return type is abstract with doc）→ **Boundary**
+- Academic mode: $v$ has complete signature + doc → **Boundary**
+- Otherwise → **Transparent**
 
-$$D_{CF} = \{CF(u) : u \in U\}$$
+**Read edge** → 检查 target 变量 $v$ 的可变性：
 
-where $U$ is the set of all code units (functions/methods) in the codebase.
+- $v$ is Const or Immutable → **Boundary**
+- $v$ is Mutable → **Transparent**（触发 shared-state write exploration）
 
-**Why Distribution, Not Aggregation?**
+**Write edge** → 始终 **Transparent**
 
-A naive approach might sum or average CF values across the codebase. However, this conflates two orthogonal concerns: *codebase size* and *architectural quality*. A larger codebase naturally contains more code units, inflating any sum-based metric without necessarily indicating worse design.
+**OverriddenBy edge** → 使用标准函数剪枝规则评估 target（仅在父类方法为 Transparent 时可达）
 
-The key insight is that in a well-architected codebase, **individual unit CF should remain bounded regardless of total codebase size**. Effective abstractions create "context firewalls" that prevent the graph traversal from exploding, even as the system grows. This leads to a testable prediction:
+**Annotates edge** → 使用标准函数剪枝规则评估 target
 
-- **Good Architecture**: $D_{CF}$ exhibits a tight, scale-invariant shape—median CF remains low regardless of total LOC.
-- **Poor Architecture**: $D_{CF}$ shifts rightward as the codebase grows—units increasingly "leak" into each other, inflating context requirements.
+#### Reverse Exploration Rules
 
-**Summary Statistics for Cross-Project Comparison**
+**Call-in exploration**（从函数 $v$ 沿 incoming Call edges 到调用者）：
 
-While the full distribution provides the richest diagnostic information, practical applications (e.g., regression analysis, CI/CD thresholds) often require scalar summaries. We recommend reporting a **CF Profile**:
+- $v$ was reached via Call edge → **不探索**（调用上下文已知）
+- $v$ has complete specification + doc → **不探索**（规范足够）
+- Otherwise → **探索所有调用者**
 
-| **Statistic** | **Interpretation** | **Use Case** |
-| --- | --- | --- |
-| **Median (P50)** | Typical cognitive cost for routine modifications | Cross-project comparison; regression analysis |
-| **P90** | Cognitive cost for "difficult" modules | Identifying candidates for refactoring |
-| **P99** | Architectural hotspots / potential God Objects | Flagging high-risk areas for review |
+**Shared-state write exploration**（从可变变量 $S$ 沿 incoming Write edges 到写入者）：
 
-This approach preserves the metric's local precision—its core contribution—while providing actionable system-level insights without loss of nuance.
+- **始终探索**——理解可变共享状态的唯一方式是知道所有写入者
 
-## **6. Implementation Strategy: Semantic Data Architecture**
+> **Conservative Principle**: When in doubt, traverse. 确保 CF 始终是推理上下文的保守上界。
+> 
 
-Semantic analysis is decoupled from graph algorithms: the tool consumes **semantic data** (e.g. JSON from LSP-based extractors) and builds the Context Graph from it.
-
-### **6.1 Architecture Overview**
-
-The system assumes semantic data (e.g. `SemanticData` JSON) is already produced by an extractor. The core architecture focuses on efficiently **transforming** this data into a queryable Context Graph.
-
-**Input**: Semantic data JSON + Source Code.
-
-**Phase 1: Graph Construction (The Builder)**
-
-This phase consumes semantic data (e.g. from JSON) to build the in-memory `ContextGraph` and `TypeRegistry`. It uses a **Three-Pass Strategy** to handle forward references and dynamic expansion:
-
-1. **Pass 1: Node Allocation and Type Registry**
-    - Iterate over documents and definitions.
-    - **Node vs Type**: Only **functions** and **variables** become graph nodes. **Type definitions** (classes, interfaces, structs, enums, etc.) are registered in `TypeRegistry` with attributes (`type_kind`, `is_abstract`, `type_param_count`, `context_size`, `doc_score`).
-    - **Implementor registration**: For each type definition, register implementor relationships from `inherits` and `implements` into `TypeRegistry.implementors` (reverse lookup: interface_type → [concrete_types]).
-    - **Node selection**: Functions (including methods, constructors) and variables (global, class field, or local) are converted to nodes; parameters and locals resolve to their nearest enclosing node for edge wiring.
-    - **Metrics**: Read source spans to compute `context_size` via `SizeFunction`; for interface/abstract methods, only the signature span is used.
-    - **Metadata**: Compute `doc_score` via `DocumentationScorer`.
-2. **Pass 2: Edge Wiring (References)**
-    - Iterate over references; resolve source/target to nearest node symbol via an enclosing map.
-    - **Static edges**: Map reference roles to `Call`, `Read`, `Write`. Collect writers per variable and callers per callee for Pass 3.
-    - **Pass 2.5**: Fill type references in nodes from definition details (e.g. function `return_types`, `parameters[].param_type`, variable `var_type`) using `TypeRegistry`.
-3. **Pass 3: Dynamic Expansion (Reverse Edges) and Implementation Edges**
-    - Add edges directly to the graph (no persistent side indices):
-        - **SharedStateWrite**: For each reader of a **mutable** variable, add edge reader → each writer of that variable.
-        - **CallIn**: For each **underspecified** callee (incomplete signature), add edge callee → each caller.
-        - **ImplementedBy**: For each interface method, look up the interface type's implementors in `TypeRegistry.implementors`, then match by method name to find concrete implementations and add edge interface_method → concrete_method.
-
-**Phase 2: Context Analysis (The Solver)**
-
-Executes the traversal algorithm on the constructed graph:
-
-- **Input**: `ContextGraph` (graph + `symbol_to_node` + `type_registry`), `PruningParams` (doc_threshold + mode; solver uses `evaluate`).
-- **Output**: CF score and reachable set for each requested node.
-
-### **6.2 Graph Schema: ContextGraph + TypeRegistry**
-
-**Implementation Reference**: See `src/domain/graph.rs`, `src/domain/node.rs`, `src/domain/type_registry.rs`, `src/domain/edge.rs` for complete schema definitions.
-
-The implementation uses a directed graph of **nodes** (functions and variables only), a **symbol→node** map, and a separate **Type Registry** for type definitions. Dynamic expansion is **materialized as edges** at build time (Pass 3); there are no persistent "side indices" after construction.
-
-### **Core Components and Design Principles**
-
-**1. ContextGraph Structure**:
-
-- Directed graph using `petgraph::DiGraph<Node, EdgeKind>`
-- Symbol lookup map: `HashMap<SymbolId, NodeIndex>`
-- TypeRegistry: stores type definitions (not graph nodes)
-- All edges (including `SharedStateWrite`, `CallIn`) materialized in graph after Pass 3
-
-**2. Node Types** (only Function and Variable are nodes):
-
-- **Function**: `parameters` (with `param_type`), `return_types`, `is_interface_method`, `is_constructor` (used for `init_map` resolution, not for pruning)
-    - Key method: `is_signature_complete_with_registry(type_registry)` = all params *effectively* typed + has return type. A parameter typed with an unbounded TypeVar is NOT effectively typed.
-- **Variable**: `var_type`, `mutability` (Const/Immutable/Mutable), `variable_kind` (Global/ClassField/Local)
-- **NodeCore** (shared): `context_size`, `doc_score`, `is_external`, `span`, `file_path`
-
-**3. TypeRegistry** (types not in graph):
-
-- Stores Class, Interface, Struct, Enum, TypeAlias, and **TypeVar** definitions
-- Attributes: `type_kind`, `is_abstract`, `type_param_count`, `type_var_info` (for TypeVar: bound + constraints), `context_size`, `doc_score`
-- **Implementors map**: `implementors: HashMap<TypeId, Vec<TypeId>>` — reverse lookup from interface type to concrete implementing types, populated during Pass 1 from `inherits`/`implements` in type hierarchy
-- Queried during pruning (e.g., abstract factory detection, TypeVar-aware signature completeness) and during Pass 3 for `ImplementedBy` edge construction
-
-**4. EdgeKind**:
-
-- Forward: `Call`, `Read`, `Write`
-- Reverse (dynamic expansion): `SharedStateWrite`, `CallIn`
-- Interface implementation: `ImplementedBy` (interface method → concrete implementation method)
-- Annotation: `Annotates`
-- Note: Type usage (param/return types) stored as node attributes, not edges
-
-**Design Principles**:
-
-- **Information Maximization**: Graph retains all semantic data; pruning logic decides boundary vs transparent
-- **Types out of graph**: Type definitions in TypeRegistry; nodes reference by type ID
-- **Dynamic expansion materialized**: Reverse edges added in Pass 3; no separate indices after build
+### 1.4 Algorithm Pseudocode
 
 ```
-/// Shared core attributes for all nodes
-struct NodeCore {
-    id: NodeId,
-    name: String,
-    scope: Option<ScopeId>,
-    context_size: u32,
-    span: SourceSpan,
-    doc_score: f32,
-    is_external: bool,
-    file_path: String,
-}
+function compute_cf(graph, start_node, pruning_params, max_tokens):
+    visited = empty_set()
+    queue = empty_queue()
+    total_size = 0
 
-enum Node {
-    Function(FunctionNode),
-    Variable(VariableNode),
-}
+    queue.enqueue((start_node, depth=0, incoming_edge=None))
+
+    while queue is not empty:
+        (current, depth, incoming_edge) = queue.dequeue()
+        current_node = graph.node(current)
+
+        if current_node.id in visited:
+            continue
+
+        visited.add(current_node.id)
+        total_size += current_node.context_size
+
+        if max_tokens is not None AND total_size >= max_tokens:
+            break
+
+        // === Forward traversal: outgoing edges ===
+        for (neighbor, edge_kind) in graph.outgoing_edges(current):
+            neighbor_node = graph.node(neighbor)
+            decision = evaluate_forward(pruning_params, current_node, 
+                                        neighbor_node, edge_kind, graph)
+            if decision == Transparent:
+                queue.enqueue((neighbor, depth + 1, edge_kind))
+            else:  // Boundary — include node but don't traverse further
+                if neighbor_node.id not in visited:
+                    visited.add(neighbor_node.id)
+                    total_size += neighbor_node.context_size
+
+        // === Reverse exploration: incoming edges ===
+        // 1. Call-in exploration (for functions)
+        if current_node is Function:
+            if should_explore_callers(current_node, incoming_edge, pruning_params):
+                for (caller, edge_kind) in graph.incoming_edges(current, filter=Call):
+                    queue.enqueue((caller, depth + 1, CallIn_marker))
+
+        // 2. Shared-state write exploration (for mutable variables reached via Read)
+        if current_node is Variable AND current_node.mutability == Mutable:
+            if incoming_edge == Read:
+                for (writer, edge_kind) in graph.incoming_edges(current, filter=Write):
+                    queue.enqueue((writer, depth + 1, SharedStateWrite_marker))
+
+    return CfResult { reachable_set: visited, total_context_size: total_size }
+
+function should_explore_callers(func_node, incoming_edge, params):
+    // Already arrived via Call — caller context is known
+    if incoming_edge == Call:
+        return false
+    // Specification complete — no need to check usage
+    if func_node.is_signature_complete() AND
+       func_node.doc_score >= params.doc_threshold:
+        return false
+    return true
+
+function evaluate_forward(params, source, target, edge_kind, graph):
+    // External always stops
+    if target.is_external:
+        return Boundary
+
+    // Variable targets
+    if target is Variable:
+        if edge_kind == Write:
+            return Transparent
+        // Read edge
+        if target.mutability in [Const, Immutable]:
+            return Boundary
+        return Transparent
+
+    // Function targets
+    if target is Function:
+        if target.is_interface_method:
+            if target.is_signature_complete() AND
+               target.doc_score >= params.doc_threshold:
+                return Boundary
+            return Transparent
+
+        if is_abstract_factory(target, graph.type_registry, params.doc_threshold):
+            return Boundary
+
+        if params.academic_mode AND
+           target.is_signature_complete() AND
+           target.doc_score >= params.doc_threshold:
+            return Boundary
+
+        return Transparent
 ```
 
-**FunctionNode**
+### 1.5 Graph Schema（Data Contract: Part 1 ↔ Part 2）
 
-```
-struct FunctionNode {
-    core: NodeCore,
+Graph Schema 定义了 CF Query 所需的完整图结构。Graph Builder 的唯一职责是按此 Schema 构建图。
 
-    // Signature: type IDs reference TypeRegistry
-    parameters: Vec<Parameter>,   // name + param_type: Option<String>
-    return_types: Vec<String>,    // type IDs
+**ContextGraph Structure**：
 
-    is_async: bool,
-    is_generator: bool,
-    visibility: Visibility,
-
-    /// True if defined in Interface/Protocol/Trait/Abstract Class (signature only)
-    is_interface_method: bool,
-}
-
-struct Parameter {
-    name: String,
-    param_type: Option<String>,   // TypeId
-}
-
-// Derived methods:
-//   typed_param_count()  — params with any type annotation
-//   effectively_typed_param_count(type_registry) — excludes unbounded TypeVar params
-//   is_signature_complete() — typed_param_count == param_count && has_return_type (legacy)
-//   is_signature_complete_with_registry(type_registry) — effectively_typed == param_count && has_return_type
-//
-// is_param_effectively_typed(param, type_registry):
-//   No annotation → false
-//   Type not in registry → true (conservative)
-//   TypeVar with bound or constraints → true
-//   TypeVar without bound/constraints → false (≈ Any)
-//   Other types → true
-//
-// Interface methods: context_size computed only for signature span
-```
-
-**VariableNode**
-
-```
-struct VariableNode {
-    core: NodeCore,
-
-    var_type: Option<String>,     // TypeId (in TypeRegistry)
-    mutability: Mutability,
-    variable_kind: VariableKind,
-}
-
-enum VariableKind {
-    Global,
-    ClassField,
-    Local,
-}
-
-enum Mutability {
-    Const,
-    Immutable,
-    Mutable,
-}
-```
-
-**TypeRegistry (types are not graph nodes)**
-
-```
-struct TypeRegistry {
-    types: HashMap<TypeId, TypeInfo>,
-}
-
-struct TypeInfo {
-    definition: TypeDefAttribute,
-    context_size: u32,
-    doc_score: f32,
-}
-
-struct TypeDefAttribute {
-    type_kind: TypeKind,    // Class, Interface, Struct, Enum, TypeAlias, TypeVar, ...
-    is_abstract: bool,
-    type_param_count: u32,
-    type_var_info: Option<TypeVarInfo>,  // Only present for TypeVar
-}
-
-struct TypeVarInfo {
-    bound: Option<TypeId>,       // T(bound=SomeProtocol) — single upper bound
-    constraints: Vec<TypeId>,    // T(int, str) — constrained to specific types
-}
-// TypeVarInfo.is_effectively_typed() = bound.is_some() OR !constraints.is_empty()
-```
-
-Pruning looks up type IDs in `graph.type_registry` for abstract factory detection and TypeVar-aware signature completeness.
-
-### **Edge Schema**
-
-Edges are stored as `DiGraph<Node, EdgeKind>`; each edge has a single `EdgeKind`. Type usage (param/return/field/variable type) is **not** represented as graph edges—only as node fields and TypeRegistry.
+- Directed graph: `petgraph::DiGraph<Node, EdgeKind>`（支持 outgoing 和 incoming edge 查询）
+- Symbol lookup: `HashMap<SymbolId, NodeIndex>`
+- TypeRegistry: 类型定义（不在图中）
 
 ```
 enum EdgeKind {
-    Call,               // Function → Function
-
-    Read,               // Function → Variable
-    Write,              // Function → Variable
-
-    SharedStateWrite,   // Reader(Function) → Writer(Function) of shared mutable state
-    CallIn,             // Callee(Function) → Caller(Function) for underspecified functions
-
-    Annotates,  // Decorated → Decorator
+    Call,            // Function → Function
+    Read,            // Function → Variable
+    Write,           // Function → Variable
+    OverriddenBy,    // Parent Method → Child Method (implement + override)
+    Annotates,       // Decorated → Decorator
 }
 ```
 
-> **Edge direction**: `Annotates` points from the decorated code to the decorator (e.g. `dashboard -[Annotates]-> login_required`).
+> **注意**：不再有 `SharedStateWrite` 和 `CallIn` 边类型。反向探索在遍历时通过 `graph.incoming_edges()` 实现。
 > 
 
-**Dynamic expansion at build time**
-
-During Pass 2 the builder collects `state_writers: HashMap<SymbolId, Vec<NodeIndex>>` and `callers: HashMap<SymbolId, Vec<NodeIndex>>`. In Pass 3 it adds `SharedStateWrite` and `CallIn` edges to the graph. The final `ContextGraph` does not retain these maps; traversal uses only the graph’s outgoing edges.
-
-### **6.3 Pruning: Fully in Domain**
-
-The core novelty—**Pruning Predicate** $P(v)$—is implemented entirely in the domain. Only **doc_threshold** (and a mode flag) are configurable; doc_scorer supplies doc_score.
+**Node Types**：
 
 ```
-#[derive(Debug, Clone)]
-pub struct PruningParams {
-    pub doc_threshold: f32,
-    pub treat_typed_documented_function_as_boundary: bool,  // Academic vs Strict
+enum Node {
+    Function(FunctionNode),
+    Variable(VariableNode),
 }
 
-pub fn evaluate(
-    params: &PruningParams,
-    source: &Node, target: &Node, edge_kind: &EdgeKind, graph: &ContextGraph,
-) -> PruningDecision;
+struct NodeCore {
+    id: NodeId,
+    name: String,
+    scope: Option<ScopeId>,
+    context_size: u32,
+    span: SourceSpan,
+    doc_score: f32,
+    is_external: bool,
+    file_path: String,
+}
+
+struct FunctionNode {
+    core: NodeCore,
+    parameters: Vec<Parameter>,     // name + param_type: Option<TypeId>
+    return_types: Vec<TypeId>,
+    is_async: bool,
+    is_generator: bool,
+    visibility: Visibility,
+    is_interface_method: bool,
+}
+
+struct VariableNode {
+    core: NodeCore,
+    var_type: Option<TypeId>,
+    mutability: Mutability,         // Const | Immutable | Mutable
+    variable_kind: VariableKind,    // Global | ClassField | Local
+    type_source: TypeSource,        // Annotation | Inferred | ExternalCallReturn | Unknown
+}
 ```
 
-**Modes:**
-
-1. **Academic** (`PruningParams::academic(0.5)`): Abstract factory + sig complete + doc_score >= doc_threshold → Boundary. Use case: Large-scale validation (BugsInPy, SWE-bench).
-2. **Strict** (`PruningParams::strict(0.8)`): Only external and abstract factory → Boundary; other internal functions Transparent.
-3. **DeepAudit** (Slow, Future Work):
-    - **Logic**: LLM-based evaluation of documentation quality ("Does this docstring explain the side effects?").
-    - **Use Case**: CI/CD Quality Gates for enterprise projects.
-
-### **6.4 Detailed Algorithm Pseudocode**
-
-This section provides detailed pseudocode for the two core algorithms: **Graph Construction** and **CF Traversal**. See implementation in `src/domain/builder.rs` and `src/domain/solver.rs`.
-
-### **Algorithm 1: Graph Construction (Three-Pass Builder)**
-
-**Input**: `SemanticData` (JSON), `SourceReader`, `SizeFunction`, `DocScorer`  
-**Output**: `ContextGraph` with all nodes, edges (including dynamic expansion), and TypeRegistry
+**TypeRegistry**：
 
 ```
-function build_graph(semantic_data, source_reader, size_function, doc_scorer):
-    graph = empty_graph()
-    type_registry = empty_registry()
+struct TypeRegistry {
+    types: HashMap<TypeId, TypeInfo>,
+    implementors: HashMap<TypeId, Vec<TypeId>>,  // parent type → child types (implement + inherit)
+}
 
-    // Pre-compute enclosing symbol map for symbol resolution
-    enclosing_map = semantic_data.build_enclosing_map()
-    node_symbols = empty_set()
+struct TypeInfo {
+    definition: TypeDefAttribute,
+    context_size: u32,
+    doc_score: f32,
+}
 
-    // PASS 1: Node Allocation and TypeRegistry
-    for each document in semantic_data.documents:
-        source_code = source_reader.read(document.path)
+struct TypeDefAttribute {
+    type_kind: TypeKind,    // Class, Interface, Struct, Enum, TypeAlias, TypeVar
+    is_abstract: bool,
+    type_param_count: u32,
+    type_var_info: Option<TypeVarInfo>,
+}
 
-        for each definition in document.definitions:
-            // Check if this is an interface/abstract method
-            is_interface_method = (definition.kind == Function AND
-                                  definition.details.modifiers.is_abstract)
-
-            // Compute context_size
-            if is_interface_method:
-                // Only signature span for interface methods
-                signature_span = extract_signature_span(definition.span, source_code)
-                context_size = size_function.compute(source_code, signature_span, definition.documentation)
-            else:
-                context_size = size_function.compute(source_code, definition.span, definition.documentation)
-
-            // Compute doc_score
-            doc_score = doc_scorer.score(definition, definition.documentation)
-
-            if definition.kind == Type:
-                // Register in TypeRegistry (not a graph node)
-                type_info = create_type_info(definition, context_size, doc_score)
-                type_registry.register(definition.symbol_id, type_info)
-
-                // Register implementor relationships for ImplementedBy edges
-                for interface_id in definition.details.implements:
-                    type_registry.register_implementor(interface_id, definition.symbol_id)
-                for base_id in definition.details.inherits:
-                    type_registry.register_implementor(base_id, definition.symbol_id)
-
-            else if definition.kind in [Function, Variable]:
-                // Create graph node
-                node_symbols.add(definition.symbol_id)
-                node_core = NodeCore {
-                    id: graph.next_node_id(),
-                    name: definition.name,
-                    scope: definition.enclosing_symbol,
-                    context_size: context_size,
-                    span: definition.span,
-                    doc_score: doc_score,
-                    is_external: definition.is_external,
-                    file_path: document.path
-                }
-
-                node = create_node(node_core, definition, is_interface_method)
-                graph.add_node(definition.symbol_id, node)
-
-    // Build constructor init map: type_symbol -> __init__ node symbol
-    init_map = {}
-    for each definition in all_definitions:
-        if (definition.kind == Function AND
-            definition.name == "__init__" AND
-            definition.enclosing_symbol in type_registry AND
-            definition.symbol_id in node_symbols):
-            init_map[definition.enclosing_symbol] = definition.symbol_id
-
-    // PASS 2: Edge Wiring (Static Edges + Collect for Dynamic Expansion)
-    state_writers = {}  // variable_symbol -> list of writer nodes
-    callers = {}        // function_symbol -> list of caller nodes
-    readers = []        // list of (reader_node, variable_symbol) pairs
-
-    for each document in semantic_data.documents:
-        for each reference in document.references:
-            // Resolve symbols to nearest node ancestors
-            source_node_symbol = resolve_to_node_symbol(
-                reference.enclosing_symbol, node_symbols, enclosing_map)
-            target_node_symbol = resolve_to_node_symbol(
-                reference.target_symbol, node_symbols, enclosing_map)
-
-            if source_node_symbol is None:
-                continue
-
-            source_idx = graph.get_node_index(source_node_symbol)
-
-            // Handle Call edges
-            if reference.role == Call:
-                // Try direct target, or fallback to constructor (__init__)
-                target_idx = graph.get_node_index(target_node_symbol)
-                            OR graph.get_node_index(init_map[reference.target_symbol])
-
-                if target_idx exists AND source_idx != target_idx:
-                    graph.add_edge(source_idx, target_idx, EdgeKind.Call)
-                    callers[resolved_target_symbol].append(source_idx)
-
-            // Handle Read/Write edges
-            if reference.role in [Read, Write]:
-                target_idx = graph.get_node_index(target_node_symbol)
-                if target_idx exists AND source_idx != target_idx:
-                    edge_kind = EdgeKind.Write if reference.role == Write else EdgeKind.Read
-                    graph.add_edge(source_idx, target_idx, edge_kind)
-
-                    if reference.role == Write:
-                        state_writers[reference.target_symbol].append(source_idx)
-                    else:
-                        readers.append((source_idx, reference.target_symbol))
-
-            // Handle Decorate edges (decorated -> decorator)
-            if reference.role == Decorate:
-                target_idx = graph.get_node_index(target_node_symbol)
-                if target_idx exists AND source_idx != target_idx:
-                    graph.add_edge(source_idx, target_idx, EdgeKind.Annotates)
-
-    // PASS 2.5: Fill type references in nodes from definition details
-    for each definition in all_definitions:
-        if definition.symbol_id in graph:
-            node = graph.get_node(definition.symbol_id)
-            if node is FunctionNode:
-                // Set return_types from definition
-                for type_id in definition.details.return_types:
-                    if type_id in type_registry:
-                        node.return_types.append(type_id)
-            else if node is VariableNode:
-                // Set var_type from definition
-                if definition.details.var_type in type_registry:
-                    node.var_type = definition.details.var_type
-
-    // PASS 3: Dynamic Expansion Edges and Implementation Edges
-    // 1. SharedStateWrite: reader -> writers of mutable variables
-    for (reader_idx, var_symbol) in readers:
-        if is_variable_mutable(var_symbol, semantic_data):
-            for writer_idx in state_writers[var_symbol]:
-                if reader_idx != writer_idx:
-                    graph.add_edge(reader_idx, writer_idx, EdgeKind.SharedStateWrite)
-
-    // 2. CallIn: underspecified callee -> callers
-    for callee_symbol in graph.all_node_symbols():
-        callee_idx = graph.get_node_index(callee_symbol)
-        if is_function_underspecified(callee_symbol, graph):
-            for caller_idx in callers[callee_symbol]:
-                if callee_idx != caller_idx:
-                    graph.add_edge(callee_idx, caller_idx, EdgeKind.CallIn)
-
-    // 3. ImplementedBy: interface method -> concrete implementation methods
-    // Build lookup: (enclosing_type, method_name) -> [node_indices]
-    method_by_scope = {}
-    for each node in graph.all_nodes():
-        if node is FunctionNode AND node.core.scope is not None:
-            key = (node.core.scope, node.core.name)
-            method_by_scope[key].append(node.index)
-
-    // For each interface method, find concrete implementations
-    for each node in graph.all_nodes():
-        if node is FunctionNode AND node.is_interface_method AND node.core.scope is not None:
-            interface_type_id = node.core.scope
-            concrete_types = type_registry.get_implementors(interface_type_id)
-            for concrete_type_id in concrete_types:
-                key = (concrete_type_id, node.core.name)
-                for concrete_idx in method_by_scope.get(key, []):
-                    if node.index != concrete_idx:
-                        graph.add_edge(node.index, concrete_idx, EdgeKind.ImplementedBy)
-
-    graph.type_registry = type_registry
-    return graph
-
-function resolve_to_node_symbol(symbol, node_symbols, enclosing_map):
-    // Walk up enclosing chain until we find a node symbol
-    current = symbol
-    while current is not None:
-        if current in node_symbols:
-            return current
-        current = enclosing_map.get(current, None)
-    return None
-
-function is_function_underspecified(symbol, graph):
-    node = graph.get_node(symbol)
-    if node is not FunctionNode:
-        return false
-    return NOT node.is_signature_complete()
-
-function is_variable_mutable(symbol, semantic_data):
-    definition = semantic_data.find_definition(symbol)
-    if definition AND definition.kind == Variable:
-        return definition.details.mutability == Mutable
-    return true  // Conservative default
+struct TypeVarInfo {
+    bound: Option<TypeId>,
+    constraints: Vec<TypeId>,
+}
 ```
 
-### **Algorithm 2: CF Computation (BFS with Conditional Pruning)**
+**Signature Completeness**（用于 pruning 判断）：
 
-**Input**: `ContextGraph`, `start_nodes[]`, `PruningParams`, `max_tokens` (optional)  
-**Output**: `CfResult` with reachable set, total size, traversal steps, layers
+- `is_signature_complete_with_registry(type_registry)` = 所有参数 effectively typed + 有 return type
+- Unbounded TypeVar 参数不算 effectively typed（≈ `Any`）
+
+**Pruning Modes**：
 
 ```
-function compute_cf(graph, start_nodes, pruning_params, max_tokens):
-    visited = empty_set()
-    ordered = []  // reachable nodes in BFS order
-    traversal_steps = []
-    layers = []  // reachable nodes grouped by BFS depth
-    queue = empty_queue()
-    total_size = 0
-
-    // Initialize with start nodes at depth 0
-    for start in start_nodes:
-        queue.enqueue((start, depth=0, incoming_edge=None, decision=None))
-
-    while queue is not empty:
-        (current, depth, incoming_edge, incoming_decision) = queue.dequeue()
-        current_node = graph.node(current)
-        current_id = current_node.core.id
-
-        // Skip if already visited
-        if current_id in visited:
-            continue
-
-        // Mark as visited and accumulate
-        visited.add(current_id)
-        node_size = current_node.core.context_size
-        total_size += node_size
-        ordered.append(current_id)
-        traversal_steps.append(TraversalStep {
-            node_id: current_id,
-            incoming_edge_kind: incoming_edge,
-            decision: incoming_decision
-        })
-
-        // Add to layers
-        if depth >= layers.length:
-            layers.append([])
-        layers[depth].append(current_id)
-
-        // Check token limit
-        if max_tokens is not None AND total_size >= max_tokens:
-            break
-
-        // Get neighbors and sort by symbol for deterministic traversal
-        neighbors = graph.neighbors(current).sort_by_symbol()
-
-        for (neighbor, edge_kind) in neighbors:
-            neighbor_node = graph.node(neighbor)
-            neighbor_id = neighbor_node.core.id
-
-            // Evaluate pruning decision
-            decision = evaluate(pruning_params, current_node, neighbor_node, edge_kind, graph)
-
-            if decision == Transparent:
-                // Continue traversal through this node
-                queue.enqueue((neighbor, depth + 1, edge_kind, decision))
-
-            else:  // decision == Boundary
-                // Include boundary node in reachable set but don't traverse
-                if neighbor_id not in visited:
-                    boundary_size = neighbor_node.core.context_size
-
-                    // Check if adding boundary exceeds limit
-                    if max_tokens is not None AND total_size + boundary_size > max_tokens:
-                        break
-
-                    visited.add(neighbor_id)
-                    total_size += boundary_size
-                    ordered.append(neighbor_id)
-                    traversal_steps.append(TraversalStep {
-                        node_id: neighbor_id,
-                        incoming_edge_kind: edge_kind,
-                        decision: decision
-                    })
-                    layers[depth + 1].append(neighbor_id)
-
-        // Re-check token limit after processing neighbors
-        if max_tokens is not None AND total_size >= max_tokens:
-            break
-
-    return CfResult {
-        reachable_set: visited,
-        reachable_nodes_ordered: ordered,
-        reachable_nodes_by_layer: layers,
-        traversal_steps: traversal_steps,
-        total_context_size: total_size
-    }
-
-// Pruning decision function (domain/policy.rs)
-function evaluate(params, source, target, edge_kind, graph):
-    // 1. Dynamic expansion edges
-    if edge_kind == SharedStateWrite:
-        return Transparent  // Always traverse to understand mutable state
-
-    if edge_kind == CallIn:
-        // Check source (callee) specification
-        if source is Function AND
-           source.is_signature_complete() AND
-           source.core.doc_score >= params.doc_threshold:
-            return Boundary
-        return Transparent
-
-    // 2. External dependencies always stop
-    if target.core.is_external:
-        return Boundary
-
-    // 3. Node type dispatch
-    if target is Variable:
-        if edge_kind == Write:
-            return Transparent  // Writing is an action
-        else:  // Read
-            if target.mutability in [Const, Immutable]:
-                return Boundary  // Immutable values fully determined
-            else:
-                return Transparent  // Mutable state triggers expansion
-
-    else if target is Function:
-        // Interface/abstract methods
-        if target.is_interface_method:
-            if target.is_signature_complete() AND
-               target.core.doc_score >= params.doc_threshold:
-                return Boundary
-            return Transparent  // Undocumented interface = leaky abstraction
-
-        // Abstract factory pattern
-        if is_abstract_factory(target, graph.type_registry, params.doc_threshold):
-            return Boundary
-
-        // Academic mode: typed + documented function is boundary
-        if params.treat_typed_documented_function_as_boundary AND
-           target.is_signature_complete() AND
-           target.core.doc_score >= params.doc_threshold:
-            return Boundary
-
-        return Transparent
-
-function is_abstract_factory(function_node, type_registry, doc_threshold):
-    if function_node.return_types is empty OR
-       NOT function_node.is_signature_complete():
-        return false
-
-    // Check if ANY return type is abstract
-    for type_id in function_node.return_types:
-        type_info = type_registry.get(type_id)
-        if type_info AND type_info.definition.is_abstract:
-            return true
-
-    return false
+struct PruningParams {
+    doc_threshold: f32,
+    academic_mode: bool,   // true: typed+documented function → Boundary
+}
+// Academic: PruningParams { doc_threshold: 0.5, academic_mode: true }
+// Strict:   PruningParams { doc_threshold: 0.8, academic_mode: false }
 ```
-
-### **Key Implementation Details**
-
-**Symbol Resolution** (`resolve_to_node_symbol`):
-
-- References may point to non-node symbols (e.g., parameters, local variables, type definitions)
-- Walk up the enclosing chain until finding a Function or Variable node
-- Example: Reference to parameter `x` resolves to its enclosing function
-
-**Constructor Handling**:
-
-- Type instantiation references (e.g., `MyClass()`) map to `__init__` method via `init_map`
-- Fallback mechanism: try direct target, then try constructor
-
-**Dynamic Expansion and Implementation Edge Timing**:
-
-- `SharedStateWrite` edges added only for mutable variables (checked via semantic data)
-- `CallIn` edges added only for underspecified functions (checked via `is_signature_complete()`)
-- `ImplementedBy` edges added for all interface methods with matching concrete implementations (traversal-time pruning determines whether they are followed)
-
-**Traversal Ordering**:
-
-- BFS ensures shortest path to each node
-- Neighbors sorted by symbol for deterministic results (testing, debugging)
-- Layers group nodes by distance from start
-
-**Boundary Node Inclusion**:
-
-- Boundary nodes ARE included in reachable set and CF total
-- Represents the interface/contract being consumed
-- Their outgoing edges are NOT traversed
 
 ---
 
-## **7. Future Work: Constrained TypeVar Multi-Type Expansion**
+## Part 2: Graph Building
 
-For constrained TypeVars like `T(int, str)`, `is_signature_complete_with_registry()` returns `true` (no call-in expansion). However, when the function body calls methods on a constrained TypeVar parameter, all constraint types' corresponding methods should be added as dependencies.
+基于 Semantic Data Schema，构建符合 Graph Schema 的 `ContextGraph`。
 
-**Approach**: Extend Pass 2.5 — when a function parameter is typed with a constrained TypeVar and the function body calls methods on that parameter, create Call edges to each constraint type's corresponding method.
+### 2.1 Semantic Data Schema（Data Contract: Part 2 ↔ Part 3）
 
-**Priority**: P1. First verify LSP behavior for constrained TypeVars — if the LSP already resolves method calls to concrete constraint type methods, no additional handling is needed.
+Semantic Data 是语言无关的语义提取结果，由 Part 3 的语言特定 Extractor 生成，Part 2 的 Builder 消费。
+
+**核心结构**：
+
+```
+struct SemanticData {
+    documents: Vec<Document>,
+    external_symbols: Vec<ExternalSymbol>,  // 第三方库符号
+}
+
+struct Document {
+    path: String,                    // 文件路径
+    definitions: Vec<Definition>,    // 该文件中的所有定义
+    references: Vec<Reference>,      // 该文件中的所有引用
+}
+
+struct Definition {
+    symbol_id: SymbolId,             // 全局唯一标识
+    name: String,
+    kind: DefinitionKind,            // Function | Variable | Type
+    span: SourceSpan,                // 源码位置
+    documentation: Option<String>,
+    enclosing_symbol: Option<SymbolId>,  // 所属的父符号
+    is_external: bool,
+    details: DefinitionDetails,      // kind-specific 详情
+}
+
+enum DefinitionKind { Function, Variable, Type }
+
+struct DefinitionDetails {
+    // Function details
+    parameters: Option<Vec<ParamDef>>,
+    return_types: Option<Vec<TypeId>>,
+    modifiers: Option<Modifiers>,         // is_abstract, is_async, etc.
+
+    // Variable details
+    var_type: Option<TypeId>,
+    mutability: Option<Mutability>,
+    variable_kind: Option<VariableKind>,
+
+    // Type details
+    type_kind: Option<TypeKind>,
+    is_abstract: Option<bool>,
+    inherits: Option<Vec<TypeId>>,
+    implements: Option<Vec<TypeId>>,
+    type_params: Option<Vec<TypeParamDef>>,
+}
+
+struct Reference {
+    enclosing_symbol: SymbolId,       // 引用所在的符号
+    target_symbol: Option<SymbolId>,  // 引用的目标（None = unresolved）
+    role: ReferenceRole,              // Call | Read | Write | Decorate
+    receiver: Option<SymbolId>,       // method call 的 receiver 变量
+    method_name: Option<String>,      // method call 的方法名
+    assigned_to: Option<SymbolId>,    // 调用结果赋值给哪个变量
+}
+
+enum ReferenceRole { Call, Read, Write, Decorate }
+```
+
+> Extractor 负责从语言特定的 AST/LSP 数据中提取上述结构。不同语言实现不同的 Extractor，但输出统一的 `SemanticData` JSON。
+> 
+
+### 2.2 Builder Algorithm
+
+Builder 将 `SemanticData` 转换为 `ContextGraph`。由于正向引用和类型传播的存在，使用 **多 Pass 策略**：
+
+#### Pass 1: Node Allocation + TypeRegistry
+
+遍历所有 `Definition`：
+
+- **Type** → 注册到 `TypeRegistry`（不创建图节点）；注册 `inherits`/`implements` 到 `implementors` 索引
+- **Function / Variable** → 创建图节点，计算 `context_size`（interface method 仅用 signature span）和 `doc_score`
+- 构建 `init_map`：type_symbol → `__init__` 方法节点（用于构造函数调用解析）
+
+#### Pass 2: Edge Wiring（Static Forward Edges）
+
+遍历所有 `Reference`，通过 `enclosing_map` 将 source/target 解析到最近的节点符号：
+
+- **Call** → 添加 `Call` edge（通过 `init_map` 回退解析构造函数）；未解析的引用收集到 `unresolved_calls`
+- **Read** → 添加 `Read` edge
+- **Write** → 添加 `Write` edge
+- **Decorate** → 添加 `Annotates` edge
+- 收集 `call_assignments`（variable → external call target）供 Pass 2.5 使用
+
+#### Pass 2.5: Type Propagation
+
+- 从 `Definition.details` 填充节点的类型引用（`return_types`, `param_type`, `var_type`）
+- **External Call Return Type Propagation**：对于 `call_assignments` 中的变量，如果调用目标是外部函数且有 return type，将 return type 传播到被赋值的变量
+
+#### Pass 3: ImplementedBy Edges + Edge Recovery
+
+- **OverriddenBy**：对每个属于某类型的方法节点，通过 `TypeRegistry.implementors`（现在包含所有子类型）查找子类型，匹配同名方法，添加 `parent_method → child_method` 边。统一处理 interface implementation 和 concrete override 两种关系
+- **Type-Driven Call Edge Recovery**：对 `unresolved_calls`，通过 receiver 变量的传播类型解析目标方法，添加恢复的 `Call` 边。迭代至不动点（每轮至少恢复 1 条边或终止）
+
+> **注意**：不再在 Pass 3 中构建 `SharedStateWrite` 和 `CallIn` 边。这些反向探索逻辑移至 Part 1 的遍历算法中，在运行时通过 `graph.incoming_edges()` 实现。这简化了图构建过程，同时将遍历策略集中在 Solver 中。
+> 
+
+### 2.3 Builder Pseudocode
+
+```
+function build_graph(semantic_data, source_reader, size_fn, doc_scorer):
+    graph = empty_graph()
+    type_registry = empty_registry()
+    enclosing_map = semantic_data.build_enclosing_map()
+    node_symbols = empty_set()
+
+    // ─── PASS 1: Nodes + TypeRegistry ───
+    for each document in semantic_data.documents:
+        source_code = source_reader.read(document.path)
+        for each def in document.definitions:
+            context_size = compute_context_size(def, source_code, size_fn)
+            doc_score = doc_scorer.score(def)
+
+            if def.kind == Type:
+                type_registry.register(def.symbol_id, def, context_size, doc_score)
+                for iface in def.details.implements:
+                    type_registry.register_implementor(iface, def.symbol_id)
+                for base in def.details.inherits:
+                    type_registry.register_implementor(base, def.symbol_id)
+
+            else:  // Function or Variable
+                node = create_node(def, context_size, doc_score)
+                graph.add_node(def.symbol_id, node)
+                node_symbols.add(def.symbol_id)
+
+    init_map = build_init_map(semantic_data, node_symbols, type_registry)
+
+    // ─── PASS 2: Static Forward Edges ───
+    call_assignments = {}
+    unresolved_calls = []
+
+    for each document in semantic_data.documents:
+        for each ref in document.references:
+            source_sym = resolve_to_node(ref.enclosing_symbol, node_symbols, enclosing_map)
+            target_sym = resolve_to_node(ref.target_symbol, node_symbols, enclosing_map)
+            if source_sym is None: continue
+
+            source_idx = graph.index(source_sym)
+
+            match ref.role:
+                Call:
+                    target_idx = graph.index(target_sym) OR graph.index(init_map[ref.target_symbol])
+                    if target_idx exists:
+                        graph.add_edge(source_idx, target_idx, Call)
+                    else if target_sym is None:
+                        unresolved_calls.append(ref)
+                    if ref.assigned_to is not None:
+                        call_assignments[ref.assigned_to] = { caller: source_idx, target: target_sym }
+
+                Read:
+                    target_idx = graph.index(target_sym)
+                    if target_idx exists:
+                        graph.add_edge(source_idx, target_idx, Read)
+
+                Write:
+                    target_idx = graph.index(target_sym)
+                    if target_idx exists:
+                        graph.add_edge(source_idx, target_idx, Write)
+
+                Decorate:
+                    target_idx = graph.index(target_sym)
+                    if target_idx exists:
+                        graph.add_edge(source_idx, target_idx, Annotates)
+
+    // ─── PASS 2.5: Type Propagation ───
+    fill_type_references(graph, semantic_data, type_registry)
+    propagate_external_return_types(graph, call_assignments, type_registry)
+
+    // ─── PASS 3: OverriddenBy + Edge Recovery ───
+    build_overridden_by_edges(graph, type_registry)
+    recover_call_edges_to_fixpoint(graph, unresolved_calls, type_registry)
+
+    graph.type_registry = type_registry
+    return graph
+```
+
+---
+
+## Part 3: Python Semantic Data Extractor
+
+实现 Python 语言特定的 `SemanticData` 提取器，输出符合 Semantic Data Schema 的 JSON。
+
+### 3.1 Extraction Responsibilities
+
+Extractor 需要从 Python 源码中提取：
+
+1. **Definitions**：函数（含方法、构造函数）、变量（模块级、类字段）、类型（class, protocol, enum 等）
+2. **References**：函数调用（Call）、变量读写（Read/Write）、装饰器（Decorate）
+3. **Type information**：参数类型、返回类型、变量类型、继承/实现关系
+4. **Symbol hierarchy**：`enclosing_symbol` 链（用于 symbol resolution）
+
+### 3.2 Implementation Approach
+
+基于 Python AST 或 LSP（如 Pyright/Pylance）实现：
+
+- 使用 AST 解析获取定义和引用的 span、kind、enclosing 关系
+- 使用 LSP 的 type inference 获取类型信息（`param_type`, `return_types`, `var_type`）
+- 处理 Python 特有的模式：
+    - `__init__` 方法识别（用于构造函数调用解析）
+    - Protocol / ABC 识别（用于 `is_interface_method` 标记）
+    - `@property` / `@dataclass` / `@frozen` 等装饰器的语义识别（影响 mutability 判断）
+    - Module-level `__all__` 和 `_` 前缀的 visibility 推断
+    - TypeVar 的 bound/constraints 提取
+
+### 3.3 Output
+
+Extractor 输出标准的 `SemanticData` JSON，供 Part 2 的 Builder 直接消费。不同 Python 版本或工具链（AST vs LSP）可以有不同的 Extractor 实现，只要输出符合 Schema。

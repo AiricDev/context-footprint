@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import jedi
+from jedi.api.classes import Name
 
 
 def _add_parents(tree: ast.AST) -> None:
@@ -34,7 +35,7 @@ from .schema import (
 )
 
 
-def _definition_symbol_id_from_jedi(definitions: list[SymbolDefinition], jedi_def) -> Optional[str]:
+def _definition_symbol_id_from_jedi(definitions: list[SymbolDefinition], jedi_def: Name | None) -> Optional[str]:
     """Map a Jedi Definition to our symbol_id by matching module_path, line, and name."""
     if not jedi_def or not definitions:
         return None
@@ -60,7 +61,7 @@ def _definition_symbol_id_from_jedi(definitions: list[SymbolDefinition], jedi_de
         return None
 
 
-def _full_name_from_jedi(jedi_def) -> Optional[str]:
+def _full_name_from_jedi(jedi_def: Name | None) -> Optional[str]:
     """Build a hierarchical name from Jedi definition for cross-file symbol_id matching."""
     if not jedi_def:
         return None
@@ -184,7 +185,7 @@ class ReferenceCollector(ast.NodeVisitor):
             column=getattr(node, "col_offset", 0) or 0,
         )
 
-    def _resolve_at(self, line: int, column: int):
+    def _resolve_at(self, line: int, column: int) -> list[Name]:
         """Resolve the symbol at (line, column) to its definition (goto definition)."""
         try:
             return self.script.goto(line, column)
@@ -418,12 +419,11 @@ def collect_references(
     project_root: str,
     all_definitions: list[SymbolDefinition],
     module_symbol_id: str,
-    venv_path: Optional[str] = None,
+    environment: Optional[Any] = None,
 ) -> tuple[list[SymbolReference], list[SymbolDefinition]]:
-    """Run reference collection with Jedi on a single document."""
+    """Run reference collection with Jedi on a single document. Reuse one environment for all files to avoid too many open FDs."""
     abs_path = os.path.join(project_root, doc.relative_path)
-    env = jedi.create_environment(venv_path) if venv_path else None
-    script = jedi.Script(source, path=abs_path, environment=env)
+    script = jedi.Script(source, path=abs_path, environment=environment)
     collector = ReferenceCollector(
         file_path=abs_path,
         source=source,

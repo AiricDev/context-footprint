@@ -57,7 +57,7 @@ def _location_from_node(node: ast.AST, file_path: str) -> SourceLocation:
     )
 
 
-def _get_docstring(node: ast.AST) -> list[str]:
+def _get_docstring(node: ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef | ast.Module) -> list[str]:
     doc = ast.get_docstring(node)
     if doc:
         return [doc]

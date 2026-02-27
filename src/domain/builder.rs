@@ -145,25 +145,27 @@ impl GraphBuilder {
         }
 
         // Pass 1 (continued): External symbol nodes
-        // External symbols have no project source file. We synthesize a source from their
-        // signature + first few doc lines so size_function can count tokens realistically.
+        // External symbols have no project source file. For context_size we use ONLY the
+        // signature (no doc/implementation) since external library bodies are not useful
+        // for understanding project code.
         for def in &semantic_data.external_symbols {
             let node_id = graph.graph.node_count() as u32;
             let doc_texts = def.documentation.clone();
 
             let signature = extract_signature(def);
-            let synthetic_source = build_external_source(&signature, &doc_texts);
-            let line_count = synthetic_source.lines().count() as u32;
+            let synthetic_source = build_external_signature_only(&signature, def);
+            let line_count = synthetic_source.lines().count().max(1) as u32;
             let synthetic_span = crate::domain::node::SourceSpan {
                 start_line: 0,
                 start_column: 0,
-                end_line: line_count,
+                end_line: line_count.saturating_sub(1),
                 end_column: 0,
             };
 
-            let context_size = self
+            let raw_size = self
                 .size_function
-                .compute(&synthetic_source, &synthetic_span, &doc_texts);
+                .compute(&synthetic_source, &synthetic_span, &[]);
+            let context_size = raw_size.min(EXTERNAL_SYMBOL_MAX_TOKENS);
 
             let doc_text = doc_texts.first().map(|s| s.as_str());
 
@@ -549,8 +551,8 @@ fn convert_span_for_size(span: &SemanticSpan) -> crate::domain::node::SourceSpan
 }
 
 /// Build a synthetic source string for an external symbol (no project source file available).
-/// Combines the signature line with up to 5 doc lines so that the size_function and doc_scorer
-/// can assess it like any other function signature.
+/// Combines the signature line with up to 5 doc lines. Kept for potential future use (e.g. display).
+#[allow(dead_code)]
 fn build_external_source(signature: &Option<String>, doc_texts: &[String]) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(sig) = signature {
@@ -566,6 +568,26 @@ fn build_external_source(signature: &Option<String>, doc_texts: &[String]) -> St
     } else {
         lines.join("\n")
     }
+}
+
+/// Max context_size for external symbols; signatures only, no implementation.
+const EXTERNAL_SYMBOL_MAX_TOKENS: u32 = 50;
+
+/// Build a minimal synthetic source for external symbol context_size: signature only.
+/// Does not include doc or implementation; external library bodies are not useful for CF.
+/// Long signatures (e.g. FastAPI File/Form) are truncated to avoid token explosion.
+fn build_external_signature_only(signature: &Option<String>, def: &SymbolDefinition) -> String {
+    let raw = if let Some(sig) = signature {
+        let truncated = if sig.len() > 200 {
+            format!("{}...", &sig[..200])
+        } else {
+            sig.clone()
+        };
+        format!("{} {}", def.name, truncated)
+    } else {
+        format!("{}", def.name)
+    };
+    raw
 }
 
 /// Infer node type from symbol kind

@@ -161,7 +161,7 @@ impl ContextEngine {
             starts.push(idx);
         }
 
-        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
+        let solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
         let result = solver.compute_cf(&starts, req.max_tokens);
 
         let reachable_nodes_ordered = result
@@ -193,7 +193,7 @@ impl ContextEngine {
     pub fn stats(&self, include_tests: bool, policy: PolicyKind) -> Result<StatsResponse> {
         let data = self.inner.read().unwrap();
         let graph = data.graph.as_ref();
-        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
+        let solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
         let test_detector = UniversalTestDetector::new();
 
         let mut function_cf: Vec<u32> = Vec::new();
@@ -235,7 +235,7 @@ impl ContextEngine {
     ) -> Result<TopResponse> {
         let data = self.inner.read().unwrap();
         let graph = data.graph.as_ref();
-        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
+        let solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
         let test_detector = UniversalTestDetector::new();
 
         let mut results: Vec<TopItem> = Vec::new();
@@ -274,7 +274,7 @@ impl ContextEngine {
     ) -> Result<SearchResponse> {
         let data = self.inner.read().unwrap();
         let graph = data.graph.as_ref();
-        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
+        let solver = CfSolver::new(data.graph.clone(), pruning_params(policy));
         let test_detector = UniversalTestDetector::new();
 
         let pattern_lower = pattern.to_lowercase();
@@ -327,7 +327,7 @@ impl ContextEngine {
             .get_node_by_symbol(&req.symbol)
             .ok_or_else(|| anyhow!("Symbol not found: {}", req.symbol))?;
 
-        let mut solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
+        let solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
         let result = solver.compute_cf(&[node_idx], req.max_tokens);
 
         let mut layers: Vec<ContextLayer> = Vec::new();

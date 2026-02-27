@@ -29,7 +29,7 @@ fn test_build_from_semantic_data_and_compute_cf() {
     let first_symbol = graph.symbol_to_node.keys().next().unwrap().clone();
     let start = graph.get_node_by_symbol(&first_symbol).unwrap();
     let expected_min = graph.node(start).core().context_size;
-    let mut solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+    let solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
     let result = solver.compute_cf(&[start], None);
 
     assert!(!result.reachable_set.is_empty());

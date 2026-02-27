@@ -64,7 +64,7 @@ fn compute_cf(
         .get_node_by_symbol(start_symbol)
         .expect("Start symbol not found");
 
-    let mut solver = CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
+    let solver = CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
     let result = solver.compute_cf(&[start_idx], None);
 
     (graph_arc, result)

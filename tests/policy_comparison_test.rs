@@ -48,8 +48,8 @@ fn test_academic_vs_strict_different_cf() {
 
     let start_idx = graph.get_node_by_symbol("sym::chain_a").unwrap();
     let graph_arc = Arc::new(graph);
-    let mut solver_academic = CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
-    let mut solver_strict = CfSolver::new(graph_arc, PruningParams::strict(0.8));
+    let solver_academic = CfSolver::new(Arc::clone(&graph_arc), PruningParams::academic(0.5));
+    let solver_strict = CfSolver::new(graph_arc, PruningParams::strict(0.8));
 
     let cf_academic = solver_academic.compute_cf(&[start_idx], None);
     let cf_strict = solver_strict.compute_cf(&[start_idx], None);
@@ -102,7 +102,7 @@ fn test_strict_policy_smaller_context_footprint() {
     let graph = builder.build(semantic_data, &reader).unwrap();
 
     let start_idx = graph.get_node_by_symbol("sym::func_a").unwrap();
-    let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.8));
+    let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.8));
     let cf_strict = solver.compute_cf(&[start_idx], None);
 
     assert!(cf_strict.total_context_size >= 10);

@@ -40,22 +40,12 @@ pub struct CfResult {
     pub total_context_size: u32,
 }
 
-/// Memoization cache for CF totals (and reachable sets) per start node.
-/// Internal to CfSolver; not exposed to callers.
-#[derive(Debug, Default)]
-struct CfMemo {
-    reachable: HashMap<NodeIndex, Vec<NodeIndex>>,
-    total_context_size: HashMap<NodeIndex, u32>,
-}
-
 /// CF Solver - computes Context-Footprint for a given node.
 ///
-/// Holds graph, pruning params (doc_threshold + mode), and an internal memo.
-/// To get fresh results without cache, create a new CfSolver with the same graph and params.
+/// Holds graph and pruning params (doc_threshold + mode).
 pub struct CfSolver {
     graph: Arc<ContextGraph>,
     params: PruningParams,
-    memo: CfMemo,
 }
 
 impl CfSolver {
@@ -63,13 +53,11 @@ impl CfSolver {
         Self {
             graph,
             params,
-            memo: CfMemo::default(),
         }
     }
 
     /// Compute CF for a given set of starting nodes (full result with layers, etc.).
-    /// Uses internal memo: populates cache for single-start with no max_tokens.
-    pub fn compute_cf(&mut self, starts: &[NodeIndex], max_tokens: Option<u32>) -> CfResult {
+    pub fn compute_cf(&self, starts: &[NodeIndex], max_tokens: Option<u32>) -> CfResult {
         let graph = self.graph.as_ref();
         let params = &self.params;
         // Build a reverse mapping once so neighbor ordering isn't O(|V|) per comparison.
@@ -226,31 +214,12 @@ impl CfSolver {
             total_context_size: total_size,
         };
 
-        // Populate memo for single-start with no max_tokens (so cache is valid)
-        if starts.len() == 1 && max_tokens.is_none() {
-            let start = starts[0];
-            let mut reachable_idx: Vec<NodeIndex> = Vec::new();
-            for idx in graph.graph.node_indices() {
-                if result.reachable_set.contains(&graph.node(idx).core().id) {
-                    reachable_idx.push(idx);
-                }
-            }
-            self.memo.reachable.insert(start, reachable_idx);
-            self.memo.total_context_size.insert(start, total_size);
-        }
-
         result
     }
 
-    /// Compute CF total context size for a single start node (uses internal memo).
-    ///
-    /// Optimized for batch use: computing CF for many nodes reuses cached results.
+    /// Compute CF total context size for a single start node.
     /// Does not return traversal order / layers; ignores max_tokens.
-    pub fn compute_cf_total(&mut self, start: NodeIndex) -> u32 {
-        if let Some(&cached) = self.memo.total_context_size.get(&start) {
-            return cached;
-        }
-
+    pub fn compute_cf_total(&self, start: NodeIndex) -> u32 {
         let graph = self.graph.as_ref();
         let params = &self.params;
         let node_count = graph.graph.node_count();
@@ -292,14 +261,8 @@ impl CfSolver {
                     evaluate_forward(params, current_node, neighbor_node, edge_kind, graph);
 
                 if matches!(decision, PruningDecision::Transparent) {
-                    if let Some(cached_set) = self.memo.reachable.get(&neighbor) {
-                        for &idx in cached_set {
-                            add_node(idx, &mut visited, &mut reachable, &mut total_size);
-                        }
-                    } else {
-                        add_node(neighbor, &mut visited, &mut reachable, &mut total_size);
-                        queue.push_back((neighbor, ReachedVia::Forward(edge_kind.clone())));
-                    }
+                    add_node(neighbor, &mut visited, &mut reachable, &mut total_size);
+                    queue.push_back((neighbor, ReachedVia::Forward(edge_kind.clone())));
                 } else {
                     add_node(neighbor, &mut visited, &mut reachable, &mut total_size);
                 }
@@ -335,8 +298,6 @@ impl CfSolver {
             }
         }
 
-        self.memo.reachable.insert(start, reachable);
-        self.memo.total_context_size.insert(start, total_size);
         total_size
     }
 }
@@ -419,7 +380,7 @@ mod tests {
     fn test_single_node_cf() {
         let mut graph = ContextGraph::new();
         let idx = graph.add_node("sym::a".into(), test_node(0, "a", 100));
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[idx], None);
         assert_eq!(result.reachable_set.len(), 1);
         assert!(result.reachable_set.contains(&0));
@@ -434,7 +395,7 @@ mod tests {
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
@@ -451,7 +412,7 @@ mod tests {
         graph.add_edge(a, c, EdgeKind::Call);
         graph.add_edge(b, d, EdgeKind::Call);
         graph.add_edge(c, d, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 4);
         assert_eq!(result.total_context_size, 10 + 20 + 30 + 40);
@@ -466,7 +427,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         graph.add_edge(c, a, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 10 + 20 + 30);
@@ -480,7 +441,7 @@ mod tests {
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 2); // a and b; c is not traversed
         assert_eq!(result.total_context_size, 10 + 20); // a and b both count
@@ -494,7 +455,7 @@ mod tests {
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 60);
@@ -533,7 +494,7 @@ mod tests {
         graph.add_edge(r, var_idx, EdgeKind::Read);
         graph.add_edge(w1, var_idx, EdgeKind::Write);
         graph.add_edge(w2, var_idx, EdgeKind::Write);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[r], None);
         assert_eq!(result.reachable_set.len(), 4); // r, v, w1, w2
         assert_eq!(result.total_context_size, 10 + 1 + 20 + 30);
@@ -546,7 +507,7 @@ mod tests {
         let callee = graph.add_node("sym::callee".into(), test_node(0, "callee", 10));
         let caller = graph.add_node("sym::caller".into(), test_node(1, "caller", 25));
         graph.add_edge(caller, callee, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[callee], None);
         assert_eq!(result.reachable_set.len(), 2);
         assert_eq!(result.total_context_size, 10 + 25);
@@ -561,8 +522,8 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let graph_arc = Arc::new(graph);
-        let mut solver_trans = CfSolver::new(Arc::clone(&graph_arc), PruningParams::strict(0.5));
-        let mut solver_bound = CfSolver::new(graph_arc, PruningParams::academic(0.5));
+        let solver_trans = CfSolver::new(Arc::clone(&graph_arc), PruningParams::strict(0.5));
+        let solver_bound = CfSolver::new(graph_arc, PruningParams::academic(0.5));
         let res_trans = solver_trans.compute_cf(&[a], None);
         let res_bound = solver_bound.compute_cf(&[a], None);
         assert_eq!(res_trans.total_context_size, 60);
@@ -577,7 +538,7 @@ mod tests {
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let _b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
         graph.add_edge(a, a, EdgeKind::Call); // self-loop only, b is disconnected
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 1);
         assert_eq!(result.total_context_size, 10);
@@ -591,7 +552,7 @@ mod tests {
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(a, c, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 60);
@@ -607,7 +568,7 @@ mod tests {
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[b], None);
         assert_eq!(result.reachable_set.len(), 3); // B, then C (forward), A (call-in)
         assert_eq!(result.total_context_size, 10 + 250 + 30);
@@ -619,7 +580,7 @@ mod tests {
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let b = graph.add_node("sym::b".into(), test_node_boundary(1, "b", 99));
         graph.add_edge(a, b, EdgeKind::Call);
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
         let result = solver.compute_cf(&[a], None);
         assert!(result.reachable_set.contains(&0));
         assert!(result.reachable_set.contains(&1));
@@ -640,7 +601,7 @@ mod tests {
         graph.add_edge(b, c, EdgeKind::Call);
         graph.add_edge(c, d, EdgeKind::Call);
 
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
 
         // CF(A) = {A, C, D} = 10 + 30 + 40 = 80
         // CF(B) = {B, C, D} = 20 + 30 + 40 = 90
@@ -684,7 +645,7 @@ mod tests {
         graph.add_edge(f, e, EdgeKind::Call);
 
         let graph_arc = Arc::new(graph);
-        let mut solver = CfSolver::new(Arc::clone(&graph_arc), PruningParams::strict(0.5));
+        let solver = CfSolver::new(Arc::clone(&graph_arc), PruningParams::strict(0.5));
 
         for idx in graph_arc.graph.node_indices() {
             let expected = solver.compute_cf(&[idx], None).total_context_size;
@@ -703,7 +664,7 @@ mod tests {
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
 
-        let mut solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
 
         let expected = solver.compute_cf(&[a], None).total_context_size;
         let got = solver.compute_cf_total(a);

@@ -415,7 +415,7 @@ fn test_undocumented_interface_expands_to_implementations() {
         .get_node_by_symbol("test#process_order().")
         .expect("process_order should exist");
 
-    let mut solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+    let solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
     let result = solver.compute_cf(&[process_order_idx], None);
 
     // process_order -> IPaymentGateway.charge (transparent, undocumented interface)
@@ -438,7 +438,7 @@ fn test_documented_interface_stops_at_boundary() {
         .get_node_by_symbol("test#process_order().")
         .expect("process_order should exist");
 
-    let mut solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+    let solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
     let result = solver.compute_cf(&[process_order_idx], None);
 
     // process_order -> IPaymentGateway.charge (Boundary: sig complete + doc_score 0.8 >= 0.5)

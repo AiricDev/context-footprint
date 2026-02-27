@@ -53,3 +53,23 @@ def test_schema_details_tagged_for_rust():
             assert isinstance(details, dict)
             assert len(details) == 1
             assert list(details.keys())[0] in ("Function", "Variable", "Type")
+
+def test_method_call_on_type_hinted_parameter():
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [r for doc in data.documents for r in doc.references if r.enclosing_symbol == "test_method_resolve.create_image_edit"]
+    
+    # We expect a Call reference to RelayImageUseCase.execute
+    execute_calls = [r for r in refs if r.role == ReferenceRole.Call and r.target_symbol == "test_method_resolve.RelayImageUseCase.execute"]
+    if not execute_calls:
+        print("REFS for test_method_resolve.create_image_edit:", refs)
+    assert len(execute_calls) == 1, "Should resolve use_case.execute() to RelayImageUseCase.execute"
+
+def test_except_handler_type_reference():
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [r for doc in data.documents for r in doc.references if r.enclosing_symbol == "test_except_resolve.create_image_edit"]
+    
+    # We expect a Read reference to QuotaError
+    except_refs = [r for r in refs if r.role == ReferenceRole.Read and r.target_symbol == "test_except_resolve.QuotaError"]
+    if not except_refs:
+        print("REFS for test_except_resolve.create_image_edit:", refs)
+    assert len(except_refs) >= 1, "Should resolve 'except QuotaError' as a Read reference to QuotaError"

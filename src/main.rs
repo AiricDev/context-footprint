@@ -39,8 +39,8 @@ enum Commands {
         /// Number of nodes to display
         #[arg(short, long, default_value = "10")]
         limit: usize,
-        /// Filter by node type (function, type, or all)
-        #[arg(short = 't', long, default_value = "all")]
+        /// Filter by node type (function, variable, or all)
+        #[arg(short = 't', long, default_value = "function")]
         node_type: String,
         /// Include test code (test_* functions and tests/ directory)
         #[arg(short, long)]

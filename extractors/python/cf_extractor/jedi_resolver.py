@@ -242,6 +242,36 @@ class ReferenceCollector(ast.NodeVisitor):
                 )
             )
 
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        enc = self._enclosing_symbol(node)
+        if enc and node.type:
+            def _extract_type(t_node: ast.AST):
+                if isinstance(t_node, (ast.Name, ast.Attribute)):
+                    defs = self._resolve_at(t_node.lineno, t_node.col_offset)
+                    target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+                    if not target_sym and defs:
+                        target_sym = _full_name_from_jedi(defs[0])
+                        if target_sym:
+                            self._collect_external_symbol(target_sym, defs[0])
+                    if target_sym:
+                        self.references.append(
+                            SymbolReference(
+                                target_symbol=target_sym,
+                                location=self._loc(t_node),
+                                enclosing_symbol=enc,
+                                role=ReferenceRole.Read,
+                                receiver=None,
+                                method_name=None,
+                                assigned_to=None,
+                            )
+                        )
+                elif isinstance(t_node, ast.Tuple):
+                    for elt in t_node.elts:
+                        _extract_type(elt)
+
+            _extract_type(node.type)
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         enc = self._enclosing_symbol(node)
         if not enc:
@@ -267,6 +297,22 @@ class ReferenceCollector(ast.NodeVisitor):
                 target_sym = _full_name_from_jedi(defs[0])
                 if target_sym:
                     self._collect_external_symbol(target_sym, defs[0])
+                    
+            if not target_sym and isinstance(node.func.value, ast.Name):
+                receiver_name = node.func.value.id
+                enc_def = next((d for d in self.all_definitions if d.symbol_id == enc), None)
+                if enc_def and enc_def.kind == SymbolKind.Function and hasattr(enc_def.details, "parameters"):
+                    param = next((p for p in enc_def.details.parameters if p.name == receiver_name), None)
+                    if param and param.param_type:
+                        ptype = param.param_type.split("[")[0].strip()
+                        ptype_short = ptype.split(".")[-1]
+                        type_def = next((d for d in self.all_definitions if d.kind == SymbolKind.Type and d.name == ptype_short), None)
+                        if type_def:
+                            method_sym_id = f"{type_def.symbol_id}.{method_name}"
+                            target_sym = method_sym_id
+                        elif ptype:
+                            target_sym = f"{ptype}.{method_name}"
+
             if isinstance(node.func.value, ast.Name):
                 receiver_defs = self._resolve_at(node.func.value.lineno, node.func.value.col_offset)
                 if receiver_defs:

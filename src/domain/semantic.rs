@@ -295,6 +295,11 @@ pub struct Parameter {
     /// - For generic types: use instantiated type if available (e.g., "List[int]")
     pub param_type: Option<TypeRef>,
 
+    /// Whether this parameter uses a high-freedom type (e.g. dict, list, str, Any)
+    /// High-freedom types require more documentation because they lack strong structural constraints.
+    #[serde(default)]
+    pub is_high_freedom_type: bool,
+
     /// Whether parameter has a default value
     ///
     /// **Adapter Contract**:

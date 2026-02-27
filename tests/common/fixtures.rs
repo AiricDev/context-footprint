@@ -185,6 +185,7 @@ pub fn create_semantic_data_simple() -> SemanticData {
                 vec![Parameter {
                     name: "x".into(),
                     param_type: Some("int".into()),
+                    is_high_freedom_type: true,
                     has_default: false,
                     is_variadic: false,
                 }],

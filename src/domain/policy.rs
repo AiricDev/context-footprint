@@ -99,13 +99,34 @@ pub fn should_explore_callers(
     if matches!(incoming_edge, Some(EdgeKind::Call)) {
         return false;
     }
-    // Specification complete — no need to check usage
-    if func_node.is_signature_complete_with_registry(type_registry)
-        && func_node.core.doc_score >= params.doc_threshold
-    {
+    
+    // Constructors (e.g. __init__) are called from many instantiation sites.
+    // Call-in exploration would add all callers, inflating CF without adding
+    // semantic value — the constructor's purpose is self-evident.
+    if func_node.is_constructor {
         return false;
     }
-    true
+    
+    // Specification complete check
+    if !func_node.is_signature_complete_with_registry(type_registry) {
+        return true; // Signature is incomplete, must explore callers
+    }
+
+    // Check for high-freedom types in parameters (e.g. dict, list, str, Any).
+    // High-freedom types do not provide strong structural constraints, making them
+    // "leaky" by default unless well-documented.
+    let has_high_freedom_params = func_node.parameters.iter().any(|p| p.is_high_freedom_type);
+
+    if has_high_freedom_params {
+        // High freedom params require documentation to establish contract
+        if func_node.core.doc_score < params.doc_threshold {
+            return true;
+        }
+    }
+    
+    // If all params are strong types (or no params) OR doc_score is sufficient for high-freedom types,
+    // the function is well-specified.
+    false
 }
 
 /// Forward-edge pruning: evaluates Boundary vs Transparent for outgoing edges only.
@@ -235,6 +256,7 @@ mod tests {
             parameters: vec![crate::domain::node::Parameter {
                 name: "x".to_string(),
                 param_type: Some("int#".to_string()),
+                is_high_freedom_type: false,
             }],
             is_async: false,
             is_generator: false,
@@ -390,6 +412,7 @@ mod tests {
             parameters: vec![crate::domain::node::Parameter {
                 name: "x".to_string(),
                 param_type: Some(param_type.to_string()),
+                is_high_freedom_type: false,
             }],
             is_async: false,
             is_generator: false,

@@ -403,6 +403,7 @@ mod tests {
             parameters: vec![crate::domain::node::Parameter {
                 name: "x".to_string(),
                 param_type: Some("int#".to_string()),
+                is_high_freedom_type: false,
             }],
             is_async: false,
             is_generator: false,
@@ -599,16 +600,17 @@ mod tests {
     #[test]
     fn test_start_at_middle_of_chain() {
         // A -> B -> C. Start at B. B has incomplete spec so call-in exploration reaches A.
+        // B's context_size (250) is above LEAF_UTILITY_SIZE_THRESHOLD so call-in is explored.
         let mut graph = ContextGraph::new();
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
-        let b = graph.add_node("sym::b".into(), test_node(1, "b", 20));
+        let b = graph.add_node("sym::b".into(), test_node(1, "b", 250));
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         let mut solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[b], None);
         assert_eq!(result.reachable_set.len(), 3); // B, then C (forward), A (call-in)
-        assert_eq!(result.total_context_size, 10 + 20 + 30);
+        assert_eq!(result.total_context_size, 10 + 250 + 30);
     }
 
     #[test]

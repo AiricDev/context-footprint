@@ -90,6 +90,7 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
                         parameters: vec![Parameter {
                             name: "amount".to_string(),
                             param_type: Some("float#".to_string()),
+                            is_high_freedom_type: false,
                             has_default: false,
                             is_variadic: false,
                         }],
@@ -163,6 +164,7 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
                         parameters: vec![Parameter {
                             name: "amount".to_string(),
                             param_type: Some("float#".to_string()),
+                            is_high_freedom_type: false,
                             has_default: false,
                             is_variadic: false,
                         }],
@@ -234,6 +236,7 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
                         parameters: vec![Parameter {
                             name: "amount".to_string(),
                             param_type: Some("float#".to_string()),
+                            is_high_freedom_type: false,
                             has_default: false,
                             is_variadic: false,
                         }],
@@ -274,6 +277,7 @@ fn build_payment_gateway_fixture(interface_doc_score: f32) -> SemanticData {
                         parameters: vec![Parameter {
                             name: "amount".to_string(),
                             param_type: Some("float#".to_string()),
+                            is_high_freedom_type: false,
                             has_default: false,
                             is_variadic: false,
                         }],

@@ -613,6 +613,7 @@ fn create_node_from_definition(
                 .map(|p| crate::domain::node::Parameter {
                     name: p.name.clone(),
                     param_type: p.param_type.clone(),
+                    is_high_freedom_type: p.is_high_freedom_type,
                 })
                 .collect();
 

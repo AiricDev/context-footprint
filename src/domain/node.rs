@@ -145,6 +145,8 @@ pub struct Parameter {
     pub name: String,
     /// Type ID (symbol) of the parameter type, stored in TypeRegistry
     pub param_type: Option<String>,
+    /// Whether this parameter has a high-freedom type (like dict, list, str)
+    pub is_high_freedom_type: bool,
     // We could add default value presence, etc.
 }
 

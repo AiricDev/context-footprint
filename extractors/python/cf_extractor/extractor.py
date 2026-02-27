@@ -75,6 +75,31 @@ def _annotation_to_typeref(annotation: Optional[ast.expr]) -> Optional[str]:
         return None
 
 
+def _is_high_freedom_type(param_type: Optional[str]) -> bool:
+    """Check if a type is a high-freedom type (built-in primitives or collections)."""
+    if param_type is None:
+        return True  # Untyped is high freedom
+        
+    # Strip Optional/Union things for a basic check, or just check basic strings
+    pt = param_type.strip()
+    
+    # Common high-freedom type names
+    high_freedom_primitives = {"str", "int", "float", "bool", "bytes", "complex", "Any"}
+    high_freedom_collections = {"dict", "list", "set", "tuple", "Dict", "List", "Set", "Tuple", "Mapping", "Sequence", "Iterable"}
+    
+    # If the type is exactly a primitive
+    if pt in high_freedom_primitives:
+        return True
+        
+    # Check if it starts with a collection type (e.g. "dict", "Dict[str, Any]")
+    # We split by '[' to get the base type
+    base_type = pt.split("[")[0].strip()
+    if base_type in high_freedom_collections:
+        return True
+        
+    return False
+
+
 def _class_span_excluding_methods(node: ast.ClassDef, source_lines: list[str]) -> SourceSpan:
     """Calculate class span ending just before the first method to exclude method bodies."""
     start_line = node.lineno - 1
@@ -190,10 +215,12 @@ class DefinitionCollector(ast.NodeVisitor):
             param_type = _annotation_to_typeref(getattr(arg, "annotation", None))
             has_default = i >= def_start
             is_variadic = arg.arg == vararg_arg
+            is_high_freedom = _is_high_freedom_type(param_type)
             params.append(
                 Parameter(
                     name=arg.arg,
                     param_type=param_type,
+                    is_high_freedom_type=is_high_freedom,
                     has_default=has_default,
                     is_variadic=is_variadic,
                 )

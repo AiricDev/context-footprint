@@ -94,6 +94,7 @@ fn test_interface_method_becomes_node_with_flag() {
                         parameters: vec![Parameter {
                             name: "id".to_string(),
                             param_type: Some("str#".to_string()),
+                            is_high_freedom_type: false,
                             has_default: false,
                             is_variadic: false,
                         }],
@@ -220,6 +221,7 @@ fn test_interface_method_with_good_doc_is_boundary() {
                         parameters: vec![Parameter {
                             name: "data".to_string(),
                             param_type: Some("str#".to_string()),
+                            is_high_freedom_type: false,
                             has_default: false,
                             is_variadic: false,
                         }],
@@ -333,6 +335,7 @@ fn test_call_to_interface_method_creates_edge() {
                         parameters: vec![Parameter {
                             name: "data".to_string(),
                             param_type: Some("dict#".to_string()),
+                            is_high_freedom_type: false,
                             has_default: false,
                             is_variadic: false,
                         }],

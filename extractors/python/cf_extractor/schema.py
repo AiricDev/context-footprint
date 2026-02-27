@@ -80,6 +80,7 @@ class SourceSpan(BaseModel):
 class Parameter(BaseModel):
     name: str
     param_type: Optional[TypeRef] = None
+    is_high_freedom_type: bool = False
     has_default: bool = False
     is_variadic: bool = False
 

@@ -178,6 +178,23 @@ class ReferenceCollector(ast.NodeVisitor):
                 return sym_id
         return self.module_symbol_id
 
+    def _enclosing_symbol_defined(self, node: ast.AST) -> Optional[str]:
+        """Return the closest enclosing symbol that exists in all_definitions and is a
+        top-level unit (module, class, or class/module method). References inside nested
+        functions (e.g. api_route.decorator) are attributed to the outer method (api_route)
+        so the graph can create edges from the method node."""
+        enc = self._enclosing_symbol(node)
+        defined_ids = {d.symbol_id for d in self.all_definitions}
+        # Strip until we have a defined symbol that is at most module.class.method (3 segments)
+        while enc and "." in enc:
+            if enc in defined_ids and enc.count(".") <= 2:
+                return enc
+            enc = enc.rsplit(".", 1)[0]
+        result = enc if (enc and enc in defined_ids) else (
+            self.module_symbol_id if self.module_symbol_id in defined_ids else enc
+        )
+        return result
+
     def _loc(self, node: ast.AST) -> SourceLocation:
         return SourceLocation(
             file_path=self.rel_path,
@@ -196,8 +213,14 @@ class ReferenceCollector(ast.NodeVisitor):
         enc = self._enclosing_symbol(node)
         func_id = f"{enc}.{node.name}"
         for d in self.all_definitions:
-            if d.symbol_id == func_id or (d.name == node.name and d.location.file_path == self.rel_path and d.location.line == node.lineno - 1):
-                func_id = d.symbol_id
+            if d.symbol_id == func_id:
+                break
+            if d.name == node.name and d.location.file_path == self.rel_path and d.location.line == node.lineno - 1:
+                # Use definition's symbol_id when it has same or more segments (e.g. class method).
+                # When we have more segments (nested function: api_route.decorator), keep our func_id
+                # so references attribute to the outer method; extractor uses class prefix (APIRouter.decorator).
+                if d.symbol_id.count(".") >= func_id.count("."):
+                    func_id = d.symbol_id
                 break
         start = node.lineno
         end = getattr(node, "end_lineno", node.lineno)
@@ -258,7 +281,7 @@ class ReferenceCollector(ast.NodeVisitor):
                             SymbolReference(
                                 target_symbol=target_sym,
                                 location=self._loc(t_node),
-                                enclosing_symbol=enc,
+                                enclosing_symbol=self._enclosing_symbol_defined(node),
                                 role=ReferenceRole.Read,
                                 receiver=None,
                                 method_name=None,
@@ -312,6 +335,28 @@ class ReferenceCollector(ast.NodeVisitor):
                             target_sym = method_sym_id
                         elif ptype:
                             target_sym = f"{ptype}.{method_name}"
+                    elif receiver_name == "self" and "." in enc:
+                        parts = enc.split(".")
+                        enclosing_class = ".".join(parts[:2]) if len(parts) >= 2 else enc
+                        target_sym = f"{enclosing_class}.{method_name}"
+                # When enc not in definitions (e.g. nested function api_route.decorator), still resolve self.method
+                elif receiver_name == "self" and "." in enc:
+                    parts = enc.split(".")
+                    enclosing_class = ".".join(parts[:2]) if len(parts) >= 2 else enc
+                    target_sym = f"{enclosing_class}.{method_name}"
+            # Qualify bare method name from Jedi with class when receiver is self (e.g. inside nested function)
+            if (
+                target_sym
+                and "." not in target_sym
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+                and (enc or "")
+            ):
+                parts = enc.split(".")
+                if len(parts) >= 2:
+                    enclosing_class = ".".join(parts[:2])
+                    target_sym = f"{enclosing_class}.{method_name}"
 
             if isinstance(node.func.value, ast.Name):
                 receiver_defs = self._resolve_at(node.func.value.lineno, node.func.value.col_offset)
@@ -333,7 +378,7 @@ class ReferenceCollector(ast.NodeVisitor):
             SymbolReference(
                 target_symbol=target_sym,
                 location=self._loc(node),
-                enclosing_symbol=enc,
+                enclosing_symbol=self._enclosing_symbol_defined(node),
                 role=ReferenceRole.Call,
                 receiver=receiver_sym,
                 method_name=method_name,
@@ -365,7 +410,7 @@ class ReferenceCollector(ast.NodeVisitor):
                         SymbolReference(
                             target_symbol=target_sym,
                             location=self._loc(node),
-                            enclosing_symbol=enc,
+                            enclosing_symbol=self._enclosing_symbol_defined(node),
                             role=ReferenceRole.Read,
                             receiver=None,
                             method_name=None,
@@ -387,7 +432,7 @@ class ReferenceCollector(ast.NodeVisitor):
                         SymbolReference(
                             target_symbol=target_sym,
                             location=self._loc(node),
-                            enclosing_symbol=enc,
+                            enclosing_symbol=self._enclosing_symbol_defined(node),
                             role=ReferenceRole.Write,
                             receiver=None,
                             method_name=None,
@@ -421,7 +466,7 @@ class ReferenceCollector(ast.NodeVisitor):
                         SymbolReference(
                             target_symbol=target_sym,
                             location=self._loc(node),
-                            enclosing_symbol=enc,
+                            enclosing_symbol=self._enclosing_symbol_defined(node),
                             role=ReferenceRole.Read,
                             receiver=receiver_sym,
                             method_name=None,
@@ -448,7 +493,7 @@ class ReferenceCollector(ast.NodeVisitor):
                         SymbolReference(
                             target_symbol=target_sym,
                             location=self._loc(node),
-                            enclosing_symbol=enc,
+                            enclosing_symbol=self._enclosing_symbol_defined(node),
                             role=ReferenceRole.Write,
                             receiver=receiver_sym,
                             method_name=None,

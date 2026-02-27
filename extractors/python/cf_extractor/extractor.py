@@ -57,11 +57,40 @@ def _location_from_node(node: ast.AST, file_path: str) -> SourceLocation:
     )
 
 
+def _extract_doc_from_annotation(node: ast.expr) -> list[str]:
+    docs = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            func_id = None
+            if isinstance(child.func, ast.Name):
+                func_id = child.func.id
+            elif isinstance(child.func, ast.Attribute):
+                func_id = child.func.attr
+            if func_id == "Doc" and child.args:
+                arg = child.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    docs.append(arg.value)
+    return docs
+
+
 def _get_docstring(node: ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef | ast.Module) -> list[str]:
+    docs = []
     doc = ast.get_docstring(node)
     if doc:
-        return [doc]
-    return []
+        docs.append(doc)
+        
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for arg in node.args.args + getattr(node.args, "kwonlyargs", []) + getattr(node.args, "posonlyargs", []):
+            if arg.annotation:
+                docs.extend(_extract_doc_from_annotation(arg.annotation))
+        if node.args.vararg and node.args.vararg.annotation:
+            docs.extend(_extract_doc_from_annotation(node.args.vararg.annotation))
+        if node.args.kwarg and node.args.kwarg.annotation:
+            docs.extend(_extract_doc_from_annotation(node.args.kwarg.annotation))
+        if node.returns:
+            docs.extend(_extract_doc_from_annotation(node.returns))
+            
+    return docs
 
 
 def _annotation_to_typeref(annotation: Optional[ast.expr]) -> Optional[str]:

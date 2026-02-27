@@ -86,7 +86,14 @@ impl GraphBuilder {
                     )
                 };
 
-                let doc_text = doc_texts.first().map(|s| s.as_str());
+                // Use all documentation entries for scoring (e.g. Annotated Doc() per parameter);
+                // joining so the heuristic can see parameter coverage across all entries.
+                let doc_text_combined = doc_texts.join("\n\n");
+                let doc_text = if doc_text_combined.is_empty() {
+                    None
+                } else {
+                    Some(doc_text_combined.as_str())
+                };
 
                 let language = document
                     .relative_path
@@ -167,7 +174,12 @@ impl GraphBuilder {
                 .compute(&synthetic_source, &synthetic_span, &[]);
             let context_size = raw_size.min(EXTERNAL_SYMBOL_MAX_TOKENS);
 
-            let doc_text = doc_texts.first().map(|s| s.as_str());
+            let doc_text_combined = doc_texts.join("\n\n");
+            let doc_text = if doc_text_combined.is_empty() {
+                None
+            } else {
+                Some(doc_text_combined.as_str())
+            };
 
             let language = def
                 .location

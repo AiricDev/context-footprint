@@ -134,12 +134,18 @@ pub fn should_explore_callers(
 /// should_explore_callers and mutability + Read.
 pub fn evaluate_forward(
     params: &PruningParams,
-    _source: &Node,
+    source: &Node,
     target: &Node,
     edge_kind: &EdgeKind,
     graph: &ContextGraph,
 ) -> PruningDecision {
-    // 1. External dependencies are always boundaries
+    // 1. Do not expand from stub nodes (context_size 0: package/module/synthetic).
+    // Otherwise reverse traversal (CallIn) into such a node would pull in the whole package.
+    if source.core().context_size == 0 {
+        return PruningDecision::Boundary;
+    }
+
+    // 2. External dependencies are always boundaries
     if target.core().is_external {
         return PruningDecision::Boundary;
     }
@@ -345,6 +351,46 @@ mod tests {
         let params = PruningParams::default();
 
         // Const variable should be a boundary on Read
+        assert!(matches!(
+            evaluate(&params, &source, &target, &edge, &graph),
+            PruningDecision::Boundary
+        ));
+    }
+
+    #[test]
+    fn test_source_context_size_zero_is_boundary() {
+        let graph = ContextGraph::new();
+        let source_core = NodeCore::new(
+            0,
+            "stub".to_string(),
+            None,
+            0, // context_size 0 => do not expand
+            SourceSpan {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 0,
+            },
+            0.0,
+            false,
+            "test.py".to_string(),
+        );
+        let source = Node::Function(FunctionNode {
+            core: source_core,
+            parameters: vec![],
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+        let target = test_node(0.0);
+        let edge = EdgeKind::Read;
+        let params = PruningParams::default();
+
+        // Do not expand from stub nodes (context_size 0)
         assert!(matches!(
             evaluate(&params, &source, &target, &edge, &graph),
             PruningDecision::Boundary

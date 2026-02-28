@@ -52,6 +52,10 @@ impl PruningParams {
     }
 }
 
+/// Threshold for tokens per caller. If a function has fewer tokens per caller than this,
+/// it's considered a utility and we don't explore its callers during call-in exploration.
+const UTILITY_TOKENS_PER_CALLER_THRESHOLD: usize = 10;
+
 // -----------------------------------------------------------------------------
 // Core algorithm (domain layer)
 // -----------------------------------------------------------------------------
@@ -115,7 +119,7 @@ pub fn should_explore_callers(
     // Exploring all callers would inflate CF without aiding understanding.
     if caller_count > 1 {
         let tokens_per_caller = func_node.core.context_size as usize / caller_count;
-        if tokens_per_caller < 10 {
+        if tokens_per_caller < UTILITY_TOKENS_PER_CALLER_THRESHOLD {
             return false;
         }
     }

@@ -213,15 +213,13 @@ impl CfSolver {
             }
         }
 
-        let result = CfResult {
+        CfResult {
             reachable_set: visited.clone(),
             reachable_nodes_ordered: ordered.clone(),
             reachable_nodes_by_layer: layers.clone(),
             traversal_steps,
             total_context_size: total_size,
-        };
-
-        result
+        }
     }
 
     /// Compute CF total context size for a single start node.

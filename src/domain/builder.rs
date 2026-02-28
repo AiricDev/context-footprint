@@ -77,7 +77,7 @@ impl GraphBuilder {
                 // or Annotated-style documented factory (use_signature_only_for_size).
                 let use_signature_only = is_interface_method
                     || (def.kind == SymbolKind::Function
-                        && def.as_function().map_or(false, |f| {
+                        && def.as_function().is_some_and(|f| {
                             f.modifiers.use_signature_only_for_size
                         }));
 
@@ -597,23 +597,26 @@ fn build_external_source(signature: &Option<String>, doc_texts: &[String]) -> St
 }
 
 /// Max context_size for external symbols; signatures only, no implementation.
+/// We assign a small fixed size to external symbols because we don't explore their bodies.
 const EXTERNAL_SYMBOL_MAX_TOKENS: u32 = 50;
+
+/// Length at which to truncate external symbol signatures to avoid token explosion.
+const EXTERNAL_SIGNATURE_TRUNCATE_LEN: usize = 200;
 
 /// Build a minimal synthetic source for external symbol context_size: signature only.
 /// Does not include doc or implementation; external library bodies are not useful for CF.
 /// Long signatures (e.g. FastAPI File/Form) are truncated to avoid token explosion.
 fn build_external_signature_only(signature: &Option<String>, def: &SymbolDefinition) -> String {
-    let raw = if let Some(sig) = signature {
-        let truncated = if sig.len() > 200 {
-            format!("{}...", &sig[..200])
+    if let Some(sig) = signature {
+        let truncated = if sig.len() > EXTERNAL_SIGNATURE_TRUNCATE_LEN {
+            format!("{}...", &sig[..EXTERNAL_SIGNATURE_TRUNCATE_LEN])
         } else {
             sig.clone()
         };
         format!("{} {}", def.name, truncated)
     } else {
-        format!("{}", def.name)
-    };
-    raw
+        def.name.to_string()
+    }
 }
 
 /// Infer node type from symbol kind

@@ -187,7 +187,11 @@ class ReferenceCollector(ast.NodeVisitor):
         defined_ids = {d.symbol_id for d in self.all_definitions}
         # Strip until we have a defined symbol that is at most module.class.method (3 segments)
         while enc and "." in enc:
-            if enc in defined_ids and enc.count(".") <= 2:
+            # We want to match what was extracted as definitions. If it's a nested function,
+            # it might not be in defined_ids. If it's a method or class, it should be.
+            # Only consider it defined if it's in defined_ids and it's a module, class, or method (<= 3 segments if it's module.class.method, but module could be a.b.c so we can't count segments simply anymore).
+            # The definition extractor doesn't collect nested functions.
+            if enc in defined_ids:
                 return enc
             enc = enc.rsplit(".", 1)[0]
         result = enc if (enc and enc in defined_ids) else (
@@ -252,7 +256,7 @@ class ReferenceCollector(ast.NodeVisitor):
                 target_sym = _full_name_from_jedi(defs[0])
                 if target_sym:
                     self._collect_external_symbol(target_sym, defs[0])
-        if target_sym or True:
+        if target_sym:
             self.references.append(
                 SymbolReference(
                     target_symbol=target_sym,
@@ -337,13 +341,34 @@ class ReferenceCollector(ast.NodeVisitor):
                             target_sym = f"{ptype}.{method_name}"
                     elif receiver_name == "self" and "." in enc:
                         parts = enc.split(".")
-                        enclosing_class = ".".join(parts[:2]) if len(parts) >= 2 else enc
-                        target_sym = f"{enclosing_class}.{method_name}"
+                        # Only take up to the class name, ignoring nested function segments.
+                        # We look at the definitions to see what the class name is, or fallback to simple truncation.
+                        # Wait, we know `parts` contains the path to the current function.
+                        # E.g. test_nested_call.APIRouter.api_route.decorator -> we want test_nested_call.APIRouter.
+                        # Since we want the class, we want the definition in self.all_definitions that has `kind == SymbolKind.Type` and matches a prefix of `enc`.
+                        class_prefix = None
+                        for d in self.all_definitions:
+                            if d.kind == SymbolKind.Type and enc.startswith(d.symbol_id + "."):
+                                class_prefix = d.symbol_id
+                                break
+                        if class_prefix:
+                            target_sym = f"{class_prefix}.{method_name}"
+                        else:
+                            enclosing_class = ".".join(parts[:-1]) if len(parts) >= 2 else enc
+                            target_sym = f"{enclosing_class}.{method_name}"
                 # When enc not in definitions (e.g. nested function api_route.decorator), still resolve self.method
                 elif receiver_name == "self" and "." in enc:
                     parts = enc.split(".")
-                    enclosing_class = ".".join(parts[:2]) if len(parts) >= 2 else enc
-                    target_sym = f"{enclosing_class}.{method_name}"
+                    class_prefix = None
+                    for d in self.all_definitions:
+                        if d.kind == SymbolKind.Type and enc.startswith(d.symbol_id + "."):
+                            class_prefix = d.symbol_id
+                            break
+                    if class_prefix:
+                        target_sym = f"{class_prefix}.{method_name}"
+                    else:
+                        enclosing_class = ".".join(parts[:-1]) if len(parts) >= 2 else enc
+                        target_sym = f"{enclosing_class}.{method_name}"
             # Qualify bare method name from Jedi with class when receiver is self (e.g. inside nested function)
             if (
                 target_sym
@@ -354,9 +379,17 @@ class ReferenceCollector(ast.NodeVisitor):
                 and (enc or "")
             ):
                 parts = enc.split(".")
-                if len(parts) >= 2:
-                    enclosing_class = ".".join(parts[:2])
-                    target_sym = f"{enclosing_class}.{method_name}"
+                class_prefix = None
+                for d in self.all_definitions:
+                    if d.kind == SymbolKind.Type and enc.startswith(d.symbol_id + "."):
+                        class_prefix = d.symbol_id
+                        break
+                if class_prefix:
+                    target_sym = f"{class_prefix}.{method_name}"
+                else:
+                    if len(parts) >= 2:
+                        enclosing_class = ".".join(parts[:-1])
+                        target_sym = f"{enclosing_class}.{method_name}"
 
             if isinstance(node.func.value, ast.Name):
                 receiver_defs = self._resolve_at(node.func.value.lineno, node.func.value.col_offset)

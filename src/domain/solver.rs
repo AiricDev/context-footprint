@@ -113,10 +113,10 @@ impl CfSolver {
                 break;
             }
 
-            // === Stop exploring from CallIn nodes ===
-            // If we reached this node just to understand how it calls something,
-            // we only need its immediate context. We do not explore further from it.
-            if matches!(reached_via, ReachedVia::CallIn) {
+            // === Stop exploring from reverse traversal nodes ===
+            // If we reached this node just to understand how it calls something
+            // or mutates shared state, we only need its immediate context. We do not explore further from it.
+            if matches!(reached_via, ReachedVia::CallIn | ReachedVia::SharedStateWrite) {
                 continue;
             }
 
@@ -255,10 +255,10 @@ impl CfSolver {
         queue.push_back((start, ReachedVia::Start));
 
         while let Some((current, reached_via)) = queue.pop_front() {
-            // === Stop exploring from CallIn nodes ===
-            // If we reached this node just to understand how it calls something,
-            // we only need its immediate context. We do not explore further from it.
-            if matches!(reached_via, ReachedVia::CallIn) {
+            // === Stop exploring from reverse traversal nodes ===
+            // If we reached this node just to understand how it calls something
+            // or mutates shared state, we only need its immediate context. We do not explore further from it.
+            if matches!(reached_via, ReachedVia::CallIn | ReachedVia::SharedStateWrite) {
                 continue;
             }
 

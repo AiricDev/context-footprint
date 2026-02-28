@@ -35,6 +35,16 @@ def _visibility_from_name(name: str) -> Visibility:
     return Visibility.Public
 
 
+def _mutability_from_name(name: str) -> Mutability:
+    if not name:
+        return Mutability.Mutable
+    if name.isupper():
+        return Mutability.Const
+    if name[0].isupper() and any(c.islower() for c in name):
+        return Mutability.Immutable
+    return Mutability.Mutable
+
+
 def _span_from_node(node: ast.AST, source_lines: list[str]) -> SourceSpan:
     """Build 0-based inclusive start, exclusive end span. AST uses 1-based lines."""
     start_line = node.lineno - 1
@@ -359,7 +369,7 @@ class DefinitionCollector(ast.NodeVisitor):
                         TypeField(
                             name=target.id,
                             field_type=None,
-                            mutability=Mutability.Mutable,
+                            mutability=_mutability_from_name(target.id),
                             visibility=_visibility_from_name(target.id),
                             symbol_id=sym_id,
                         )
@@ -383,7 +393,7 @@ class DefinitionCollector(ast.NodeVisitor):
                         documentation=[],
                         details=VariableDetails(
                             var_type=None,
-                            mutability=Mutability.Mutable,
+                            mutability=_mutability_from_name(target.id),
                             scope=scope,
                             visibility=_visibility_from_name(target.id),
                         ),
@@ -401,7 +411,7 @@ class DefinitionCollector(ast.NodeVisitor):
                             TypeField(
                                 name=target.attr,
                                 field_type=None,
-                                mutability=Mutability.Mutable,
+                                mutability=_mutability_from_name(target.attr),
                                 visibility=_visibility_from_name(target.attr),
                                 symbol_id=sym_id,
                             )
@@ -421,7 +431,7 @@ class DefinitionCollector(ast.NodeVisitor):
                                 documentation=[],
                                 details=VariableDetails(
                                     var_type=None,
-                                    mutability=Mutability.Mutable,
+                                    mutability=_mutability_from_name(target.attr),
                                     scope=scope,
                                     visibility=_visibility_from_name(target.attr),
                                 ),
@@ -444,7 +454,7 @@ class DefinitionCollector(ast.NodeVisitor):
                     TypeField(
                         name=node.target.id,
                         field_type=var_type,
-                        mutability=Mutability.Mutable,
+                        mutability=_mutability_from_name(node.target.id),
                         visibility=_visibility_from_name(node.target.id),
                         symbol_id=sym_id,
                     )
@@ -468,7 +478,7 @@ class DefinitionCollector(ast.NodeVisitor):
                     documentation=[],
                     details=VariableDetails(
                         var_type=var_type,
-                        mutability=Mutability.Mutable,
+                        mutability=_mutability_from_name(node.target.id),
                         scope=scope,
                         visibility=_visibility_from_name(node.target.id),
                     ),
@@ -487,7 +497,7 @@ class DefinitionCollector(ast.NodeVisitor):
                         TypeField(
                             name=node.target.attr,
                             field_type=var_type,
-                            mutability=Mutability.Mutable,
+                            mutability=_mutability_from_name(node.target.attr),
                             visibility=_visibility_from_name(node.target.attr),
                             symbol_id=sym_id,
                         )
@@ -507,7 +517,7 @@ class DefinitionCollector(ast.NodeVisitor):
                             documentation=[],
                             details=VariableDetails(
                                 var_type=var_type,
-                                mutability=Mutability.Mutable,
+                                mutability=_mutability_from_name(node.target.attr),
                                 scope=scope,
                                 visibility=_visibility_from_name(node.target.attr),
                             ),

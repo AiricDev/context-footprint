@@ -164,6 +164,12 @@ impl GraphBuilder {
         // signature (no doc/implementation) since external library bodies are not useful
         // for understanding project code.
         for def in &semantic_data.external_symbols {
+            // Skip if this symbol was already found as an internal project symbol
+            // (Extractors might incorrectly flag intra-project imports as external)
+            if node_symbols.contains(&def.symbol_id) || type_registry.contains(&def.symbol_id) {
+                continue;
+            }
+
             let node_id = graph.graph.node_count() as u32;
             let doc_texts = def.documentation.clone();
 

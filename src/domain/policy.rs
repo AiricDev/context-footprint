@@ -110,18 +110,11 @@ pub fn should_explore_callers(
 
     let caller_count = graph.incoming_edges(func_idx, Some(EdgeKind::Call)).count();
 
-    if func_node.core.name == "is_bytes_sequence_annotation" {
-        println!("is_bytes_sequence_annotation: caller_count={}", caller_count);
-    }
-
     // 1. Highly reused utility exception (Size vs CallIn ratio)
     // If a function is called from many places relative to its size, it's a utility.
     // Exploring all callers would inflate CF without aiding understanding.
     if caller_count > 1 {
         let tokens_per_caller = func_node.core.context_size as usize / caller_count;
-        if func_node.core.name == "is_bytes_sequence_annotation" {
-            println!("is_bytes_sequence_annotation check ratio: context_size={}, caller_count={}, tokens_per_caller={}", func_node.core.context_size, caller_count, tokens_per_caller);
-        }
         if tokens_per_caller < 10 {
             return false;
         }

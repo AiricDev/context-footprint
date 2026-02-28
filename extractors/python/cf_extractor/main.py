@@ -139,10 +139,16 @@ def run_extract(
         except Exception as e:
             print(f"Warning: references {rel_path}: {e}", file=sys.stderr)
 
+    internal_symbol_ids = {d.symbol_id for d in all_definitions}
+    filtered_external_symbols = [
+        sym for sym in external_symbols.values()
+        if sym.symbol_id not in internal_symbol_ids
+    ]
+
     return SemanticData(
         project_root=project_root,
         documents=docs,
-        external_symbols=list(external_symbols.values()),
+        external_symbols=filtered_external_symbols,
     )
 
 

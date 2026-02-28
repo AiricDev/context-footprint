@@ -73,6 +73,32 @@ def _extract_doc_from_annotation(node: ast.expr) -> list[str]:
     return docs
 
 
+def _has_doc_in_annotations(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True if any parameter or return annotation contains Doc() (PEP 727 / Annotated-style)."""
+    for arg in node.args.args + getattr(node.args, "kwonlyargs", []) + getattr(node.args, "posonlyargs", []):
+        if arg.annotation and _extract_doc_from_annotation(arg.annotation):
+            return True
+    if node.args.vararg and node.args.vararg.annotation and _extract_doc_from_annotation(node.args.vararg.annotation):
+        return True
+    if node.args.kwarg and node.args.kwarg.annotation and _extract_doc_from_annotation(node.args.kwarg.annotation):
+        return True
+    if node.returns and _extract_doc_from_annotation(node.returns):
+        return True
+    return False
+
+
+def _is_trivial_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """True if function body is only `pass` or a single return (Annotated-style factory)."""
+    if len(node.body) != 1:
+        return False
+    stmt = node.body[0]
+    if isinstance(stmt, ast.Pass):
+        return True
+    if isinstance(stmt, ast.Return):
+        return True
+    return False
+
+
 def _get_docstring(node: ast.AsyncFunctionDef | ast.FunctionDef | ast.ClassDef | ast.Module) -> list[str]:
     docs = []
     doc = ast.get_docstring(node)
@@ -276,7 +302,13 @@ class DefinitionCollector(ast.NodeVisitor):
         is_constructor = node.name == "__init__"
         if is_constructor and not return_types:
             return_types = ["None"]
-            
+
+        # Annotated-style documented factory (e.g. Body(), Query()): Doc() in params/return + trivial body.
+        # Use signature-only for context_size so CF does not inflate on doc-heavy signatures.
+        use_signature_only_for_size = (
+            _has_doc_in_annotations(node) and _is_trivial_body(node)
+        )
+
         modifiers = FunctionModifiers(
             is_async=is_async,
             is_generator=any(isinstance(n, ast.Yield) for n in ast.walk(node)),
@@ -284,6 +316,7 @@ class DefinitionCollector(ast.NodeVisitor):
             is_abstract=is_abstract,
             is_constructor=is_constructor,
             is_di_wired=False,
+            use_signature_only_for_size=use_signature_only_for_size,
             visibility=_visibility_from_name(node.name),
         )
         span = _span_from_node(node, self.source_lines)

@@ -58,9 +58,49 @@ pub fn function_def(
                 is_abstract: false,
                 is_constructor: false,
                 is_di_wired: false,
+                use_signature_only_for_size: false,
                 visibility: Visibility::Public,
             },
         }),
+    }
+}
+
+/// One file, one function with use_signature_only_for_size=true and a long span (0..25).
+/// Used to assert that context_size is computed from signature only, not full body.
+pub fn create_semantic_data_annotated_style_factory() -> SemanticData {
+    let sym = "mod::Body";
+    let mut def = function_def(
+        sym,
+        "Body",
+        vec!["Doc for param.".into()],
+        vec![Parameter {
+            name: "default".into(),
+            param_type: Some("Any".into()),
+            is_high_freedom_type: true,
+            has_default: true,
+            is_variadic: false,
+        }],
+        Some("Any".into()),
+    );
+    def.span = SourceSpan {
+        start_line: 0,
+        start_column: 0,
+        end_line: 25,
+        end_column: 0,
+    };
+    if let SymbolDetails::Function(ref mut fd) = def.details {
+        fd.modifiers.use_signature_only_for_size = true;
+    }
+    let documents = vec![DocumentSemantics {
+        relative_path: "param_functions.py".into(),
+        language: "python".into(),
+        definitions: vec![def],
+        references: vec![],
+    }];
+    SemanticData {
+        project_root: "/test".into(),
+        documents,
+        external_symbols: vec![],
     }
 }
 

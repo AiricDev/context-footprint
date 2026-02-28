@@ -113,6 +113,13 @@ impl CfSolver {
                 break;
             }
 
+            // === Stop exploring from CallIn nodes ===
+            // If we reached this node just to understand how it calls something,
+            // we only need its immediate context. We do not explore further from it.
+            if matches!(reached_via, ReachedVia::CallIn) {
+                continue;
+            }
+
             // === Forward traversal: outgoing edges ===
             let mut out_edges: Vec<_> = graph.outgoing_edges(current).collect();
             out_edges.sort_by(|(a_idx, _), (b_idx, _)| {
@@ -171,7 +178,7 @@ impl CfSolver {
                     ReachedVia::Forward(ek) => Some(ek),
                     _ => None,
                 };
-                if should_explore_callers(f, incoming_edge, params, &graph.type_registry) {
+                if should_explore_callers(f, current, incoming_edge, params, graph) {
                     for (caller_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Call)) {
                         let caller_id = graph.node(caller_idx).core().id;
                         if !visited.contains(&caller_id) {
@@ -248,6 +255,13 @@ impl CfSolver {
         queue.push_back((start, ReachedVia::Start));
 
         while let Some((current, reached_via)) = queue.pop_front() {
+            // === Stop exploring from CallIn nodes ===
+            // If we reached this node just to understand how it calls something,
+            // we only need its immediate context. We do not explore further from it.
+            if matches!(reached_via, ReachedVia::CallIn) {
+                continue;
+            }
+
             let current_node = graph.node(current);
 
             for (neighbor, edge_kind) in graph.outgoing_edges(current) {
@@ -273,7 +287,7 @@ impl CfSolver {
                     ReachedVia::Forward(ek) => Some(ek),
                     _ => None,
                 };
-                if should_explore_callers(f, incoming_edge, params, &graph.type_registry) {
+                if should_explore_callers(f, current, incoming_edge, params, graph) {
                     for (caller_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Call)) {
                         let caller_pos = caller_idx.index();
                         if caller_pos < visited.len() && !visited[caller_pos] {
@@ -338,6 +352,31 @@ mod tests {
             is_interface_method: false,
             is_constructor: false,
             is_di_wired: false,
+        })
+    }
+
+    fn test_var_node(id: u32, name: &str, mutability: crate::domain::node::Mutability) -> Node {
+        let span = SourceSpan {
+            start_line: 0,
+            start_column: 0,
+            end_line: 1,
+            end_column: 10,
+        };
+        let core = NodeCore::new(
+            id,
+            name.to_string(),
+            None,
+            1,
+            span,
+            0.5,
+            false,
+            "test.py".to_string(),
+        );
+        Node::Variable(crate::domain::node::VariableNode {
+            core,
+            var_type: None,
+            mutability,
+            variable_kind: crate::domain::node::VariableKind::Global,
         })
     }
 
@@ -506,11 +545,15 @@ mod tests {
         let mut graph = ContextGraph::new();
         let callee = graph.add_node("sym::callee".into(), test_node(0, "callee", 10));
         let caller = graph.add_node("sym::caller".into(), test_node(1, "caller", 25));
+        let var = graph.add_node("sym::var".into(), test_var_node(2, "var", crate::domain::node::Mutability::Mutable));
         graph.add_edge(caller, callee, EdgeKind::Call);
+        // Make callee impure so call-in happens
+        graph.add_edge(callee, var, EdgeKind::Write);
+        
         let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[callee], None);
-        assert_eq!(result.reachable_set.len(), 2);
-        assert_eq!(result.total_context_size, 10 + 25);
+        assert_eq!(result.reachable_set.len(), 3); // callee, var (forward), caller (call-in)
+        assert_eq!(result.total_context_size, 10 + 25 + 1);
     }
 
     #[test]
@@ -566,12 +609,16 @@ mod tests {
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 250));
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
+        let var = graph.add_node("sym::var".into(), test_var_node(3, "var", crate::domain::node::Mutability::Mutable));
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
+        // Make b impure so call-in happens
+        graph.add_edge(b, var, EdgeKind::Write);
+        
         let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[b], None);
-        assert_eq!(result.reachable_set.len(), 3); // B, then C (forward), A (call-in)
-        assert_eq!(result.total_context_size, 10 + 250 + 30);
+        assert_eq!(result.reachable_set.len(), 4); // B, then C and var (forward), A (call-in)
+        assert_eq!(result.total_context_size, 10 + 250 + 30 + 1);
     }
 
     #[test]

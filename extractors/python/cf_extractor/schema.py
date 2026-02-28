@@ -97,6 +97,7 @@ class FunctionModifiers(BaseModel):
     is_abstract: bool = False
     is_constructor: bool = False
     is_di_wired: bool = False
+    use_signature_only_for_size: bool = False
     visibility: Visibility = Visibility.Public
 
 

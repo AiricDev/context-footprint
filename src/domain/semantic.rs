@@ -374,6 +374,14 @@ pub struct FunctionModifiers {
     #[serde(default)]
     pub is_di_wired: bool,
 
+    /// Use only the function signature for context_size (exclude body).
+    /// Set by extractors when the function is an "Annotated-style" documented factory
+    /// (e.g. Python Body()/Query() with Doc() in params); full body is mostly docs
+    /// and would inflate CF without adding understanding. When true, context_size
+    /// is computed from the signature span only (same as is_abstract).
+    #[serde(default)]
+    pub use_signature_only_for_size: bool,
+
     pub visibility: Visibility,
 }
 
@@ -386,6 +394,7 @@ impl Default for FunctionModifiers {
             is_abstract: false,
             is_constructor: false,
             is_di_wired: false,
+            use_signature_only_for_size: false,
             visibility: Visibility::Public,
         }
     }

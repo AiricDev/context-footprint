@@ -6,11 +6,14 @@ use context_footprint::domain::builder::GraphBuilder;
 use context_footprint::domain::edge::EdgeKind;
 use petgraph::visit::EdgeRef;
 
+use context_footprint::domain::policy::{SizeFunction, SourceSpan};
+
 use common::fixtures::{
-    create_semantic_data_empty_document, create_semantic_data_multiple_callers,
-    create_semantic_data_simple, create_semantic_data_two_files,
-    create_semantic_data_with_constructor_call, create_semantic_data_with_cycle,
-    create_semantic_data_with_shared_state, source_reader_for_semantic_data,
+    create_semantic_data_annotated_style_factory, create_semantic_data_empty_document,
+    create_semantic_data_multiple_callers, create_semantic_data_simple,
+    create_semantic_data_two_files, create_semantic_data_with_constructor_call,
+    create_semantic_data_with_cycle, create_semantic_data_with_shared_state,
+    source_reader_for_semantic_data,
 };
 use common::mock::{MockDocScorer, MockSizeFunction};
 
@@ -184,5 +187,40 @@ fn test_constructor_call_to_type_resolves_to_init() {
     assert!(
         has_call_edge,
         "Constructor call to Type should resolve to __init__ Call edge"
+    );
+}
+
+/// Size function that returns 10 * (number of lines in span). Used to verify
+/// that use_signature_only_for_size causes only the signature span to be counted.
+struct LineCountSizeFunction;
+
+impl SizeFunction for LineCountSizeFunction {
+    fn compute(&self, _source: &str, span: &SourceSpan, _doc_texts: &[String]) -> u32 {
+        let lines = span.end_line.saturating_sub(span.start_line) + 1;
+        lines * 10
+    }
+}
+
+#[test]
+fn test_use_signature_only_for_size_limits_context_size_to_signature() {
+    let semantic_data = create_semantic_data_annotated_style_factory();
+    // Source: line 0 = signature (with colon), lines 1..25 = body. 26 lines total.
+    let signature_line = "def Body(default: Any = ...) -> Any:\n";
+    let body_lines: String = (0..25).map(|_| "    # comment line to grow body\n").collect();
+    let source = format!("{signature_line}{body_lines}");
+
+    let reader = source_reader_for_semantic_data(&semantic_data, &source);
+    let size_fn = Box::new(LineCountSizeFunction);
+    let doc_scorer = Box::new(MockDocScorer::new());
+    let builder = GraphBuilder::new(size_fn, doc_scorer);
+    let graph = builder.build(semantic_data, &reader).unwrap();
+
+    let body_idx = graph.get_node_by_symbol("mod::Body").expect("Body symbol");
+    let context_size = graph.node(body_idx).core().context_size;
+    // With use_signature_only_for_size, only the signature line (1 line) is counted: 10 tokens.
+    // If we had counted the full span (26 lines), it would be 260.
+    assert_eq!(
+        context_size, 10,
+        "annotated-style factory should use signature-only size (1 line = 10), not full body (260)"
     );
 }

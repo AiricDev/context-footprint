@@ -120,3 +120,17 @@ def test_annotated_doc_extraction():
     assert len(body_def.documentation) == 2, "Should extract exactly 2 Doc() strings"
     assert "Default value if the parameter field is not set." in body_def.documentation[0]
     assert "The media type." in body_def.documentation[1]
+
+
+def test_annotated_style_factory_use_signature_only_for_size():
+    """Annotated-style factory (Doc() in params + trivial body) gets use_signature_only_for_size=True."""
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    body_def = next(
+        (d for doc in data.documents for d in doc.definitions if d.name == "Body" and "test_annotated_doc" in doc.relative_path),
+        None,
+    )
+    assert body_def is not None, "Body function definition not found"
+    assert body_def.details.modifiers.use_signature_only_for_size is True, (
+        "Body() has Doc() in Annotated params and trivial body (pass); "
+        "should set use_signature_only_for_size so CF uses signature-only size"
+    )

@@ -91,24 +91,80 @@ pub fn is_abstract_factory(
 /// Used when traversing: if true, follow incoming Call edges from this function.
 pub fn should_explore_callers(
     func_node: &crate::domain::node::FunctionNode,
+    func_idx: petgraph::graph::NodeIndex,
     incoming_edge: Option<&EdgeKind>,
     params: &PruningParams,
-    type_registry: &TypeRegistry,
+    graph: &ContextGraph,
 ) -> bool {
     // Already arrived via Call — caller context is known
     if matches!(incoming_edge, Some(EdgeKind::Call)) {
         return false;
     }
-    
+
     // Constructors (e.g. __init__) are called from many instantiation sites.
     // Call-in exploration would add all callers, inflating CF without adding
     // semantic value — the constructor's purpose is self-evident.
     if func_node.is_constructor {
         return false;
     }
+
+    let caller_count = graph.incoming_edges(func_idx, Some(EdgeKind::Call)).count();
+
+    if func_node.core.name == "is_bytes_sequence_annotation" {
+        println!("is_bytes_sequence_annotation: caller_count={}", caller_count);
+    }
+
+    // 1. Highly reused utility exception (Size vs CallIn ratio)
+    // If a function is called from many places relative to its size, it's a utility.
+    // Exploring all callers would inflate CF without aiding understanding.
+    if caller_count > 1 {
+        let tokens_per_caller = func_node.core.context_size as usize / caller_count;
+        if func_node.core.name == "is_bytes_sequence_annotation" {
+            println!("is_bytes_sequence_annotation check ratio: context_size={}, caller_count={}, tokens_per_caller={}", func_node.core.context_size, caller_count, tokens_per_caller);
+        }
+        if tokens_per_caller < 10 {
+            return false;
+        }
+    }
+
+    // 2. Side-effect-free exception (Pure-like)
+    // A function's behavior doesn't affect the rest of the system if it doesn't write to mutable state.
+    // Deep check: no outgoing Write edges in this function or any function it calls.
+    // We intentionally ignore Read edges because reading global state doesn't produce side effects
+    // that would necessitate exploring callers to understand system state changes.
+    let mut is_side_effect_free = true;
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited_pure_check = std::collections::HashSet::new();
+    queue.push_back(func_idx);
+    visited_pure_check.insert(func_idx);
+
+    while let Some(curr_idx) = queue.pop_front() {
+        for (target_idx, edge_kind) in graph.outgoing_edges(curr_idx) {
+            match edge_kind {
+                EdgeKind::Write => {
+                    is_side_effect_free = false;
+                    break;
+                }
+                EdgeKind::Call => {
+                    if visited_pure_check.insert(target_idx) {
+                        queue.push_back(target_idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !is_side_effect_free {
+            break;
+        }
+    }
     
+    // If it's side-effect-free, we don't need to explore callers to understand its impact.
+    if is_side_effect_free {
+        return false;
+    }
+
     // Specification complete check
-    if !func_node.is_signature_complete_with_registry(type_registry) {
+    if !func_node.is_signature_complete_with_registry(&graph.type_registry) {
         return true; // Signature is incomplete, must explore callers
     }
 
@@ -123,7 +179,7 @@ pub fn should_explore_callers(
             return true;
         }
     }
-    
+
     // If all params are strong types (or no params) OR doc_score is sufficient for high-freedom types,
     // the function is well-specified.
     false

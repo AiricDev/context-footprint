@@ -73,8 +73,16 @@ impl GraphBuilder {
                     false
                 };
 
-                // For interface methods, only compute context_size for signature (not implementation body)
-                let context_size = if is_interface_method {
+                // Use signature-only span for context_size when: abstract/interface method,
+                // or Annotated-style documented factory (use_signature_only_for_size).
+                let use_signature_only = is_interface_method
+                    || (def.kind == SymbolKind::Function
+                        && def.as_function().map_or(false, |f| {
+                            f.modifiers.use_signature_only_for_size
+                        }));
+
+                // For interface methods and annotated-style factories, only compute context_size for signature (not implementation body)
+                let context_size = if use_signature_only {
                     let signature_span = extract_signature_span(&def.span, &source_code);
                     self.size_function
                         .compute(&source_code, &signature_span, &doc_texts)

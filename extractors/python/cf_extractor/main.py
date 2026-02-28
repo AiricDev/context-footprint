@@ -3,6 +3,7 @@ CLI entrypoint: scan project directory, extract SemanticData, print JSON to stdo
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import sys
@@ -36,7 +37,13 @@ def _is_test_path(rel_path: str) -> bool:
     return name.startswith("test_") and name.endswith(".py") or name.endswith("_test.py")
 
 
-def find_python_files(project_root: str, *, include_tests: bool = False) -> list[str]:
+def find_python_files(
+    project_root: str,
+    *,
+    include_tests: bool = False,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> list[str]:
     """Return relative paths of all .py files under project_root. By default excludes test paths."""
     root = Path(project_root)
     out = []
@@ -47,6 +54,12 @@ def find_python_files(project_root: str, *, include_tests: bool = False) -> list
             if _is_skipped_path(path_str):
                 continue
             if include_tests or not _is_test_path(path_str):
+                if include is not None and len(include) > 0:
+                    if not any(fnmatch.fnmatch(path_str, pat) for pat in include):
+                        continue
+                if exclude is not None and len(exclude) > 0:
+                    if any(fnmatch.fnmatch(path_str, pat) for pat in exclude):
+                        continue
                 out.append(path_str)
         except ValueError:
             continue
@@ -58,6 +71,8 @@ def run_extract(
     venv_path: str | None = None,
     *,
     include_tests: bool = False,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> SemanticData:
     """Extract SemanticData from a project directory."""
     project_root = os.path.abspath(project_root)
@@ -65,7 +80,12 @@ def run_extract(
     all_definitions: list[SymbolDefinition] = []
     external_symbols: dict[str, SymbolDefinition] = {}
 
-    py_files = find_python_files(project_root, include_tests=include_tests)
+    py_files = find_python_files(
+        project_root,
+        include_tests=include_tests,
+        include=include,
+        exclude=exclude,
+    )
     total_def = len(py_files)
     for idx, rel_path in enumerate(py_files, 1):
         print(f"[1/2] Definitions ({idx}/{total_def}): {rel_path}", file=sys.stderr)
@@ -142,6 +162,18 @@ def main() -> None:
         action="store_true",
         help="Include test files (default: exclude paths under test/tests/testing/__tests__/spec and test_*.py, *_test.py)",
     )
+    parser.add_argument(
+        "--include",
+        nargs="*",
+        metavar="PATTERN",
+        help="Glob patterns for paths to include (relative to project root). If empty, all paths pass.",
+    )
+    parser.add_argument(
+        "--exclude",
+        nargs="*",
+        metavar="PATTERN",
+        help="Glob patterns for paths to exclude (relative to project root). Excluded paths are skipped.",
+    )
 
     args = parser.parse_args()
     project_root = os.path.abspath(args.project_root)
@@ -153,7 +185,13 @@ def main() -> None:
             venv_path = default_venv
             print(f"Auto-detected venv at: {venv_path}", file=sys.stderr)
 
-    data = run_extract(project_root, venv_path=venv_path, include_tests=args.include_tests)
+    data = run_extract(
+        project_root,
+        venv_path=venv_path,
+        include_tests=args.include_tests,
+        include=args.include,
+        exclude=args.exclude,
+    )
     print(data.model_dump_json(indent=2))
 
 

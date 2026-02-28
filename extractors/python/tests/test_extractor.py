@@ -11,11 +11,38 @@ import pytest
 # Add package to path when running tests without install
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cf_extractor.main import run_extract
+from cf_extractor.main import find_python_files, run_extract
 from cf_extractor.schema import ReferenceRole, SemanticData, SymbolKind
 
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def test_find_python_files_include_pattern():
+    """Include filter restricts to matching paths only."""
+    files = find_python_files(str(FIXTURES_DIR), include_tests=True, include=["simple.py"])
+    assert files == ["simple.py"]
+
+
+def test_find_python_files_exclude_pattern():
+    """Exclude filter skips matching paths."""
+    all_files = find_python_files(str(FIXTURES_DIR), include_tests=True)
+    files = find_python_files(str(FIXTURES_DIR), include_tests=True, exclude=["test_*"])
+    assert len(files) < len(all_files)
+    assert not any("test_" in f for f in files)
+    assert "simple.py" in files
+
+
+def test_find_python_files_include_and_exclude():
+    """Include and exclude can be combined."""
+    files = find_python_files(
+        str(FIXTURES_DIR),
+        include_tests=True,
+        include=["*_call.py"],
+        exclude=["test_nested*"],
+    )
+    assert "test_self_call.py" in files
+    assert "test_nested_call.py" not in files
 
 
 def test_run_extract_produces_valid_json():

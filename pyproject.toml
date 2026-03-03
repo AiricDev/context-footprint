@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "cftool"
+version = "0.1.0"
+description = "Context Footprint: analyze code coupling via CF metric"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = [
+    "cf-extractor>=0.1.0",
+]
+
+[tool.maturin]
+bindings = "bin"
+
+# Local dev: use extractors/python when cf-extractor is not on PyPI yet
+[tool.uv.sources]
+cf-extractor = { path = "extractors/python" }

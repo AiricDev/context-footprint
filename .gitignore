@@ -31,3 +31,6 @@ coverage/
 
 .env
 semantic.json
+
+# Python (maturin / uv)
+.venv

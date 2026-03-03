@@ -182,7 +182,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    project_root = os.path.abspath(args.project_root)
+    project_root = os.path.abspath(args.project_root or ".")
     
     venv_path = args.venv
     if not venv_path:

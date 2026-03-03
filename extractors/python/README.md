@@ -1,26 +1,42 @@
-# Context-Footprint Python Extractor
+# cf-extractor
 
-Prototype extractor that outputs [SemanticData](https://github.com/context-footprint/context-footprint) JSON using **Python AST** + **Jedi**.
+Python semantic data extractor for [Context-Footprint](https://github.com/context-footprint/context-footprint). Outputs SemanticData JSON using **Python AST** + **Jedi**.
 
-## Setup (uv)
+## As a dependency
 
-From this directory:
+This package is a dependency of `cftool`. When you install cftool via uv or pip, cf-extractor is installed automatically:
 
 ```bash
+uv tool install cftool   # includes cf-extractor
+```
+
+## Standalone usage
+
+You can also install and use cf-extractor directly:
+
+```bash
+# From PyPI (when published)
+pip install cf-extractor
+
+# From Git
+uv pip install "cf-extractor @ git+https://github.com/context-footprint/context-footprint#subdirectory=extractors/python"
+
+# Development
+cd extractors/python
 uv sync
 ```
 
-This creates a venv and installs the package in editable mode with dependencies (jedi, pydantic). Dev deps (pytest) are included.
-
-## Usage
+Run the extractor:
 
 ```bash
-uv run cf-extract /path/to/python/project [--pretty]
+cf-extract /path/to/python/project
 # or
-uv run python -m cf_extractor.main /path/to/project [--pretty]
+uv run cf-extract /path/to/python/project
+# or
+python -m cf_extractor.main /path/to/project
 ```
 
-Output is written to stdout (valid JSON consumable by the Rust GraphBuilder).
+Without arguments, uses the current directory (`.`). Output is written to stdout (valid JSON for cftool).
 
 ## Tests
 
@@ -31,5 +47,4 @@ uv run pytest tests/ -v
 ## Requirements
 
 - Python >= 3.9
-- [uv](https://docs.astral.sh/uv/) for dependency and run management
-- jedi, pydantic (installed via `uv sync`)
+- jedi, pydantic (installed automatically)

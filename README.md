@@ -47,18 +47,32 @@ Support for additional languages depends on the availability of semantic data ex
 
 ## Installation
 
-### Prerequisites
+### Option 1: uv / pip (recommended)
 
-- Rust 1.70+
-- A semantic data JSON file for the target project (e.g. from an LSP-based extractor)
+Install as a Python tool—includes the `cf-extract` command for Python project extraction:
 
-### Build
+```bash
+uv tool install cftool
+# or: pip install cftool
+```
+
+Requires Python 3.9+.
+
+### Option 2: Cargo
+
+Build from source:
 
 ```bash
 git clone https://github.com/yourusername/context-footprint.git
 cd context-footprint
 cargo build --release
-````
+```
+
+Requires Rust 1.70+.
+
+### Prerequisites
+
+- A semantic data JSON file for the target project (e.g. from `cf-extract` for Python)
 
 ---
 
@@ -66,32 +80,37 @@ cargo build --release
 
 ### 1. Generate semantic data
 
-Use your project's semantic data extractor (e.g. LSP-based) to produce a `SemanticData` JSON file for the target project.
+For Python projects, use the bundled extractor:
+
+```bash
+cf-extract /path/to/python/project > semantic_data.json
+```
+
+Or use another extractor (e.g. LSP-based) that outputs the `SemanticData` JSON format.
 
 ### 2. Analyze CF distribution
 
 ```bash
-./target/release/cftool semantic_data.json stats
+cftool semantic_data.json stats
+# or with cargo build: ./target/release/cftool semantic_data.json stats
 ```
 
 ### 3. Find symbols with highest CF
 
 ```bash
-./target/release/cftool semantic_data.json top --limit 10
+cftool semantic_data.json top --limit 10
 ```
 
 ### 4. Query a specific symbol
 
 ```bash
-./target/release/cftool semantic_data.json compute \
-  "<symbol-id>"
+cftool semantic_data.json compute "<symbol-id>"
 ```
 
 ### 5. Inspect contributing context
 
 ```bash
-./target/release/cftool semantic_data.json context \
-  "<symbol-id>"
+cftool semantic_data.json context "<symbol-id>"
 ```
 
 ---

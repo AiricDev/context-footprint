@@ -3,11 +3,11 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "cftool"
+name = "context-footprint"
 version = "0.1.0"
 description = "Context Footprint: analyze code coupling via CF metric"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE" }
 requires-python = ">=3.9"
 authors = [{ name = "Leric Zhang" }]
 keywords = ["context-footprint", "static-analysis", "coupling", "metrics", "semantic"]

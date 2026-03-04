@@ -7,7 +7,7 @@ name = "cf-extractor"
 version = "0.1.0"
 description = "Python semantic data extractor for Context-Footprint (AST + Jedi)"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE" }
 requires-python = ">=3.9"
 authors = [{ name = "Leric Zhang" }]
 keywords = ["context-footprint", "semantic", "extractor", "ast", "jedi", "python"]

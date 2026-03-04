@@ -1,0 +1,59 @@
+# Publish cf-extractor (extractors/python) to PyPI. Manual trigger only.
+# Create two GitHub Environments "testpypi" and "pypi", each with secret PYPI_API_TOKEN.
+# See docs/release-cf-extractor.md for setup and usage.
+name: Publish cf-extractor to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Publish to (use GitHub Environment for API key)"
+        required: true
+        type: choice
+        options:
+          - test
+          - prod
+        default: test
+
+jobs:
+  test-and-publish:
+    name: Test, build and publish
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: extractors/python
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies and dev tools
+        run: |
+          uv sync
+          uv add --dev build twine
+
+      - name: Run tests
+        run: uv run pytest tests/ -v
+
+      - name: Build package
+        run: uv run python -m build
+
+      - name: Publish to ${{ inputs.environment }}
+        run: |
+          if [ "${{ inputs.environment }}" = "test" ]; then
+            uv run twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+          else
+            uv run twine upload dist/*
+          fi
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

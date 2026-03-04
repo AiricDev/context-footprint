@@ -34,3 +34,4 @@ semantic.json
 
 # Python (maturin / uv)
 .venv
+dist/

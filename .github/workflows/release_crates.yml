@@ -115,8 +115,8 @@ jobs:
           tag_name: ${{ inputs.tag }}
           name: Release ${{ inputs.tag }}
           files: |
-          artifacts/*/*.tar.gz
-          artifacts/*/*.zip
+            artifacts/*/*.tar.gz
+            artifacts/*/*.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

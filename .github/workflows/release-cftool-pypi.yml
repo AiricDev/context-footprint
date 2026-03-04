@@ -1,0 +1,96 @@
+# Publish cftool (Rust binary via maturin) to PyPI. Manual trigger only.
+# Create GitHub Environments "test" and "prod", each with secret PYPI_API_TOKEN.
+# See docs/release-cftool.md for setup and usage.
+name: Publish cftool to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Publish to (use GitHub Environment for API key)"
+        required: true
+        type: choice
+        options:
+          - test
+          - prod
+        default: test
+
+jobs:
+  test:
+    name: Run Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Run tests
+        run: cargo test --lib
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  build:
+    name: Build wheels (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheel
+        run: maturin build --release -o dist --compatibility pypi
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge wheels into dist
+        run: |
+          mkdir -p dist
+          find artifacts -name '*.whl' -exec cp {} dist/ \;
+          ls -la dist/
+
+      - name: Install twine
+        run: pip install twine
+
+      - name: Publish to ${{ inputs.environment }}
+        run: |
+          if [ "${{ inputs.environment }}" = "test" ]; then
+            twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+          else
+            twine upload dist/*
+          fi
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

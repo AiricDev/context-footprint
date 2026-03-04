@@ -206,7 +206,9 @@ fn test_use_signature_only_for_size_limits_context_size_to_signature() {
     let semantic_data = create_semantic_data_annotated_style_factory();
     // Source: line 0 = signature (with colon), lines 1..25 = body. 26 lines total.
     let signature_line = "def Body(default: Any = ...) -> Any:\n";
-    let body_lines: String = (0..25).map(|_| "    # comment line to grow body\n").collect();
+    let body_lines: String = (0..25)
+        .map(|_| "    # comment line to grow body\n")
+        .collect();
     let source = format!("{signature_line}{body_lines}");
 
     let reader = source_reader_for_semantic_data(&semantic_data, &source);

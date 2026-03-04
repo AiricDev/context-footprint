@@ -42,14 +42,14 @@ jobs:
           path: target
           key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run unit tests
-        run: cargo test --lib
-
-      - name: Run integration tests
-        run: cargo test --tests
-
       - name: Check code formatting
         run: cargo fmt -- --check
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
+
+      - name: Run unit tests
+        run: cargo test --lib
+
+      - name: Run integration tests
+        run: cargo test --tests

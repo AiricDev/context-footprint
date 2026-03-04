@@ -154,7 +154,7 @@ pub fn should_explore_callers(
             break;
         }
     }
-    
+
     // If it's side-effect-free, we don't need to explore callers to understand its impact.
     if is_side_effect_free {
         return false;

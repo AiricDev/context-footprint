@@ -120,6 +120,12 @@ cargo fmt                         # Format code
 cargo test --lib --tests          # All tests pass
 ```
 
+**Optional**: Install [pre-commit](https://pre-commit.com/) to run `cargo fmt --check` before each commit:
+
+```bash
+pip install pre-commit && pre-commit install
+```
+
 ## 📋 Project-Specific Conventions
 
 ### Code Organization Rules

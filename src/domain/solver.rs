@@ -50,10 +50,7 @@ pub struct CfSolver {
 
 impl CfSolver {
     pub fn new(graph: Arc<ContextGraph>, params: PruningParams) -> Self {
-        Self {
-            graph,
-            params,
-        }
+        Self { graph, params }
     }
 
     /// Compute CF for a given set of starting nodes (full result with layers, etc.).
@@ -116,7 +113,10 @@ impl CfSolver {
             // === Stop exploring from reverse traversal nodes ===
             // If we reached this node just to understand how it calls something
             // or mutates shared state, we only need its immediate context. We do not explore further from it.
-            if matches!(reached_via, ReachedVia::CallIn | ReachedVia::SharedStateWrite) {
+            if matches!(
+                reached_via,
+                ReachedVia::CallIn | ReachedVia::SharedStateWrite
+            ) {
                 continue;
             }
 
@@ -256,7 +256,10 @@ impl CfSolver {
             // === Stop exploring from reverse traversal nodes ===
             // If we reached this node just to understand how it calls something
             // or mutates shared state, we only need its immediate context. We do not explore further from it.
-            if matches!(reached_via, ReachedVia::CallIn | ReachedVia::SharedStateWrite) {
+            if matches!(
+                reached_via,
+                ReachedVia::CallIn | ReachedVia::SharedStateWrite
+            ) {
                 continue;
             }
 
@@ -543,11 +546,14 @@ mod tests {
         let mut graph = ContextGraph::new();
         let callee = graph.add_node("sym::callee".into(), test_node(0, "callee", 10));
         let caller = graph.add_node("sym::caller".into(), test_node(1, "caller", 25));
-        let var = graph.add_node("sym::var".into(), test_var_node(2, "var", crate::domain::node::Mutability::Mutable));
+        let var = graph.add_node(
+            "sym::var".into(),
+            test_var_node(2, "var", crate::domain::node::Mutability::Mutable),
+        );
         graph.add_edge(caller, callee, EdgeKind::Call);
         // Make callee impure so call-in happens
         graph.add_edge(callee, var, EdgeKind::Write);
-        
+
         let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[callee], None);
         assert_eq!(result.reachable_set.len(), 3); // callee, var (forward), caller (call-in)
@@ -607,12 +613,15 @@ mod tests {
         let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
         let b = graph.add_node("sym::b".into(), test_node(1, "b", 250));
         let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
-        let var = graph.add_node("sym::var".into(), test_var_node(3, "var", crate::domain::node::Mutability::Mutable));
+        let var = graph.add_node(
+            "sym::var".into(),
+            test_var_node(3, "var", crate::domain::node::Mutability::Mutable),
+        );
         graph.add_edge(a, b, EdgeKind::Call);
         graph.add_edge(b, c, EdgeKind::Call);
         // Make b impure so call-in happens
         graph.add_edge(b, var, EdgeKind::Write);
-        
+
         let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
         let result = solver.compute_cf(&[b], None);
         assert_eq!(result.reachable_set.len(), 4); // B, then C and var (forward), A (call-in)

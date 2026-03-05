@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cf-extractor"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python semantic data extractor for Context-Footprint (AST + Jedi)"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -49,3 +49,8 @@ cf-extract = "cf_extractor.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cf_extractor*"]
+
+[tool.pytest.ini_options]
+# Fixture files under tests/fixtures/ are source code for the extractor, not test modules.
+# Exclude them so pytest does not try to import them (avoids missing deps e.g. fastapi).
+norecursedirs = [".git", "__pycache__", "*.egg-info", "fixtures"]

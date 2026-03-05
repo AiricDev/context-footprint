@@ -206,12 +206,153 @@ class ReferenceCollector(ast.NodeVisitor):
             column=getattr(node, "col_offset", 0) or 0,
         )
 
+    def _prefer_same_module_variable(self, target_sym: str, bare_name: str) -> str:
+        """If target_sym is from Jedi full_name and not in our definitions, try to map to
+        the same-module Variable by bare name (e.g. Jedi '...increment.counter' -> module.counter)."""
+        defined_ids = {d.symbol_id for d in self.all_definitions}
+        if target_sym in defined_ids:
+            return target_sym
+        same_module = [
+            d
+            for d in self.all_definitions
+            if d.kind == SymbolKind.Variable
+            and d.name == bare_name
+            and (d.symbol_id == f"{self.module_symbol_id}.{bare_name}" or d.symbol_id.startswith(self.module_symbol_id + "."))
+        ]
+        if len(same_module) == 1:
+            return same_module[0].symbol_id
+        return target_sym
+
     def _resolve_at(self, line: int, column: int) -> list[Name]:
         """Resolve the symbol at (line, column) to its definition (goto definition)."""
         try:
             return self.script.goto(line, column)
         except Exception:
             return []
+
+    def _is_inside_default_value(self, node: ast.AST) -> bool:
+        """True if node is inside a default or kw_default expression of an arguments node."""
+        n = node
+        while getattr(n, "parent", None) is not None:
+            par = n.parent
+            if isinstance(par, ast.arguments):
+                for d in par.defaults or []:
+                    if any(n is x for x in ast.walk(d)):
+                        return True
+                for k in par.kw_defaults or []:
+                    if k is not None and any(n is x for x in ast.walk(k)):
+                        return True
+                return False
+            n = par
+        return False
+
+    def _collect_read_ref_from_expr(
+        self, expr: ast.AST, enclosing_symbol: str
+    ) -> None:
+        """Emit Read references for variable names used in an expression (e.g. default arg).
+        Jedi may not resolve in default-argument context; fallback to same-file variable by name.
+        """
+        if isinstance(expr, ast.Name) and isinstance(expr.ctx, ast.Load):
+            target_sym = self._resolve_name_to_read_target(expr)
+            if target_sym:
+                self.references.append(
+                    SymbolReference(
+                        target_symbol=target_sym,
+                        location=self._loc(expr),
+                        enclosing_symbol=enclosing_symbol,
+                        role=ReferenceRole.Read,
+                        receiver=None,
+                        method_name=None,
+                        assigned_to=None,
+                    )
+                )
+            return
+        if isinstance(expr, ast.Attribute) and isinstance(expr.ctx, ast.Load):
+            defs = self._resolve_at(expr.lineno, expr.col_offset)
+            target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+            if not target_sym and defs:
+                target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
+            if target_sym:
+                is_var = any(
+                    d.symbol_id == target_sym and d.kind == SymbolKind.Variable
+                    for d in self.all_definitions
+                )
+                is_func = any(
+                    d.symbol_id == target_sym and d.kind == SymbolKind.Function
+                    for d in self.all_definitions
+                )
+                is_ext = any(
+                    d.symbol_id == target_sym and d.is_external
+                    for d in self.external_symbols
+                )
+                if is_var or is_func or is_ext:
+                    receiver_sym = None
+                    if isinstance(expr.value, ast.Name):
+                        rdefs = self._resolve_at(expr.value.lineno, expr.value.col_offset)
+                        if rdefs:
+                            receiver_sym = _definition_symbol_id_from_jedi(
+                                self.all_definitions, rdefs[0]
+                            )
+                    self.references.append(
+                        SymbolReference(
+                            target_symbol=target_sym,
+                            location=self._loc(expr),
+                            enclosing_symbol=enclosing_symbol,
+                            role=ReferenceRole.Read,
+                            receiver=receiver_sym,
+                            method_name=None,
+                            assigned_to=None,
+                        )
+                    )
+            return
+        for child in ast.iter_child_nodes(expr):
+            self._collect_read_ref_from_expr(child, enclosing_symbol)
+
+    def _resolve_name_to_read_target(self, node: ast.Name) -> Optional[str]:
+        """Resolve a Name (Load) to a Variable or Function symbol_id for Read reference.
+        Tries Jedi first, then same-file/cross-file fallback. Used for default args and body.
+        """
+        defs = self._resolve_at(node.lineno, node.col_offset)
+        target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+        if not target_sym and defs:
+            target_sym = _full_name_from_jedi(defs[0])
+            if target_sym:
+                self._collect_external_symbol(target_sym, defs[0])
+        if target_sym:
+            is_var = any(
+                d.symbol_id == target_sym and d.kind == SymbolKind.Variable
+                for d in self.all_definitions
+            )
+            is_func = any(
+                d.symbol_id == target_sym and d.kind == SymbolKind.Function
+                for d in self.all_definitions
+            )
+            is_ext = any(
+                d.symbol_id == target_sym and d.is_external
+                for d in self.external_symbols
+            )
+            if is_var or is_func or is_ext:
+                return target_sym
+        # Fallback: same-file Variable or Function with same name (Jedi often fails in default-arg context)
+        same_file = [
+            d for d in self.all_definitions
+            if d.kind in (SymbolKind.Variable, SymbolKind.Function)
+            and d.name == node.id
+            and d.location.file_path == self.rel_path
+        ]
+        if len(same_file) == 1:
+            return same_file[0].symbol_id
+        if same_file:
+            return same_file[0].symbol_id
+        by_name = [
+            d for d in self.all_definitions
+            if d.kind in (SymbolKind.Variable, SymbolKind.Function) and d.name == node.id
+        ]
+        if len(by_name) == 1:
+            return by_name[0].symbol_id
+        return None
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         enc = self._enclosing_symbol(node)
@@ -231,6 +372,12 @@ class ReferenceCollector(ast.NodeVisitor):
         self._func_spans.append((start, end, func_id))
         for dec in node.decorator_list:
             self._visit_decorator(dec, func_id)
+        # Explicitly collect references from default argument values (Jedi often misses them).
+        for default in node.args.defaults or []:
+            self._collect_read_ref_from_expr(default, func_id)
+        for kw_default in node.args.kw_defaults or []:
+            if kw_default is not None:
+                self._collect_read_ref_from_expr(kw_default, func_id)
         self.generic_visit(node)
         self._func_spans.pop()
 
@@ -299,6 +446,39 @@ class ReferenceCollector(ast.NodeVisitor):
             _extract_type(node.type)
         self.generic_visit(node)
 
+    def _resolve_super_call_target(self, enc: str, method_name: str) -> Optional[str]:
+        """Resolve super().method() to parent class method. Returns target symbol_id or None."""
+        # enc is e.g. "module.Child.__init__"; class is "module.Child"
+        parts = enc.split(".")
+        if len(parts) < 2:
+            return None
+        class_symbol_id = ".".join(parts[:-1])
+        type_def = next(
+            (d for d in self.all_definitions if d.kind == SymbolKind.Type and d.symbol_id == class_symbol_id),
+            None,
+        )
+        if not type_def or not isinstance(type_def.details, TypeDetails):
+            return None
+        bases = type_def.details.inherits
+        if not bases:
+            return None
+        base_ref = bases[0]
+        base_name = base_ref.split(".")[-1].strip()
+        class_module_prefix = class_symbol_id.rsplit(".", 1)[0] if "." in class_symbol_id else ""
+        base_full = f"{class_module_prefix}.{base_name}" if class_module_prefix else base_name
+        base_type = next(
+            (
+                d
+                for d in self.all_definitions
+                if d.kind == SymbolKind.Type
+                and (d.symbol_id == base_full or (d.name == base_name and (not class_module_prefix or d.symbol_id.startswith(class_module_prefix + "."))))
+            ),
+            None,
+        )
+        if not base_type:
+            return None
+        return f"{base_type.symbol_id}.{method_name}"
+
     def visit_Call(self, node: ast.Call) -> None:
         enc = self._enclosing_symbol(node)
         if not enc:
@@ -307,15 +487,28 @@ class ReferenceCollector(ast.NodeVisitor):
         target_sym = None
         receiver_sym = None
         method_name = None
-        if isinstance(node.func, ast.Name):
-            defs = self._resolve_at(node.func.lineno, node.func.col_offset)
-            if defs:
-                target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0])
-            if not target_sym and defs:
-                target_sym = _full_name_from_jedi(defs[0])
-                if target_sym:
-                    self._collect_external_symbol(target_sym, defs[0])
-        elif isinstance(node.func, ast.Attribute):
+        # Detect super().method(...) and resolve to parent class method
+        if (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Name)
+            and node.func.value.func.id == "super"
+        ):
+            method_name = node.func.attr
+            target_sym = self._resolve_super_call_target(enc, method_name)
+        if target_sym is None and isinstance(node.func, ast.Name):
+            if node.func.id == "cls" and "." in enc:
+                class_symbol_id = ".".join(enc.split(".")[:-1])
+                target_sym = f"{class_symbol_id}.__init__"
+            else:
+                defs = self._resolve_at(node.func.lineno, node.func.col_offset)
+                if defs:
+                    target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0])
+                if not target_sym and defs:
+                    target_sym = _full_name_from_jedi(defs[0])
+                    if target_sym:
+                        self._collect_external_symbol(target_sym, defs[0])
+        elif target_sym is None and isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
             defs = self._resolve_at(node.func.lineno, node.func.col_offset)
             if defs:
@@ -341,11 +534,6 @@ class ReferenceCollector(ast.NodeVisitor):
                             target_sym = f"{ptype}.{method_name}"
                     elif receiver_name == "self" and "." in enc:
                         parts = enc.split(".")
-                        # Only take up to the class name, ignoring nested function segments.
-                        # We look at the definitions to see what the class name is, or fallback to simple truncation.
-                        # Wait, we know `parts` contains the path to the current function.
-                        # E.g. test_nested_call.APIRouter.api_route.decorator -> we want test_nested_call.APIRouter.
-                        # Since we want the class, we want the definition in self.all_definitions that has `kind == SymbolKind.Type` and matches a prefix of `enc`.
                         class_prefix = None
                         for d in self.all_definitions:
                             if d.kind == SymbolKind.Type and enc.startswith(d.symbol_id + "."):
@@ -356,7 +544,19 @@ class ReferenceCollector(ast.NodeVisitor):
                         else:
                             enclosing_class = ".".join(parts[:-1]) if len(parts) >= 2 else enc
                             target_sym = f"{enclosing_class}.{method_name}"
-                # When enc not in definitions (e.g. nested function api_route.decorator), still resolve self.method
+                    elif receiver_name == "cls" and "." in enc:
+                        parts = enc.split(".")
+                        class_prefix = None
+                        for d in self.all_definitions:
+                            if d.kind == SymbolKind.Type and enc.startswith(d.symbol_id + "."):
+                                class_prefix = d.symbol_id
+                                break
+                        if class_prefix:
+                            target_sym = f"{class_prefix}.{method_name}"
+                        else:
+                            enclosing_class = ".".join(parts[:-1]) if len(parts) >= 2 else enc
+                            target_sym = f"{enclosing_class}.{method_name}"
+                # When enc not in definitions (e.g. nested function api_route.decorator), still resolve self/cls.method
                 elif receiver_name == "self" and "." in enc:
                     parts = enc.split(".")
                     class_prefix = None
@@ -369,13 +569,25 @@ class ReferenceCollector(ast.NodeVisitor):
                     else:
                         enclosing_class = ".".join(parts[:-1]) if len(parts) >= 2 else enc
                         target_sym = f"{enclosing_class}.{method_name}"
-            # Qualify bare method name from Jedi with class when receiver is self (e.g. inside nested function)
+                elif receiver_name == "cls" and "." in enc:
+                    parts = enc.split(".")
+                    class_prefix = None
+                    for d in self.all_definitions:
+                        if d.kind == SymbolKind.Type and enc.startswith(d.symbol_id + "."):
+                            class_prefix = d.symbol_id
+                            break
+                    if class_prefix:
+                        target_sym = f"{class_prefix}.{method_name}"
+                    else:
+                        enclosing_class = ".".join(parts[:-1]) if len(parts) >= 2 else enc
+                        target_sym = f"{enclosing_class}.{method_name}"
+            # Qualify bare method name from Jedi with class when receiver is self or cls
             if (
                 target_sym
                 and "." not in target_sym
                 and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "self"
+                and node.func.value.id in ("self", "cls")
                 and (enc or "")
             ):
                 parts = enc.split(".")
@@ -425,6 +637,10 @@ class ReferenceCollector(ast.NodeVisitor):
         if not enc:
             self.generic_visit(node)
             return
+        # Default-argument references are collected in visit_FunctionDef; skip to avoid duplicates.
+        if self._is_inside_default_value(node):
+            self.generic_visit(node)
+            return
         if isinstance(node.ctx, ast.Load):
             defs = self._resolve_at(node.lineno, node.col_offset)
             target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
@@ -433,12 +649,11 @@ class ReferenceCollector(ast.NodeVisitor):
                 if target_sym:
                     self._collect_external_symbol(target_sym, defs[0])
             if target_sym:
-                # Still emit the reference even if it's external (not in all_definitions)
-                # But we only emit Read/Write for variables. If it's external, we might not know if it's a variable.
-                # Let's assume if it's external, we emit it.
+                # Emit Read for Variable (e.g. CONFIG) or Function (e.g. handler as value).
                 is_var = any(d.symbol_id == target_sym and d.kind == SymbolKind.Variable for d in self.all_definitions)
+                is_func = any(d.symbol_id == target_sym and d.kind == SymbolKind.Function for d in self.all_definitions)
                 is_ext = any(d.symbol_id == target_sym and d.is_external for d in self.external_symbols)
-                if is_var or is_ext:
+                if is_var or is_func or is_ext:
                     self.references.append(
                         SymbolReference(
                             target_symbol=target_sym,
@@ -474,9 +689,73 @@ class ReferenceCollector(ast.NodeVisitor):
                     )
         self.generic_visit(node)
 
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        """Emit both Read and Write for x += 1 (reader needs current value and write)."""
+        enc = self._enclosing_symbol(node)
+        if not enc:
+            self.generic_visit(node)
+            return
+        target_sym = None
+        receiver_sym = None
+        if isinstance(node.target, ast.Name):
+            defs = self._resolve_at(node.target.lineno, node.target.col_offset)
+            target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+            if not target_sym and defs:
+                target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
+            if target_sym:
+                target_sym = self._prefer_same_module_variable(target_sym, node.target.id)
+        elif isinstance(node.target, ast.Attribute):
+            defs = self._resolve_at(node.target.lineno, node.target.col_offset)
+            target_sym = _definition_symbol_id_from_jedi(self.all_definitions, defs[0]) if defs else None
+            if not target_sym and defs:
+                target_sym = _full_name_from_jedi(defs[0])
+                if target_sym:
+                    self._collect_external_symbol(target_sym, defs[0])
+            if target_sym:
+                target_sym = self._prefer_same_module_variable(target_sym, node.target.attr)
+            if isinstance(node.target.value, ast.Name):
+                rdefs = self._resolve_at(node.target.value.lineno, node.target.value.col_offset)
+                if rdefs:
+                    receiver_sym = _definition_symbol_id_from_jedi(self.all_definitions, rdefs[0])
+        if target_sym:
+            is_var = any(d.symbol_id == target_sym and d.kind == SymbolKind.Variable for d in self.all_definitions)
+            is_ext = any(d.symbol_id == target_sym and d.is_external for d in self.external_symbols)
+            if is_var or is_ext:
+                loc = self._loc(node.target)
+                enc_def = self._enclosing_symbol_defined(node)
+                self.references.append(
+                    SymbolReference(
+                        target_symbol=target_sym,
+                        location=loc,
+                        enclosing_symbol=enc_def,
+                        role=ReferenceRole.Read,
+                        receiver=receiver_sym,
+                        method_name=None,
+                        assigned_to=None,
+                    )
+                )
+                self.references.append(
+                    SymbolReference(
+                        target_symbol=target_sym,
+                        location=loc,
+                        enclosing_symbol=enc_def,
+                        role=ReferenceRole.Write,
+                        receiver=receiver_sym,
+                        method_name=None,
+                        assigned_to=None,
+                    )
+                )
+        self.generic_visit(node)
+
     def visit_Attribute(self, node: ast.Attribute) -> None:
         enc = self._enclosing_symbol(node)
         if not enc:
+            self.generic_visit(node)
+            return
+        # Default-argument references are collected in visit_FunctionDef; skip to avoid duplicates.
+        if self._is_inside_default_value(node):
             self.generic_visit(node)
             return
         if isinstance(node.ctx, ast.Load):
@@ -488,8 +767,9 @@ class ReferenceCollector(ast.NodeVisitor):
                     self._collect_external_symbol(target_sym, defs[0])
             if target_sym:
                 is_var = any(d.symbol_id == target_sym and d.kind == SymbolKind.Variable for d in self.all_definitions)
+                is_func = any(d.symbol_id == target_sym and d.kind == SymbolKind.Function for d in self.all_definitions)
                 is_ext = any(d.symbol_id == target_sym and d.is_external for d in self.external_symbols)
-                if is_var or is_ext:
+                if is_var or is_func or is_ext:
                     receiver_sym = None
                     if isinstance(node.value, ast.Name):
                         rdefs = self._resolve_at(node.value.lineno, node.value.col_offset)

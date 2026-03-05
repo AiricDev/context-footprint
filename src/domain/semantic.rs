@@ -8,6 +8,12 @@
 //! 4. **Three symbol types**: Function, Variable, Type (no locals, no standalone parameters)
 //! 5. **Declared types only**: No type inference required from adapter (DI abstraction preserved)
 //!
+//! # Extractor Behavioral Contract
+//!
+//! This module defines the **data shape** of SemanticData. For the **behavioral completeness
+//! requirements** — which source-code patterns MUST produce which references — see
+//! [`docs/extractor-spec.md`](../../docs/extractor-spec.md).
+//!
 //! # Symbol Organization
 //!
 //! - **Functions**: Standalone functions, methods, constructors

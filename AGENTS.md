@@ -144,6 +144,7 @@ pip install pre-commit && pre-commit install
 ## 📚 References
 
 - **Algorithm & Design**: [`docs/design.md`](docs/design.md) (formal CF definition, traversal rules)
+- **Extractor Spec**: [`docs/extractor-spec.md`](docs/extractor-spec.md) (reference pattern contract, language mapping, conformance tests)
 - **Testing Guide**: [`docs/testing.md`](docs/testing.md) (comprehensive test strategy)
 - **Theoretical Foundation**: [`docs/the-paper.md`](docs/the-paper.md)
 

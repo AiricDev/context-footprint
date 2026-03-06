@@ -267,3 +267,93 @@ def test_cls_call_resolves_to_init():
     assert len(init_calls) >= 1, (
         "return cls(name) in classmethod create() should produce Call from MyClass.create to MyClass.__init__"
     )
+
+
+def test_super_call_cross_module_resolves_to_parent_method():
+    """super().__init__() in child_super.Child (base in base_super) must produce Call to base_super.Base.__init__."""
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol == "child_super.Child.__init__"
+    ]
+    super_calls = [
+        r
+        for r in refs
+        if r.role == ReferenceRole.Call and r.target_symbol == "base_super.Base.__init__"
+    ]
+    if not super_calls:
+        print("REFS for child_super.Child.__init__:", refs)
+    assert len(super_calls) >= 1, (
+        "super().__init__() in child_super.Child (Base from base_super) should produce Call to base_super.Base.__init__"
+    )
+
+
+def test_default_arg_cross_module_emitted_as_read():
+    """Default arg SENTINEL imported from sentinel_def must produce Read from foo to sentinel_def.SENTINEL."""
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol == "default_arg_cross.foo"
+    ]
+    sentinel_reads = [
+        r for r in refs if r.role == ReferenceRole.Read and r.target_symbol == "sentinel_def.SENTINEL"
+    ]
+    if not sentinel_reads:
+        print("REFS for default_arg_cross.foo:", refs)
+    assert len(sentinel_reads) >= 1, (
+        "def foo(..., flag=SENTINEL) with SENTINEL from sentinel_def should produce Read from foo to sentinel_def.SENTINEL"
+    )
+
+
+def test_super_call_alias_base_resolves_to_parent_method():
+    """super().__init__() in child_alias.Child (base imported as AliasBase) must produce Call to base_alias.Base.__init__.
+
+    This simulates Flask's 'from .sansio.blueprints import Blueprint as SansioBlueprint'
+    pattern where the base class is referenced by an alias name that differs from the
+    actual class name.
+    """
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol == "child_alias.Child.__init__"
+    ]
+    super_calls = [
+        r
+        for r in refs
+        if r.role == ReferenceRole.Call and r.target_symbol == "base_alias.Base.__init__"
+    ]
+    if not super_calls:
+        print("REFS for child_alias.Child.__init__:", refs)
+    assert len(super_calls) >= 1, (
+        "super().__init__() in child_alias.Child (AliasBase = base_alias.Base) should produce Call to base_alias.Base.__init__"
+    )
+
+
+def test_default_arg_ambiguous_sentinel_uses_import_context():
+    """Default arg _sentinel with two same-named defs must pick the imported one (sentinel_a._sentinel).
+
+    This simulates Flask's situation where both sansio/scaffold.py and ctx.py define
+    _sentinel, and blueprints.py imports specifically from sansio.scaffold.
+    """
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol == "default_arg_ambig.bar"
+    ]
+    sentinel_reads = [
+        r for r in refs if r.role == ReferenceRole.Read and r.target_symbol == "sentinel_a._sentinel"
+    ]
+    if not sentinel_reads:
+        print("REFS for default_arg_ambig.bar:", refs)
+    assert len(sentinel_reads) >= 1, (
+        "def bar(..., flag=_sentinel) with _sentinel from sentinel_a (and sentinel_b also existing) "
+        "should use import context to produce Read from bar to sentinel_a._sentinel"
+    )

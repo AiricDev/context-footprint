@@ -100,13 +100,13 @@ Maps each abstract pattern to Python AST forms and resolution strategies.
 | REF-CALL-03 | `Call(func=Attribute(value=Name('obj'), attr='m'))` where `obj` has type annotation | Jedi `goto`; fallback: lookup param type → class → method |
 | REF-CALL-04 | `Call(func=Attribute(value=Name('obj'), attr='m'))` where `obj` is untyped | Emit with `target_symbol=None`, `receiver=obj_symbol`, `method_name='m'` |
 | REF-CALL-05 | `Call(func=Name('MyClass'))` | Jedi resolves to class; Builder maps via init_map → `__init__` |
-| REF-CALL-06 | `Call(func=Attribute(value=Call(func=Name('super')), attr='m'))` | AST pattern match; enclosing class → `inherits[0]` → `parent.m` |
+| REF-CALL-06 | `Call(func=Attribute(value=Call(func=Name('super')), attr='m'))` | AST pattern match; enclosing class → `inherits[0]` (short name) → resolve base: same-module prefix first; then **cross-module** fallback by type name when unique; then **alias fallback**: walk ClassDef bases in AST, use Jedi `goto(..., follow_imports=True)` to resolve import aliases to their actual class → `parent.m` |
 | REF-CALL-07 | `Call(func=Name('cls'))` in `@classmethod` | Treat as constructor of enclosing class → `__init__` |
 | REF-CALL-07 | `Call(func=Attribute(value=Name('cls'), attr='m'))` | Same fallback logic as `self` — enclosing class + method name |
 | REF-CALL-08 | `decorator_list` entries on `FunctionDef` / `ClassDef` | Jedi `goto` on decorator expression |
 | REF-READ-01 | `Name(ctx=Load)` resolving to Variable definition | Jedi `goto` → check kind=Variable → emit Read |
 | REF-READ-02 | `Attribute(ctx=Load)` resolving to Variable/Field | Jedi `goto` → check kind=Variable → emit Read with receiver |
-| REF-READ-03 | `FunctionDef.args.defaults[]`, `args.kw_defaults[]` | Explicitly walk default expressions; Jedi + same-project name fallback |
+| REF-READ-03 | `FunctionDef.args.defaults[]`, `args.kw_defaults[]` | Walk default expressions; Jedi; same-file by name; **cross-module unique**: by name in `all_definitions` when only one match; **import-context disambiguation**: when multiple same-named definitions exist, walk module's `ImportFrom` nodes to narrow to the one actually imported in this file |
 | REF-READ-04 | `Name(ctx=Load)` resolving to Function definition | Jedi `goto` → check kind=Function → emit Read |
 | REF-READ-04 | `Attribute(ctx=Load)` resolving to Function definition | Same, with receiver |
 | REF-READ-05 | `ExceptHandler.type` | Walk type expression, resolve names, emit Read |
@@ -123,9 +123,9 @@ For each reference, the extractor tries resolution in this order:
 2. **Jedi `full_name`** → match by qualified name (may be external symbol)
 3. **AST-based fallback** (pattern-specific):
    - `self.method()` → enclosing class + method name
-   - `super().method()` → enclosing class → first base → method
+   - `super().method()` → enclosing class → first base: (a) same-module prefix, (b) cross-module by type name when unique, (c) alias resolution via Jedi `follow_imports=True` on ClassDef base node → method
    - `cls()` → enclosing class `__init__`
-   - Default arg names → same-file variable by name; cross-file unique variable by name
+   - Default arg names → (a) same-file variable by name, (b) cross-file unique by name, (c) import-context: resolve via `ImportFrom` nodes to disambiguate when multiple same-named definitions exist
 4. **Emit unresolved** with `receiver` + `method_name` for Builder Pass 3 recovery
 
 ---
@@ -152,16 +152,18 @@ Tests live in `extractors/<language>/tests/fixtures/` with one fixture file per 
 | REF-CALL-02 | `test_self_call.py` | Call from `APIRouter.put` to `APIRouter.api_route` |
 | REF-CALL-03 | `test_method_resolve.py` | Call from `create_image_edit` to `RelayImageUseCase.execute` |
 | REF-CALL-05 | (covered by Builder test) | Constructor `MyClass()` → `__init__` via init_map |
-| REF-CALL-06 | `test_super_call.py` (TODO) | Call from `Child.__init__` to `Base.__init__` |
-| REF-CALL-07 | `test_cls_call.py` (TODO) | Call from `MyClass.create` to `MyClass.__init__` |
+| REF-CALL-06 | `test_super_call.py` | Call from `Child.__init__` to `Base.__init__` (same module) |
+| REF-CALL-06 | `base_super.py`, `child_super.py` | Call from `child_super.Child.__init__` to `base_super.Base.__init__` (cross-module, same name) |
+| REF-CALL-06 | `base_alias.py`, `child_alias.py` | Call from `child_alias.Child.__init__` to `base_alias.Base.__init__` (base imported under alias `AliasBase`) |
+| REF-CALL-07 | `test_cls_call.py` | Call from `MyClass.create` to `MyClass.__init__` |
 | REF-CALL-08 | `test_annotated_doc.py` | Decorator extraction (use_signature_only_for_size) |
 | REF-READ-01 | `test_default_arg_ref.py` | Read from `foo` to `SENTINEL` (module variable) |
-| REF-READ-03 | `test_default_arg_ref.py` | Read from `foo` to `SENTINEL` (in default arg) |
-| REF-READ-04 | `test_func_as_value.py` (TODO) | Read from `setup` to `handler` (function as value) |
+| REF-READ-03 | `test_default_arg_ref.py` | Read from `foo` to `SENTINEL` (same-module default arg) |
+| REF-READ-03 | `sentinel_def.py`, `default_arg_cross.py` | Read from `default_arg_cross.foo` to `sentinel_def.SENTINEL` (cross-module default arg, single definition) |
+| REF-READ-03 | `sentinel_a.py`, `sentinel_b.py`, `default_arg_ambig.py` | Read from `default_arg_ambig.bar` to `sentinel_a._sentinel` (multiple same-named defs, import context selects the right one) |
+| REF-READ-04 | `test_func_as_value.py` | Read from `setup` to `handler` (function as value) |
 | REF-READ-05 | `test_except_resolve.py` | Read from `create_image_edit` to `QuotaError` |
-| REF-WRITE-03 | `test_augassign.py` (TODO) | Read + Write from `increment` to `counter` |
-
-Tests marked **(TODO)** correspond to the patterns being fixed in the current development plan.
+| REF-WRITE-03 | `test_augassign.py` | Read + Write from `increment` to `counter` |
 
 ### Adding a New Language
 

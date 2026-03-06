@@ -93,6 +93,8 @@ class ReferenceCollector(ast.NodeVisitor):
         self.references: list[SymbolReference] = []
         self.external_symbols: list[SymbolDefinition] = []
         self._func_spans: list[tuple[int, int, str]] = []
+        # Stored AST for cross-method inspection (alias resolution, import analysis)
+        self.tree: Optional[ast.AST] = None
 
     def _collect_external_symbol(self, target_sym: str, jedi_def: Any) -> None:
         if any(d.symbol_id == target_sym for d in self.external_symbols):
@@ -352,6 +354,62 @@ class ReferenceCollector(ast.NodeVisitor):
         ]
         if len(by_name) == 1:
             return by_name[0].symbol_id
+        # Import-context disambiguation: multiple same-named definitions — use imports to narrow
+        if len(by_name) > 1 and self.tree is not None:
+            narrowed = self._narrow_by_import(node.id, by_name)
+            if narrowed:
+                return narrowed
+        return None
+
+    def _resolve_import_module_prefix(self, node: ast.ImportFrom) -> Optional[str]:
+        """Convert an ImportFrom node (level + module) to an absolute module symbol_id prefix."""
+        if node.level == 0:
+            return node.module  # absolute import
+        # Relative import: go up `level` package levels from the current file's module path
+        module_path = self.rel_path.replace("\\", "/")
+        if module_path.endswith(".py"):
+            module_path = module_path[:-3]
+        parts = module_path.split("/")
+        if node.level > len(parts):
+            return None
+        parent_parts = parts[: len(parts) - node.level]
+        parent_module = ".".join(parent_parts)
+        if node.module:
+            return f"{parent_module}.{node.module}" if parent_module else node.module
+        return parent_module
+
+    def _narrow_by_import(
+        self, name: str, candidates: list[SymbolDefinition]
+    ) -> Optional[str]:
+        """Given multiple same-named candidates, use import statements in the current file
+        to select the one that was actually imported here.
+        Returns the unique matching symbol_id, or None if ambiguous / not found.
+        """
+        if self.tree is None:
+            return None
+        for imp_node in ast.walk(self.tree):
+            if not isinstance(imp_node, ast.ImportFrom):
+                continue
+            for alias in imp_node.names:
+                # alias.asname is the local name (if `import X as Y`); alias.name is the original
+                imported_as = alias.asname or alias.name
+                if imported_as != name:
+                    continue
+                prefix = self._resolve_import_module_prefix(imp_node)
+                if not prefix:
+                    continue
+                original_name = alias.name
+                matched = [
+                    c
+                    for c in candidates
+                    if c.name == original_name
+                    and (
+                        c.symbol_id.startswith(prefix + ".")
+                        or c.symbol_id == prefix
+                    )
+                ]
+                if len(matched) == 1:
+                    return matched[0].symbol_id
         return None
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -475,6 +533,64 @@ class ReferenceCollector(ast.NodeVisitor):
             ),
             None,
         )
+        # Cross-module: base may be in another module; only pick when the name is unique project-wide
+        # to avoid choosing the wrong class when multiple types share the same short name.
+        if not base_type:
+            cross_module = [
+                d for d in self.all_definitions
+                if d.kind == SymbolKind.Type and d.name == base_name
+            ]
+            if len(cross_module) == 1:
+                base_type = cross_module[0]
+        # Alias fallback: base_name is an import alias (e.g. 'SansioBlueprint').
+        # Walk the AST to find the ClassDef and use Jedi to resolve the actual base type.
+        if not base_type and self.tree is not None and type_def.location.file_path == self.rel_path:
+            class_line = type_def.location.line  # 0-indexed
+            class_def_node = next(
+                (
+                    n for n in ast.walk(self.tree)
+                    if isinstance(n, ast.ClassDef) and n.lineno - 1 == class_line
+                ),
+                None,
+            )
+            if class_def_node:
+                for base_node in class_def_node.bases:
+                    node_str = ast.unparse(base_node)
+                    if node_str == base_ref or node_str.split(".")[-1] == base_name:
+                        # Use follow_imports=True so Jedi resolves import aliases to their
+                        # actual class definitions (e.g. 'SansioBlueprint' → Blueprint)
+                        try:
+                            defs = self.script.goto(
+                                base_node.lineno, base_node.col_offset, follow_imports=True
+                            )
+                        except Exception:
+                            defs = []
+                        if defs:
+                            canon_id = _definition_symbol_id_from_jedi(self.all_definitions, defs[0])
+                            if canon_id:
+                                base_type = next(
+                                    (
+                                        d for d in self.all_definitions
+                                        if d.symbol_id == canon_id and d.kind == SymbolKind.Type
+                                    ),
+                                    None,
+                                )
+                                if base_type:
+                                    break
+                            # Secondary fallback: match by the name Jedi resolved to
+                            if not base_type and defs[0].name:
+                                jedi_name = defs[0].name
+                                base_type = next(
+                                    (
+                                        d for d in self.all_definitions
+                                        if d.kind == SymbolKind.Type
+                                        and d.name == jedi_name
+                                        and d.symbol_id != class_symbol_id
+                                    ),
+                                    None,
+                                )
+                                if base_type:
+                                    break
         if not base_type:
             return None
         return f"{base_type.symbol_id}.{method_name}"
@@ -838,5 +954,6 @@ def collect_references(
     )
     tree = ast.parse(source, filename=abs_path)
     _add_parents(tree)
+    collector.tree = tree
     collector.visit(tree)
     return collector.references, collector.external_symbols

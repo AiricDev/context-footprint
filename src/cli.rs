@@ -219,9 +219,20 @@ pub fn display_context_code(
         show_traversal,
     })?;
 
+    let meaningful_node_count: usize = result
+        .layers
+        .iter()
+        .flat_map(|l| l.files.iter())
+        .flat_map(|f| f.nodes.iter())
+        .filter(|n| n.context_size > 0)
+        .count();
+
     println!("\nContext Summary:");
     println!("  Total size: {} tokens", result.total_context_size);
-    println!("  Reachable nodes: {}", result.reachable_node_count);
+    println!(
+        "  Reachable nodes: {} ({} total including 0-token stubs)",
+        meaningful_node_count, result.reachable_node_count
+    );
     if let Some(limit) = max_tokens {
         println!("  Max tokens: {}", limit);
     }
@@ -272,8 +283,13 @@ pub fn display_context_code(
             println!("{}", "=".repeat(40));
 
             for file in &layer.files {
+                let visible_nodes: Vec<_> =
+                    file.nodes.iter().filter(|n| n.context_size > 0).collect();
+                if visible_nodes.is_empty() {
+                    continue;
+                }
                 println!("\n  \u{1F4C4} File: {}", file.file_path);
-                for node in &file.nodes {
+                for node in visible_nodes {
                     let display = node.symbol.split('/').next_back().unwrap_or(&node.symbol);
                     println!("    Symbol: {} ({} tokens)", display, node.context_size);
                     println!(

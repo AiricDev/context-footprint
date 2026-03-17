@@ -1,6 +1,6 @@
 use crate::adapters::doc_scorer::heuristic::HeuristicDocScorer;
 use crate::adapters::size_function::tiktoken::TiktokenSizeFunction;
-use crate::app::dto::{ComputeRequest, ContextRequest, PolicyKind};
+use crate::app::dto::{ComputeRequest, ContextRequest, PolicyKind, ReachabilityRequest};
 use crate::app::engine::ContextEngine;
 use crate::domain::builder::GraphBuilder;
 use crate::domain::node::Node;
@@ -304,6 +304,52 @@ pub fn display_context_code(
                     }
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn display_reachability(
+    engine: &ContextEngine,
+    from: &[String],
+    to: &[String],
+    json_output: bool,
+    witness_paths: bool,
+    max_paths: usize,
+) -> Result<()> {
+    let result = engine.reachable(ReachabilityRequest {
+        from: from.to_vec(),
+        to: to.to_vec(),
+        policy: PolicyKind::Academic,
+        witness_paths,
+        max_paths,
+    })?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    println!("Reachable: {}", result.reachable);
+    println!("Hit targets: {}", result.hit_targets.len());
+    for symbol in &result.hit_targets {
+        println!("  {}", symbol);
+    }
+    println!("Unresolved from: {}", result.unresolved_from.len());
+    for symbol in &result.unresolved_from {
+        println!("  {}", symbol);
+    }
+    println!("Unresolved to: {}", result.unresolved_to.len());
+    for symbol in &result.unresolved_to {
+        println!("  {}", symbol);
+    }
+    println!("Visited nodes: {}", result.visited_node_count);
+
+    if witness_paths {
+        println!("Witness paths: {}", result.witness_paths.len());
+        for path in &result.witness_paths {
+            println!("  {}", path.join(" -> "));
         }
     }
 

@@ -5,9 +5,7 @@ use crate::domain::policy::{
     PruningDecision, PruningParams, evaluate_forward, should_explore_callers,
 };
 use petgraph::graph::NodeIndex;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 /// How the current node was reached (for edge-aware pruning and reverse exploration).
@@ -40,6 +38,40 @@ pub struct CfResult {
     pub total_context_size: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReachabilityOptions {
+    pub witness_paths: bool,
+    pub max_paths: usize,
+}
+
+impl Default for ReachabilityOptions {
+    fn default() -> Self {
+        Self {
+            witness_paths: false,
+            max_paths: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReachabilityResult {
+    pub reachable: bool,
+    pub hit_targets: Vec<NodeId>,
+    pub visited_set: HashSet<NodeId>,
+    pub visited_node_count: usize,
+    pub witness_paths: Vec<Vec<NodeId>>,
+}
+
+#[derive(Debug, Clone)]
+struct TraversalState {
+    visited: HashSet<NodeIndex>,
+    ordered: Vec<NodeIndex>,
+    layers: Vec<Vec<NodeIndex>>,
+    traversal_steps: Vec<TraversalStep>,
+    total_context_size: u32,
+    predecessors: HashMap<NodeIndex, NodeIndex>,
+}
+
 /// CF Solver - computes Context-Footprint for a given node.
 ///
 /// Holds graph and pruning params (doc_threshold + mode).
@@ -56,169 +88,66 @@ impl CfSolver {
     /// Compute CF for a given set of starting nodes (full result with layers, etc.).
     pub fn compute_cf(&self, starts: &[NodeIndex], max_tokens: Option<u32>) -> CfResult {
         let graph = self.graph.as_ref();
-        let params = &self.params;
-        // Build a reverse mapping once so neighbor ordering isn't O(|V|) per comparison.
-        let mut idx_to_symbol: HashMap<NodeIndex, &str> =
-            HashMap::with_capacity(graph.symbol_to_node.len());
-        for (sym, &idx) in &graph.symbol_to_node {
-            idx_to_symbol.insert(idx, sym.as_str());
-        }
-
-        let mut visited = HashSet::new();
-        let mut ordered = Vec::new();
-        let mut traversal_steps = Vec::new();
-        let mut layers: Vec<Vec<NodeId>> = Vec::new();
-        let mut queue: VecDeque<(NodeIndex, u32, ReachedVia, Option<PruningDecision>)> =
-            VecDeque::new();
-        let mut total_size = 0;
-
-        for &start in starts {
-            queue.push_back((start, 0, ReachedVia::Start, None));
-        }
-
-        while let Some((current, depth, reached_via, incoming_decision)) = queue.pop_front() {
-            let current_node = graph.node(current);
-            let current_id = current_node.core().id;
-
-            if !visited.insert(current_id) {
-                continue;
-            }
-
-            let node_size = current_node.core().context_size;
-            total_size += node_size;
-            let step_edge_kind = match &reached_via {
-                ReachedVia::Forward(ek) => Some(ek.clone()),
-                _ => None,
-            };
-            ordered.push(current_id);
-            traversal_steps.push(TraversalStep {
-                node_id: current_id,
-                incoming_edge_kind: step_edge_kind,
-                decision: incoming_decision,
-            });
-
-            // Add to layers
-            while layers.len() <= depth as usize {
-                layers.push(Vec::new());
-            }
-            layers[depth as usize].push(current_id);
-
-            // Check if we exceeded max_tokens
-            if let Some(limit) = max_tokens
-                && total_size >= limit
-            {
-                break;
-            }
-
-            // === Stop exploring from reverse traversal nodes ===
-            // If we reached this node just to understand how it calls something
-            // or mutates shared state, we only need its immediate context. We do not explore further from it.
-            if matches!(
-                reached_via,
-                ReachedVia::CallIn | ReachedVia::SharedStateWrite
-            ) {
-                continue;
-            }
-
-            // === Forward traversal: outgoing edges ===
-            let mut out_edges: Vec<_> = graph.outgoing_edges(current).collect();
-            out_edges.sort_by(|(a_idx, _), (b_idx, _)| {
-                let a_sym = idx_to_symbol.get(a_idx).copied().unwrap_or("");
-                let b_sym = idx_to_symbol.get(b_idx).copied().unwrap_or("");
-                a_sym.cmp(b_sym)
-            });
-
-            for (neighbor, edge_kind) in out_edges {
-                let neighbor_node = graph.node(neighbor);
-                let neighbor_id = neighbor_node.core().id;
-                let decision =
-                    evaluate_forward(params, current_node, neighbor_node, edge_kind, graph);
-
-                if matches!(decision, PruningDecision::Transparent) {
-                    queue.push_back((
-                        neighbor,
-                        depth + 1,
-                        ReachedVia::Forward(edge_kind.clone()),
-                        Some(decision),
-                    ));
-                } else {
-                    // Boundary: count as reached and include its size, but do not traverse
-                    if !visited.contains(&neighbor_id) {
-                        let b_size = neighbor_node.core().context_size;
-
-                        // Check if adding boundary node exceeds limit
-                        if let Some(limit) = max_tokens
-                            && total_size + b_size > limit
-                        {
-                            break;
-                        }
-
-                        if visited.insert(neighbor_id) {
-                            total_size += b_size;
-                            ordered.push(neighbor_id);
-                            traversal_steps.push(TraversalStep {
-                                node_id: neighbor_id,
-                                incoming_edge_kind: Some(edge_kind.clone()),
-                                decision: Some(decision),
-                            });
-
-                            let b_depth = depth + 1;
-                            while layers.len() <= b_depth as usize {
-                                layers.push(Vec::new());
-                            }
-                            layers[b_depth as usize].push(neighbor_id);
-                        }
-                    }
-                }
-            }
-
-            // === Reverse exploration: call-in (function) ===
-            if let Node::Function(f) = current_node {
-                let incoming_edge = match &reached_via {
-                    ReachedVia::Forward(ek) => Some(ek),
-                    _ => None,
-                };
-                if should_explore_callers(f, current, incoming_edge, params, graph) {
-                    for (caller_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Call)) {
-                        let caller_id = graph.node(caller_idx).core().id;
-                        if !visited.contains(&caller_id) {
-                            queue.push_back((caller_idx, depth + 1, ReachedVia::CallIn, None));
-                        }
-                    }
-                }
-            }
-
-            // === Reverse exploration: shared-state write (mutable variable reached via Read) ===
-            if let Node::Variable(v) = current_node
-                && v.mutability == crate::domain::node::Mutability::Mutable
-                && matches!(reached_via, ReachedVia::Forward(EdgeKind::Read))
-            {
-                for (writer_idx, _) in graph.incoming_edges(current, Some(EdgeKind::Write)) {
-                    let writer_id = graph.node(writer_idx).core().id;
-                    if !visited.contains(&writer_id) {
-                        queue.push_back((
-                            writer_idx,
-                            depth + 1,
-                            ReachedVia::SharedStateWrite,
-                            None,
-                        ));
-                    }
-                }
-            }
-
-            if let Some(limit) = max_tokens
-                && total_size >= limit
-            {
-                break;
-            }
-        }
-
+        let traversal = self.traverse(starts, max_tokens);
         CfResult {
-            reachable_set: visited.clone(),
-            reachable_nodes_ordered: ordered.clone(),
-            reachable_nodes_by_layer: layers.clone(),
-            traversal_steps,
-            total_context_size: total_size,
+            reachable_set: traversal
+                .visited
+                .iter()
+                .map(|idx| graph.node(*idx).core().id)
+                .collect(),
+            reachable_nodes_ordered: traversal
+                .ordered
+                .iter()
+                .map(|idx| graph.node(*idx).core().id)
+                .collect(),
+            reachable_nodes_by_layer: traversal
+                .layers
+                .iter()
+                .map(|layer| layer.iter().map(|idx| graph.node(*idx).core().id).collect())
+                .collect(),
+            traversal_steps: traversal.traversal_steps,
+            total_context_size: traversal.total_context_size,
+        }
+    }
+
+    pub fn reachable(
+        &self,
+        starts: &[NodeIndex],
+        targets: &[NodeIndex],
+        options: ReachabilityOptions,
+    ) -> ReachabilityResult {
+        let graph = self.graph.as_ref();
+        let traversal = self.traverse(starts, None);
+        let visited_set: HashSet<NodeId> = traversal
+            .visited
+            .iter()
+            .map(|idx| graph.node(*idx).core().id)
+            .collect();
+
+        let mut hit_targets = Vec::new();
+        let mut witness_paths = Vec::new();
+        let mut seen_hits = HashSet::new();
+
+        for &target in targets {
+            if !traversal.visited.contains(&target) {
+                continue;
+            }
+
+            let target_id = graph.node(target).core().id;
+            if seen_hits.insert(target_id) {
+                hit_targets.push(target_id);
+                if options.witness_paths && witness_paths.len() < options.max_paths {
+                    witness_paths.push(self.reconstruct_path(target, &traversal.predecessors));
+                }
+            }
+        }
+
+        ReachabilityResult {
+            reachable: !hit_targets.is_empty(),
+            hit_targets,
+            visited_node_count: traversal.visited.len(),
+            visited_set,
+            witness_paths,
         }
     }
 
@@ -314,6 +243,211 @@ impl CfSolver {
         }
 
         total_size
+    }
+
+    fn traverse(&self, starts: &[NodeIndex], max_tokens: Option<u32>) -> TraversalState {
+        let graph = self.graph.as_ref();
+        let params = &self.params;
+        let mut idx_to_symbol: HashMap<NodeIndex, &str> =
+            HashMap::with_capacity(graph.symbol_to_node.len());
+        for (sym, &idx) in &graph.symbol_to_node {
+            idx_to_symbol.insert(idx, sym.as_str());
+        }
+
+        let start_set: HashSet<NodeIndex> = starts.iter().copied().collect();
+        let mut visited = HashSet::new();
+        let mut ordered = Vec::new();
+        let mut traversal_steps = Vec::new();
+        let mut layers: Vec<Vec<NodeIndex>> = Vec::new();
+        let mut predecessors = HashMap::new();
+        let mut queue: VecDeque<(NodeIndex, u32, ReachedVia, Option<PruningDecision>)> =
+            VecDeque::new();
+        let mut total_size = 0;
+
+        for &start in starts {
+            queue.push_back((start, 0, ReachedVia::Start, None));
+        }
+
+        while let Some((current, depth, reached_via, incoming_decision)) = queue.pop_front() {
+            let current_node = graph.node(current);
+            let current_id = current_node.core().id;
+
+            if !visited.insert(current) {
+                continue;
+            }
+
+            total_size += current_node.core().context_size;
+            let step_edge_kind = match &reached_via {
+                ReachedVia::Forward(ek) => Some(ek.clone()),
+                _ => None,
+            };
+            ordered.push(current);
+            traversal_steps.push(TraversalStep {
+                node_id: current_id,
+                incoming_edge_kind: step_edge_kind,
+                decision: incoming_decision,
+            });
+
+            while layers.len() <= depth as usize {
+                layers.push(Vec::new());
+            }
+            layers[depth as usize].push(current);
+
+            if let Some(limit) = max_tokens
+                && total_size >= limit
+            {
+                break;
+            }
+
+            if matches!(
+                reached_via,
+                ReachedVia::CallIn | ReachedVia::SharedStateWrite
+            ) {
+                continue;
+            }
+
+            let mut out_edges: Vec<_> = graph.outgoing_edges(current).collect();
+            out_edges.sort_by(|(a_idx, _), (b_idx, _)| {
+                let a_sym = idx_to_symbol.get(a_idx).copied().unwrap_or("");
+                let b_sym = idx_to_symbol.get(b_idx).copied().unwrap_or("");
+                a_sym.cmp(b_sym)
+            });
+
+            for (neighbor, edge_kind) in out_edges {
+                let neighbor_node = graph.node(neighbor);
+                let decision =
+                    evaluate_forward(params, current_node, neighbor_node, edge_kind, graph);
+
+                if matches!(decision, PruningDecision::Transparent) {
+                    if !start_set.contains(&neighbor) {
+                        predecessors.entry(neighbor).or_insert(current);
+                    }
+                    queue.push_back((
+                        neighbor,
+                        depth + 1,
+                        ReachedVia::Forward(edge_kind.clone()),
+                        Some(decision),
+                    ));
+                } else if !visited.contains(&neighbor) {
+                    let boundary_size = neighbor_node.core().context_size;
+                    if let Some(limit) = max_tokens
+                        && total_size + boundary_size > limit
+                    {
+                        break;
+                    }
+
+                    if !start_set.contains(&neighbor) {
+                        predecessors.entry(neighbor).or_insert(current);
+                    }
+                    if visited.insert(neighbor) {
+                        total_size += boundary_size;
+                        ordered.push(neighbor);
+                        traversal_steps.push(TraversalStep {
+                            node_id: neighbor_node.core().id,
+                            incoming_edge_kind: Some(edge_kind.clone()),
+                            decision: Some(decision),
+                        });
+
+                        let boundary_depth = depth + 1;
+                        while layers.len() <= boundary_depth as usize {
+                            layers.push(Vec::new());
+                        }
+                        layers[boundary_depth as usize].push(neighbor);
+                    }
+                }
+            }
+
+            if let Node::Function(f) = current_node {
+                let incoming_edge = match &reached_via {
+                    ReachedVia::Forward(ek) => Some(ek),
+                    _ => None,
+                };
+                if should_explore_callers(f, current, incoming_edge, params, graph) {
+                    let mut callers: Vec<_> = graph
+                        .incoming_edges(current, Some(EdgeKind::Call))
+                        .collect();
+                    callers.sort_by(|(a_idx, _), (b_idx, _)| {
+                        let a_sym = idx_to_symbol.get(a_idx).copied().unwrap_or("");
+                        let b_sym = idx_to_symbol.get(b_idx).copied().unwrap_or("");
+                        a_sym.cmp(b_sym)
+                    });
+
+                    for (caller_idx, _) in callers {
+                        if !visited.contains(&caller_idx) {
+                            if !start_set.contains(&caller_idx) {
+                                predecessors.entry(caller_idx).or_insert(current);
+                            }
+                            queue.push_back((caller_idx, depth + 1, ReachedVia::CallIn, None));
+                        }
+                    }
+                }
+            }
+
+            if let Node::Variable(v) = current_node
+                && v.mutability == crate::domain::node::Mutability::Mutable
+                && matches!(reached_via, ReachedVia::Forward(EdgeKind::Read))
+            {
+                let mut writers: Vec<_> = graph
+                    .incoming_edges(current, Some(EdgeKind::Write))
+                    .collect();
+                writers.sort_by(|(a_idx, _), (b_idx, _)| {
+                    let a_sym = idx_to_symbol.get(a_idx).copied().unwrap_or("");
+                    let b_sym = idx_to_symbol.get(b_idx).copied().unwrap_or("");
+                    a_sym.cmp(b_sym)
+                });
+
+                for (writer_idx, _) in writers {
+                    if !visited.contains(&writer_idx) {
+                        if !start_set.contains(&writer_idx) {
+                            predecessors.entry(writer_idx).or_insert(current);
+                        }
+                        queue.push_back((
+                            writer_idx,
+                            depth + 1,
+                            ReachedVia::SharedStateWrite,
+                            None,
+                        ));
+                    }
+                }
+            }
+
+            if let Some(limit) = max_tokens
+                && total_size >= limit
+            {
+                break;
+            }
+        }
+
+        TraversalState {
+            visited,
+            ordered,
+            layers,
+            traversal_steps,
+            total_context_size: total_size,
+            predecessors,
+        }
+    }
+
+    fn reconstruct_path(
+        &self,
+        target: NodeIndex,
+        predecessors: &HashMap<NodeIndex, NodeIndex>,
+    ) -> Vec<NodeId> {
+        let graph = self.graph.as_ref();
+        let mut path = vec![graph.node(target).core().id];
+        let mut cursor = target;
+        let mut seen = HashSet::new();
+
+        while let Some(&parent) = predecessors.get(&cursor) {
+            if !seen.insert(cursor) {
+                break;
+            }
+            path.push(graph.node(parent).core().id);
+            cursor = parent;
+        }
+
+        path.reverse();
+        path
     }
 }
 
@@ -499,6 +633,76 @@ mod tests {
         let result = solver.compute_cf(&[a], None);
         assert_eq!(result.reachable_set.len(), 3);
         assert_eq!(result.total_context_size, 60);
+    }
+
+    #[test]
+    fn test_reachable_respects_boundary_pruning() {
+        let mut graph = ContextGraph::new();
+        let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
+        let b = graph.add_node("sym::b".into(), test_node_boundary(1, "b", 20));
+        let c = graph.add_node("sym::c".into(), test_node(2, "c", 30));
+        graph.add_edge(a, b, EdgeKind::Call);
+        graph.add_edge(b, c, EdgeKind::Call);
+
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::academic(0.5));
+        let reachable_b = solver.reachable(&[a], &[b], ReachabilityOptions::default());
+        let reachable_c = solver.reachable(&[a], &[c], ReachabilityOptions::default());
+
+        assert!(reachable_b.reachable);
+        assert!(!reachable_c.reachable);
+    }
+
+    #[test]
+    fn test_reachable_supports_reverse_call_in_and_witness_paths() {
+        let mut graph = ContextGraph::new();
+        let caller = graph.add_node("sym::caller".into(), test_node(0, "caller", 10));
+        let callee = graph.add_node("sym::callee".into(), test_node(1, "callee", 20));
+        let state = graph.add_node(
+            "sym::state".into(),
+            test_var_node(2, "state", crate::domain::node::Mutability::Mutable),
+        );
+
+        graph.add_edge(caller, callee, EdgeKind::Call);
+        graph.add_edge(callee, state, EdgeKind::Write);
+
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let result = solver.reachable(
+            &[callee],
+            &[caller],
+            ReachabilityOptions {
+                witness_paths: true,
+                max_paths: 1,
+            },
+        );
+
+        assert!(result.reachable);
+        assert_eq!(result.hit_targets, vec![0]);
+        assert_eq!(result.witness_paths, vec![vec![1, 0]]);
+    }
+
+    #[test]
+    fn test_reachable_uses_union_of_multiple_starts_and_targets() {
+        let mut graph = ContextGraph::new();
+        let a = graph.add_node("sym::a".into(), test_node(0, "a", 10));
+        let b = graph.add_node("sym::b".into(), test_node(1, "b", 10));
+        let x = graph.add_node("sym::x".into(), test_node(2, "x", 10));
+        let y = graph.add_node("sym::y".into(), test_node(3, "y", 10));
+        graph.add_edge(a, b, EdgeKind::Call);
+        graph.add_edge(x, y, EdgeKind::Call);
+
+        let solver = CfSolver::new(Arc::new(graph), PruningParams::strict(0.5));
+        let result = solver.reachable(
+            &[a, x],
+            &[b, y],
+            ReachabilityOptions {
+                witness_paths: true,
+                max_paths: 2,
+            },
+        );
+
+        assert!(result.reachable);
+        assert_eq!(result.hit_targets, vec![1, 3]);
+        assert_eq!(result.witness_paths, vec![vec![0, 1], vec![2, 3]]);
     }
 
     #[test]

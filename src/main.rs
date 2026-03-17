@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use context_footprint::app::engine::ContextEngine;
 use context_footprint::cli;
 use context_footprint::server;
@@ -17,6 +17,12 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ReachableFormat {
+    Json,
+    Text,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Debug: build graph from SemanticData and print graph structure as JSON
@@ -27,6 +33,24 @@ enum Commands {
         /// Symbols to analyze
         #[arg(required = true)]
         symbols: Vec<String>,
+    },
+    /// Check whether any target is reachable under CF traversal semantics
+    Reachable {
+        /// One or more starting symbols
+        #[arg(long, required = true, num_args = 1..)]
+        from: Vec<String>,
+        /// One or more target symbols
+        #[arg(long, required = true, num_args = 1..)]
+        to: Vec<String>,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = ReachableFormat::Json)]
+        format: ReachableFormat,
+        /// Include witness paths for hit targets
+        #[arg(long)]
+        witness_paths: bool,
+        /// Maximum number of witness paths to return
+        #[arg(long, default_value_t = 1)]
+        max_paths: usize,
     },
     /// Show CF distribution statistics across all nodes
     Stats {
@@ -102,19 +126,44 @@ async fn main() -> Result<()> {
         return cli::debug_graph_data(json_path);
     }
 
-    println!("Loading SemanticData from {}...", json_path.display());
     let engine = ContextEngine::load_from_json(json_path)?;
-    let health = engine.health();
+    let quiet_output = matches!(
+        &cli.command,
+        Commands::Reachable {
+            format: ReachableFormat::Json,
+            ..
+        }
+    );
 
-    println!("Graph built:");
-    println!("  Nodes: {}", health.node_count);
-    println!("  Edges: {}", health.edge_count);
-    println!();
+    if !quiet_output {
+        println!("Loading SemanticData from {}...", json_path.display());
+        let health = engine.health();
+        println!("Graph built:");
+        println!("  Nodes: {}", health.node_count);
+        println!("  Edges: {}", health.edge_count);
+        println!();
+    }
 
     match &cli.command {
         Commands::DebugGraphData {} => unreachable!(),
         Commands::Compute { symbols } => {
             cli::compute_cf_for_symbols(&engine, symbols)?;
+        }
+        Commands::Reachable {
+            from,
+            to,
+            format,
+            witness_paths,
+            max_paths,
+        } => {
+            cli::display_reachability(
+                &engine,
+                from,
+                to,
+                matches!(format, ReachableFormat::Json),
+                *witness_paths,
+                *max_paths,
+            )?;
         }
         Commands::Stats { include_tests } => {
             cli::compute_and_display_cf_stats(&engine, *include_tests)?;

@@ -35,6 +35,32 @@ pub struct ComputeResponse {
     pub reachable_nodes_ordered: Vec<ReachableNode>,
 }
 
+fn default_max_paths() -> usize {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReachabilityRequest {
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub policy: PolicyKind,
+    #[serde(default)]
+    pub witness_paths: bool,
+    #[serde(default = "default_max_paths")]
+    pub max_paths: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReachabilityResponse {
+    pub reachable: bool,
+    pub hit_targets: Vec<String>,
+    pub unresolved_from: Vec<String>,
+    pub unresolved_to: Vec<String>,
+    pub visited_node_count: usize,
+    pub witness_paths: Vec<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReachableNode {
     pub id: u32,

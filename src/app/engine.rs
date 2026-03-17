@@ -9,10 +9,10 @@ use crate::domain::node::{Node, NodeId};
 use crate::domain::policy::{PruningDecision, PruningParams};
 use crate::domain::ports::SourceReader;
 use crate::domain::semantic::SemanticData;
-use crate::domain::solver::CfSolver;
+use crate::domain::solver::{CfSolver, ReachabilityOptions};
 use anyhow::{Context as _, Result, anyhow};
 use petgraph::graph::NodeIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -187,6 +187,72 @@ impl ContextEngine {
             reachable_node_count: result.reachable_set.len(),
             reachable_nodes_by_layer,
             reachable_nodes_ordered,
+        })
+    }
+
+    pub fn reachable(&self, req: ReachabilityRequest) -> Result<ReachabilityResponse> {
+        let data = self.inner.read().unwrap();
+        let graph = data.graph.as_ref();
+
+        let mut start_indices = Vec::new();
+        let mut unresolved_from = Vec::new();
+        for symbol in &req.from {
+            if let Some(idx) = graph.get_node_by_symbol(symbol) {
+                start_indices.push(idx);
+            } else {
+                unresolved_from.push(symbol.clone());
+            }
+        }
+
+        let mut resolved_targets: Vec<(String, NodeIndex)> = Vec::new();
+        let mut unresolved_to = Vec::new();
+        for symbol in &req.to {
+            if let Some(idx) = graph.get_node_by_symbol(symbol) {
+                resolved_targets.push((symbol.clone(), idx));
+            } else {
+                unresolved_to.push(symbol.clone());
+            }
+        }
+
+        let solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
+        let result = solver.reachable(
+            &start_indices,
+            &resolved_targets
+                .iter()
+                .map(|(_, idx)| *idx)
+                .collect::<Vec<_>>(),
+            ReachabilityOptions {
+                witness_paths: req.witness_paths,
+                max_paths: req.max_paths,
+            },
+        );
+
+        let hit_target_ids: HashSet<NodeId> = result.hit_targets.iter().copied().collect();
+        let mut hit_targets = Vec::new();
+        for (symbol, idx) in &resolved_targets {
+            let node_id = graph.node(*idx).core().id;
+            if hit_target_ids.contains(&node_id) && !hit_targets.contains(symbol) {
+                hit_targets.push(symbol.clone());
+            }
+        }
+
+        let witness_paths = result
+            .witness_paths
+            .into_iter()
+            .map(|path| {
+                path.into_iter()
+                    .filter_map(|node_id| data.node_id_to_symbol.get(&node_id).cloned())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        Ok(ReachabilityResponse {
+            reachable: result.reachable,
+            hit_targets,
+            unresolved_from,
+            unresolved_to,
+            visited_node_count: result.visited_node_count,
+            witness_paths,
         })
     }
 
@@ -770,5 +836,35 @@ mod tests {
             .flat_map(|f| f.nodes.iter())
             .any(|n| n.code.as_ref().is_some_and(|c| !c.is_empty()));
         assert!(any_code);
+    }
+
+    #[test]
+    fn test_engine_reachable_reports_unresolved_and_witness_paths() {
+        let engine = ContextEngine::from_prebuilt(
+            PathBuf::from("semantic_data.json"),
+            PathBuf::from("/repo"),
+            test_graph(),
+            Arc::new(MockReader),
+        );
+
+        let result = engine
+            .reachable(ReachabilityRequest {
+                from: vec!["sym/func1().".into(), "missing/from".into()],
+                to: vec!["sym/var1.".into(), "missing/to".into()],
+                policy: PolicyKind::Academic,
+                witness_paths: true,
+                max_paths: 1,
+            })
+            .unwrap();
+
+        assert!(result.reachable);
+        assert_eq!(result.hit_targets, vec!["sym/var1.".to_string()]);
+        assert_eq!(result.unresolved_from, vec!["missing/from".to_string()]);
+        assert_eq!(result.unresolved_to, vec!["missing/to".to_string()]);
+        assert_eq!(
+            result.witness_paths,
+            vec![vec!["sym/func1().".to_string(), "sym/var1.".to_string()]]
+        );
+        assert_eq!(result.visited_node_count, 2);
     }
 }

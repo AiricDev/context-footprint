@@ -33,6 +33,22 @@ pub struct ComputeResponse {
     pub reachable_node_count: usize,
     pub reachable_nodes_by_layer: Vec<Vec<ReachableNode>>,
     pub reachable_nodes_ordered: Vec<ReachableNode>,
+    /// How each input anchor was resolved (class expansion, variable lookup, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_resolutions: Option<Vec<AnchorResolution>>,
+}
+
+/// Describes how an input anchor symbol was interpreted and resolved.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AnchorResolution {
+    pub input: String,
+    pub resolved_kind: String,
+    /// Symbols the anchor was expanded into (for class anchors: member methods).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expanded_to: Option<Vec<String>>,
+    /// Reason the anchor could not be resolved, if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved_reason: Option<String>,
 }
 
 fn default_max_paths() -> usize {

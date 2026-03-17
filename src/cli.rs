@@ -132,8 +132,26 @@ pub fn compute_cf_for_symbols(engine: &ContextEngine, symbols: &[String]) -> Res
         max_tokens: None,
     })?;
 
-    println!("CF Result:");
-    println!("  Starting symbols: {}", symbols.len());
+    if let Some(resolutions) = &result.anchor_resolutions {
+        println!("\nAnchor Resolutions:");
+        for res in resolutions {
+            print!("  {} [{}]", res.input, res.resolved_kind);
+            if let Some(expanded) = &res.expanded_to {
+                println!(" -> {} member(s):", expanded.len());
+                for member in expanded {
+                    println!("    - {}", member);
+                }
+            } else {
+                println!();
+            }
+            if let Some(reason) = &res.unresolved_reason {
+                println!("    (unresolved: {})", reason);
+            }
+        }
+    }
+
+    println!("\nCF Result:");
+    println!("  Starting symbols: {}", result.starting_symbols.len());
     println!("  Total context size: {} tokens", result.total_context_size);
     println!("  Reachable nodes: {}", result.reachable_node_count);
 

@@ -85,6 +85,22 @@ impl ContextGraph {
     pub fn neighbors(&self, idx: NodeIndex) -> impl Iterator<Item = (NodeIndex, &EdgeKind)> {
         self.outgoing_edges(idx)
     }
+
+    /// Find all method nodes whose `scope` (enclosing type) matches the given type symbol.
+    /// Returns `(symbol_id, NodeIndex)` pairs.
+    pub fn find_class_members(&self, class_symbol: &str) -> Vec<(String, NodeIndex)> {
+        let mut members = Vec::new();
+        for (symbol, &idx) in &self.symbol_to_node {
+            let node = self.node(idx);
+            if let Node::Function(f) = node
+                && f.core.scope.as_deref() == Some(class_symbol)
+            {
+                members.push((symbol.clone(), idx));
+            }
+        }
+        members.sort_by(|a, b| a.0.cmp(&b.0));
+        members
+    }
 }
 
 #[cfg(test)]

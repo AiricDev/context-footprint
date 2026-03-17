@@ -154,11 +154,31 @@ impl ContextEngine {
         let graph = data.graph.as_ref();
 
         let mut starts = Vec::with_capacity(req.symbols.len());
+        let mut resolutions = Vec::with_capacity(req.symbols.len());
+        let mut effective_symbols = Vec::new();
+
         for sym in &req.symbols {
-            let idx = graph
-                .get_node_by_symbol(sym)
-                .ok_or_else(|| anyhow!("Symbol not found: {}", sym))?;
-            starts.push(idx);
+            let resolution = self.resolve_anchor_locked(&data, sym);
+            match &resolution.expanded_to {
+                Some(expanded) => {
+                    for expanded_sym in expanded {
+                        if let Some(idx) = graph.get_node_by_symbol(expanded_sym) {
+                            starts.push(idx);
+                            effective_symbols.push(expanded_sym.clone());
+                        }
+                    }
+                }
+                None => {
+                    if resolution.unresolved_reason.is_some() {
+                        return Err(anyhow!("Symbol not found: {}", sym));
+                    }
+                    if let Some(idx) = graph.get_node_by_symbol(sym) {
+                        starts.push(idx);
+                        effective_symbols.push(sym.clone());
+                    }
+                }
+            }
+            resolutions.push(resolution);
         }
 
         let solver = CfSolver::new(data.graph.clone(), pruning_params(req.policy));
@@ -182,11 +202,12 @@ impl ContextEngine {
             .collect::<Vec<_>>();
 
         Ok(ComputeResponse {
-            starting_symbols: req.symbols,
+            starting_symbols: effective_symbols,
             total_context_size: result.total_context_size,
             reachable_node_count: result.reachable_set.len(),
             reachable_nodes_by_layer,
             reachable_nodes_ordered,
+            anchor_resolutions: Some(resolutions),
         })
     }
 
@@ -308,8 +329,9 @@ impl ContextEngine {
         for (symbol, &node_idx) in &graph.symbol_to_node {
             let node = graph.node(node_idx);
 
-            let type_str = node_type_str(node);
-            if node_type != "all" && node_type != type_str {
+            let type_str = detailed_node_type_str(node);
+            let base_type = node_type_str(node);
+            if node_type != "all" && node_type != type_str && node_type != base_type {
                 continue;
             }
 
@@ -352,7 +374,7 @@ impl ContextEngine {
             }
 
             let node = graph.node(node_idx);
-            let type_str = node_type_str(node).to_string();
+            let type_str = detailed_node_type_str(node).to_string();
 
             if !include_tests && test_detector.is_test_code(symbol, &node.core().file_path) {
                 continue;
@@ -361,6 +383,37 @@ impl ContextEngine {
             // Always compute CF for sorting (same as current CLI behavior).
             let cf = solver.compute_cf_total(node_idx);
             matches.push((symbol.clone(), type_str, cf));
+        }
+
+        // Also search for class symbols in TypeRegistry
+        let type_ids: Vec<_> = graph.type_registry.type_ids().cloned().collect();
+        for type_id in &type_ids {
+            if !type_id.to_lowercase().contains(&pattern_lower) {
+                continue;
+            }
+            // Skip if already matched as a node
+            if graph.symbol_to_node.contains_key(type_id) {
+                continue;
+            }
+            let expanded = expand_class_anchor(graph, type_id);
+            if expanded.is_empty() {
+                matches.push((type_id.clone(), "class".to_string(), 0));
+            } else {
+                let start_indices: Vec<_> = expanded
+                    .iter()
+                    .filter_map(|s| graph.get_node_by_symbol(s))
+                    .collect();
+                if with_cf && !start_indices.is_empty() {
+                    let result = solver.compute_cf(&start_indices, None);
+                    matches.push((
+                        type_id.clone(),
+                        "class".to_string(),
+                        result.total_context_size,
+                    ));
+                } else {
+                    matches.push((type_id.clone(), "class".to_string(), 0));
+                }
+            }
         }
 
         matches.sort_by(|a, b| b.2.cmp(&a.2));
@@ -521,6 +574,52 @@ impl ContextEngine {
         })
     }
 
+    /// Resolve an input anchor symbol: function/method, class, or variable.
+    fn resolve_anchor_locked(&self, data: &EngineData, symbol: &str) -> AnchorResolution {
+        let graph = data.graph.as_ref();
+
+        // 1. Direct graph node match (function/method/variable)
+        if let Some(idx) = graph.get_node_by_symbol(symbol) {
+            let node = graph.node(idx);
+            let kind = detailed_node_type_str(node);
+            return AnchorResolution {
+                input: symbol.to_string(),
+                resolved_kind: kind.to_string(),
+                expanded_to: None,
+                unresolved_reason: None,
+            };
+        }
+
+        // 2. Class anchor: symbol exists in TypeRegistry
+        if graph.type_registry.contains(symbol) {
+            let expanded = expand_class_anchor(graph, symbol);
+            if expanded.is_empty() {
+                return AnchorResolution {
+                    input: symbol.to_string(),
+                    resolved_kind: "class".to_string(),
+                    expanded_to: Some(vec![]),
+                    unresolved_reason: Some(
+                        "Class resolved but has no expandable members".to_string(),
+                    ),
+                };
+            }
+            return AnchorResolution {
+                input: symbol.to_string(),
+                resolved_kind: "class".to_string(),
+                expanded_to: Some(expanded),
+                unresolved_reason: None,
+            };
+        }
+
+        // 3. Unresolved
+        AnchorResolution {
+            input: symbol.to_string(),
+            resolved_kind: "unknown".to_string(),
+            expanded_to: None,
+            unresolved_reason: Some("Symbol not found in graph or type registry".to_string()),
+        }
+    }
+
     fn node_id_to_reachable_node_locked(
         &self,
         data: &EngineData,
@@ -578,6 +677,44 @@ fn node_type_str(node: &Node) -> &'static str {
         Node::Function(_) => "function",
         Node::Variable(_) => "variable",
     }
+}
+
+/// Return a more specific kind label for display and search results.
+fn detailed_node_type_str(node: &Node) -> &'static str {
+    match node {
+        Node::Function(f) => {
+            if f.core.scope.is_some() {
+                "method"
+            } else {
+                "function"
+            }
+        }
+        Node::Variable(v) => match (&v.variable_kind, &v.mutability) {
+            (crate::domain::node::VariableKind::ClassField, _) => "class_variable",
+            (_, crate::domain::node::Mutability::Const) => "constant",
+            (crate::domain::node::VariableKind::Global, _) => "module_variable",
+            _ => "variable",
+        },
+    }
+}
+
+/// Expand a class anchor into its public-visibility member methods.
+///
+/// Language-specific naming conventions (e.g. Python dunder methods) are handled
+/// by the extractor layer which sets the correct `Visibility` on each method.
+/// The engine only checks visibility, staying language-agnostic.
+fn expand_class_anchor(graph: &ContextGraph, class_symbol: &str) -> Vec<String> {
+    let members = graph.find_class_members(class_symbol);
+    let mut result = Vec::new();
+    for (symbol, idx) in &members {
+        let node = graph.node(*idx);
+        if let Node::Function(f) = node
+            && f.visibility == crate::domain::node::Visibility::Public
+        {
+            result.push(symbol.clone());
+        }
+    }
+    result
 }
 
 fn span_dto(span: &crate::domain::node::SourceSpan) -> SpanDto {
@@ -866,5 +1003,372 @@ mod tests {
             vec![vec!["sym/func1().".to_string(), "sym/var1.".to_string()]]
         );
         assert_eq!(result.visited_node_count, 2);
+    }
+
+    fn make_method_core(
+        id: u32,
+        name: &str,
+        scope: &str,
+        file_path: &str,
+        start_line: u32,
+        end_line: u32,
+    ) -> NodeCore {
+        NodeCore::new(
+            id,
+            name.to_string(),
+            Some(scope.to_string()),
+            10,
+            SourceSpan {
+                start_line,
+                start_column: 0,
+                end_line,
+                end_column: 0,
+            },
+            1.0,
+            false,
+            file_path.to_string(),
+        )
+    }
+
+    fn class_anchor_graph() -> ContextGraph {
+        use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeKind};
+
+        let mut g = ContextGraph::new();
+
+        // Register class in TypeRegistry
+        g.type_registry.register(
+            "pkg/Plugin#".to_string(),
+            TypeInfo {
+                definition: TypeDefAttribute {
+                    type_kind: TypeKind::Class,
+                    is_abstract: false,
+                    type_param_count: 0,
+                    type_var_info: None,
+                },
+                context_size: 5,
+                doc_score: 0.5,
+            },
+        );
+
+        // Public methods
+        let run = Node::Function(FunctionNode {
+            core: make_method_core(0, "run", "pkg/Plugin#", "plugin.py", 2, 5),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+        let render = Node::Function(FunctionNode {
+            core: make_method_core(1, "render", "pkg/Plugin#", "plugin.py", 6, 10),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+
+        // Dunder method
+        let call = Node::Function(FunctionNode {
+            core: make_method_core(2, "__call__", "pkg/Plugin#", "plugin.py", 11, 15),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+
+        // Private helper (should be excluded from expansion)
+        let helper = Node::Function(FunctionNode {
+            core: make_method_core(3, "_helper", "pkg/Plugin#", "plugin.py", 16, 20),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Private,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+
+        // External dependency
+        let ext_func = Node::Function(FunctionNode {
+            core: make_core(4, "ext_func", "lib.py", 0, 5),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+
+        let i_run = g.add_node("pkg/Plugin#run().".into(), run);
+        let i_render = g.add_node("pkg/Plugin#render().".into(), render);
+        let i_call = g.add_node("pkg/Plugin#__call__().".into(), call);
+        let i_helper = g.add_node("pkg/Plugin#_helper().".into(), helper);
+        let i_ext = g.add_node("lib/ext_func().".into(), ext_func);
+
+        g.add_edge(i_run, i_helper, EdgeKind::Call);
+        g.add_edge(i_run, i_ext, EdgeKind::Call);
+        g.add_edge(i_render, i_ext, EdgeKind::Call);
+
+        g
+    }
+
+    #[test]
+    fn test_class_anchor_expands_to_public_and_dunder_methods() {
+        let engine = ContextEngine::from_prebuilt(
+            PathBuf::from("semantic_data.json"),
+            PathBuf::from("/repo"),
+            class_anchor_graph(),
+            Arc::new(MockReader),
+        );
+
+        let res = engine
+            .compute(ComputeRequest {
+                symbols: vec!["pkg/Plugin#".into()],
+                policy: PolicyKind::Academic,
+                max_tokens: None,
+            })
+            .unwrap();
+
+        let resolutions = res.anchor_resolutions.unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].resolved_kind, "class");
+        let expanded = resolutions[0].expanded_to.as_ref().unwrap();
+        assert!(expanded.contains(&"pkg/Plugin#__call__().".to_string()));
+        assert!(expanded.contains(&"pkg/Plugin#render().".to_string()));
+        assert!(expanded.contains(&"pkg/Plugin#run().".to_string()));
+        // _helper should NOT be in the expansion
+        assert!(!expanded.contains(&"pkg/Plugin#_helper().".to_string()));
+
+        // CF should cover run, render, __call__ + their transitive deps (_helper via run, ext_func)
+        assert!(res.total_context_size > 0);
+        assert!(res.reachable_node_count >= 3); // at least the 3 expanded methods
+    }
+
+    #[test]
+    fn test_variable_anchor_compute() {
+        let engine = ContextEngine::from_prebuilt(
+            PathBuf::from("semantic_data.json"),
+            PathBuf::from("/repo"),
+            test_graph(),
+            Arc::new(MockReader),
+        );
+
+        let res = engine
+            .compute(ComputeRequest {
+                symbols: vec!["sym/var1.".into()],
+                policy: PolicyKind::Academic,
+                max_tokens: None,
+            })
+            .unwrap();
+
+        let resolutions = res.anchor_resolutions.unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].resolved_kind, "module_variable");
+        assert!(resolutions[0].expanded_to.is_none());
+        assert!(resolutions[0].unresolved_reason.is_none());
+        assert!(res.total_context_size > 0);
+    }
+
+    #[test]
+    fn test_mixed_anchor_compute() {
+        let mut g = class_anchor_graph();
+
+        let standalone_func = Node::Function(FunctionNode {
+            core: make_core(10, "standalone", "main.py", 0, 5),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+        g.add_node("pkg/standalone().".into(), standalone_func);
+
+        let var = Node::Variable(VariableNode {
+            core: make_core(11, "CONFIG", "main.py", 6, 6),
+            var_type: None,
+            mutability: Mutability::Const,
+            variable_kind: VariableKind::Global,
+        });
+        g.add_node("pkg/CONFIG.".into(), var);
+
+        let engine = ContextEngine::from_prebuilt(
+            PathBuf::from("semantic_data.json"),
+            PathBuf::from("/repo"),
+            g,
+            Arc::new(MockReader),
+        );
+
+        let res = engine
+            .compute(ComputeRequest {
+                symbols: vec![
+                    "pkg/Plugin#".into(),
+                    "pkg/standalone().".into(),
+                    "pkg/CONFIG.".into(),
+                ],
+                policy: PolicyKind::Academic,
+                max_tokens: None,
+            })
+            .unwrap();
+
+        let resolutions = res.anchor_resolutions.unwrap();
+        assert_eq!(resolutions.len(), 3);
+        assert_eq!(resolutions[0].resolved_kind, "class");
+        assert!(resolutions[0].expanded_to.is_some());
+        assert_eq!(resolutions[1].resolved_kind, "function");
+        assert!(resolutions[1].expanded_to.is_none());
+        assert_eq!(resolutions[2].resolved_kind, "constant");
+        assert!(resolutions[2].expanded_to.is_none());
+
+        // Starting symbols should include expanded class members + function + variable
+        assert!(res.starting_symbols.len() >= 5);
+    }
+
+    #[test]
+    fn test_compute_unresolved_anchor_fails() {
+        let engine = ContextEngine::from_prebuilt(
+            PathBuf::from("semantic_data.json"),
+            PathBuf::from("/repo"),
+            test_graph(),
+            Arc::new(MockReader),
+        );
+
+        let err = engine
+            .compute(ComputeRequest {
+                symbols: vec!["nonexistent/symbol".into()],
+                policy: PolicyKind::Academic,
+                max_tokens: None,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_search_returns_class_symbols() {
+        let engine = ContextEngine::from_prebuilt(
+            PathBuf::from("semantic_data.json"),
+            PathBuf::from("/repo"),
+            class_anchor_graph(),
+            Arc::new(MockReader),
+        );
+
+        let result = engine
+            .search("Plugin", false, None, true, PolicyKind::Academic)
+            .unwrap();
+
+        let class_items: Vec<_> = result
+            .items
+            .iter()
+            .filter(|item| item.node_type == "class")
+            .collect();
+        assert!(
+            !class_items.is_empty(),
+            "Search should return class symbols from TypeRegistry"
+        );
+        assert_eq!(class_items[0].symbol, "pkg/Plugin#");
+    }
+
+    #[test]
+    fn test_search_shows_detailed_variable_kinds() {
+        let mut g = ContextGraph::new();
+
+        let const_var = Node::Variable(VariableNode {
+            core: make_core(0, "MAX_SIZE", "config.py", 0, 0),
+            var_type: None,
+            mutability: Mutability::Const,
+            variable_kind: VariableKind::Global,
+        });
+        g.add_node("pkg/MAX_SIZE.".into(), const_var);
+
+        let mod_var = Node::Variable(VariableNode {
+            core: make_core(1, "registry", "config.py", 1, 1),
+            var_type: None,
+            mutability: Mutability::Mutable,
+            variable_kind: VariableKind::Global,
+        });
+        g.add_node("pkg/registry.".into(), mod_var);
+
+        let engine = ContextEngine::from_prebuilt(
+            PathBuf::from("semantic_data.json"),
+            PathBuf::from("/repo"),
+            g,
+            Arc::new(MockReader),
+        );
+
+        let result = engine
+            .search("pkg", false, None, true, PolicyKind::Academic)
+            .unwrap();
+
+        let kinds: Vec<_> = result.items.iter().map(|i| i.node_type.as_str()).collect();
+        assert!(kinds.contains(&"constant"));
+        assert!(kinds.contains(&"module_variable"));
+    }
+
+    #[test]
+    fn test_class_expansion_uses_visibility_not_name() {
+        use crate::domain::type_registry::{TypeDefAttribute, TypeInfo, TypeKind};
+
+        let mut g = ContextGraph::new();
+        g.type_registry.register(
+            "pkg/MyClass#".to_string(),
+            TypeInfo {
+                definition: TypeDefAttribute {
+                    type_kind: TypeKind::Class,
+                    is_abstract: false,
+                    type_param_count: 0,
+                    type_var_info: None,
+                },
+                context_size: 5,
+                doc_score: 0.5,
+            },
+        );
+
+        // _internal method marked Public by extractor (e.g. Python dunder convention)
+        let internal_pub = Node::Function(FunctionNode {
+            core: make_method_core(0, "_internal", "pkg/MyClass#", "a.py", 0, 2),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Public,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+        g.add_node("pkg/MyClass#_internal().".into(), internal_pub);
+
+        // public_helper marked Private by extractor
+        let pub_name_priv = Node::Function(FunctionNode {
+            core: make_method_core(1, "public_helper", "pkg/MyClass#", "a.py", 3, 5),
+            parameters: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            visibility: Visibility::Private,
+            return_types: vec![],
+            is_interface_method: false,
+            is_constructor: false,
+            is_di_wired: false,
+        });
+        g.add_node("pkg/MyClass#public_helper().".into(), pub_name_priv);
+
+        let expanded = expand_class_anchor(&g, "pkg/MyClass#");
+        assert!(expanded.contains(&"pkg/MyClass#_internal().".to_string()));
+        assert!(!expanded.contains(&"pkg/MyClass#public_helper().".to_string()));
     }
 }

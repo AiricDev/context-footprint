@@ -17,7 +17,7 @@ from typing import Any
 
 from .extractor import extract_definitions_from_file
 from .jedi_resolver import collect_references
-from .resolver_backend import build_project_resolver_backend
+from .resolver_backend import DEFAULT_RESOLVER_BACKEND, RESOLVER_BACKENDS, build_project_resolver_backend
 from .schema import DocumentSemantics, SemanticData, SymbolDefinition
 
 
@@ -97,8 +97,9 @@ def run_extract_with_metrics(
     include_tests: bool = False,
     include: list[str] | None = None,
     exclude: list[str] | None = None,
-    resolver_backend: str = "jedi",
+    resolver_backend: str = DEFAULT_RESOLVER_BACKEND,
     ty_path: str | None = None,
+    pyrefly_path: str | None = None,
 ) -> tuple[SemanticData, ExtractionMetrics]:
     project_root = os.path.abspath(project_root)
     metrics = ExtractionMetrics(resolver_backend=resolver_backend)
@@ -143,6 +144,7 @@ def run_extract_with_metrics(
         project_root=project_root,
         venv_path=venv_path,
         ty_path=ty_path,
+        pyrefly_path=pyrefly_path,
     )
     try:
         total_ref = len(docs)
@@ -208,8 +210,9 @@ def run_extract(
     include_tests: bool = False,
     include: list[str] | None = None,
     exclude: list[str] | None = None,
-    resolver_backend: str = "jedi",
+    resolver_backend: str = DEFAULT_RESOLVER_BACKEND,
     ty_path: str | None = None,
+    pyrefly_path: str | None = None,
 ) -> SemanticData:
     data, _ = run_extract_with_metrics(
         project_root,
@@ -219,6 +222,7 @@ def run_extract(
         exclude=exclude,
         resolver_backend=resolver_backend,
         ty_path=ty_path,
+        pyrefly_path=pyrefly_path,
     )
     return data
 
@@ -249,13 +253,17 @@ def main() -> None:
     )
     parser.add_argument(
         "--resolver-backend",
-        choices=("jedi", "ty"),
-        default="jedi",
+        choices=RESOLVER_BACKENDS,
+        default=DEFAULT_RESOLVER_BACKEND,
         help="Resolver backend used for cross-file symbol navigation.",
     )
     parser.add_argument(
         "--ty-path",
         help="Path to the ty executable when --resolver-backend=ty is used.",
+    )
+    parser.add_argument(
+        "--pyrefly-path",
+        help="Path to the pyrefly executable when --resolver-backend=pyrefly is used.",
     )
     parser.add_argument(
         "--metrics-out",
@@ -280,6 +288,7 @@ def main() -> None:
         exclude=args.exclude,
         resolver_backend=args.resolver_backend,
         ty_path=args.ty_path,
+        pyrefly_path=args.pyrefly_path,
     )
     if args.metrics_out:
         Path(args.metrics_out).write_text(

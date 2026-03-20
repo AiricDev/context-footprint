@@ -2,8 +2,9 @@
 Resolver backends for symbol navigation.
 
 The extractor keeps AST-based role classification and uses these backends only for
-"position to definition" style queries. Jedi remains the default backend; ty is
-an experimental LSP-backed backend for evaluation on larger projects.
+"position to definition" style queries. `ty` is the default backend, while `jedi`
+remains available as a baseline and other LSP-backed backends can be plugged in
+for comparison.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ import jedi
 
 
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+DEFAULT_RESOLVER_BACKEND = "ty"
+RESOLVER_BACKENDS = ("jedi", "ty", "pyrefly")
 
 
 def _path_to_uri(path: str) -> str:
@@ -168,9 +171,12 @@ class _JsonRpcClient:
         command: list[str],
         root_uri: str,
         *,
+        server_name: str,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        initialization_options: dict[str, Any] | None = None,
     ):
+        self._server_name = server_name
         self._proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -180,15 +186,15 @@ class _JsonRpcClient:
             env=env,
         )
         self._next_id = 1
-        self._request(
-            "initialize",
-            {
-                "processId": os.getpid(),
-                "rootUri": root_uri,
-                "capabilities": {},
-                "clientInfo": {"name": "cf-extractor", "version": "0.1.2"},
-            },
-        )
+        params: dict[str, Any] = {
+            "processId": os.getpid(),
+            "rootUri": root_uri,
+            "capabilities": {},
+            "clientInfo": {"name": "cf-extractor", "version": "0.1.2"},
+        }
+        if initialization_options:
+            params["initializationOptions"] = initialization_options
+        self._request("initialize", params)
         self._notify("initialized", {})
 
     def _write(self, payload: dict[str, Any]) -> None:
@@ -205,7 +211,7 @@ class _JsonRpcClient:
         while True:
             line = self._proc.stdout.readline()
             if not line:
-                raise RuntimeError("ty server exited unexpectedly")
+                raise RuntimeError(f"{self._server_name} server exited unexpectedly")
             if line == b"\r\n":
                 break
             header = line.decode("ascii").strip()
@@ -224,7 +230,7 @@ class _JsonRpcClient:
             if message.get("id") != request_id:
                 continue
             if "error" in message:
-                raise RuntimeError(f"ty server {method} failed: {message['error']}")
+                raise RuntimeError(f"{self._server_name} server {method} failed: {message['error']}")
             return message.get("result")
 
     def _notify(self, method: str, params: dict[str, Any]) -> None:
@@ -247,8 +253,8 @@ class _JsonRpcClient:
                 self._proc.wait(timeout=2)
 
 
-class TyLspDocumentResolver(DocumentResolver):
-    def __init__(self, backend: "TyLspProjectResolverBackend", file_path: str):
+class _LspDocumentResolver(DocumentResolver):
+    def __init__(self, backend: "_LspProjectResolverBackend", file_path: str):
         self._backend = backend
         self._file_path = os.path.abspath(file_path)
 
@@ -270,20 +276,24 @@ class TyLspDocumentResolver(DocumentResolver):
         return self._backend.request_hover(self._file_path, line, column)
 
 
-class TyLspProjectResolverBackend(ProjectResolverBackend):
-    def __init__(self, project_root: str, *, ty_path: str | None = None, python_env: str | None = None):
-        executable = ty_path or shutil.which("ty")
-        if not executable:
-            raise RuntimeError(
-                "ty backend requested but no 'ty' executable was found. "
-                "Install ty or pass --ty-path."
-            )
+class _LspProjectResolverBackend(ProjectResolverBackend):
+    def __init__(
+        self,
+        project_root: str,
+        *,
+        command: list[str],
+        server_name: str,
+        python_env: str | None = None,
+        initialization_options: dict[str, Any] | None = None,
+    ):
         self._project_root = os.path.abspath(project_root)
         self._client = _JsonRpcClient(
-            [executable, "server"],
+            command,
             _path_to_uri(self._project_root),
+            server_name=server_name,
             cwd=self._project_root,
-            env=_build_ty_environment(python_env),
+            env=_build_lsp_environment(python_env),
+            initialization_options=initialization_options,
         )
         self._opened_documents: set[str] = set()
 
@@ -390,10 +400,43 @@ class TyLspProjectResolverBackend(ProjectResolverBackend):
 
     def open_document(self, file_path: str, source: str) -> DocumentResolver:
         self._ensure_open(file_path, source)
-        return TyLspDocumentResolver(self, file_path)
+        return _LspDocumentResolver(self, file_path)
 
     def close(self) -> None:
         self._client.close()
+
+
+class TyLspProjectResolverBackend(_LspProjectResolverBackend):
+    def __init__(self, project_root: str, *, ty_path: str | None = None, python_env: str | None = None):
+        executable = ty_path or shutil.which("ty")
+        if not executable:
+            raise RuntimeError(
+                "ty backend requested but no 'ty' executable was found. "
+                "Install ty or pass --ty-path."
+            )
+        super().__init__(
+            project_root,
+            command=[executable, "server"],
+            server_name="ty",
+            python_env=python_env,
+        )
+
+
+class PyreflyLspProjectResolverBackend(_LspProjectResolverBackend):
+    def __init__(self, project_root: str, *, pyrefly_path: str | None = None, python_env: str | None = None):
+        executable = pyrefly_path or shutil.which("pyrefly")
+        if not executable:
+            raise RuntimeError(
+                "pyrefly backend requested but no 'pyrefly' executable was found. "
+                "Install pyrefly or pass --pyrefly-path."
+            )
+        super().__init__(
+            project_root,
+            command=[executable, "lsp"],
+            server_name="pyrefly",
+            python_env=python_env,
+            initialization_options=_build_pyrefly_initialization_options(python_env),
+        )
 
 
 def build_project_resolver_backend(
@@ -402,15 +445,18 @@ def build_project_resolver_backend(
     project_root: str,
     venv_path: str | None = None,
     ty_path: str | None = None,
+    pyrefly_path: str | None = None,
 ) -> ProjectResolverBackend:
     if backend_name == "jedi":
         return JediProjectResolverBackend(venv_path=venv_path)
     if backend_name == "ty":
         return TyLspProjectResolverBackend(project_root, ty_path=ty_path, python_env=venv_path)
+    if backend_name == "pyrefly":
+        return PyreflyLspProjectResolverBackend(project_root, pyrefly_path=pyrefly_path, python_env=venv_path)
     raise ValueError(f"Unsupported resolver backend: {backend_name}")
 
 
-def _build_ty_environment(python_env: str | None) -> dict[str, str]:
+def _build_lsp_environment(python_env: str | None) -> dict[str, str]:
     env = os.environ.copy()
     if not python_env:
         return env
@@ -425,3 +471,51 @@ def _build_ty_environment(python_env: str | None) -> dict[str, str]:
     if os.path.isdir(bin_dir):
         env["PATH"] = os.pathsep.join([bin_dir, env.get("PATH", "")]).strip(os.pathsep)
     return env
+
+
+def _python_executable_from_env(python_env: str | None) -> str | None:
+    if not python_env:
+        return None
+
+    resolved = os.path.abspath(python_env)
+    if os.path.isfile(resolved):
+        return resolved
+
+    candidates = [
+        os.path.join(resolved, "bin", "python"),
+        os.path.join(resolved, "Scripts", "python.exe"),
+        os.path.join(resolved, "Scripts", "python"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _build_pyrefly_initialization_options(python_env: str | None) -> dict[str, Any]:
+    initialization_options: dict[str, Any] = {
+        "pyrefly": {
+            "displayTypeErrors": "force-off",
+            "disableLanguageServices": False,
+            "disabledLanguageServices": {
+                "definition": False,
+                "declaration": True,
+                "typeDefinition": True,
+                "codeAction": True,
+                "completion": True,
+                "documentHighlight": True,
+                "references": False,
+                "rename": True,
+                "signatureHelp": True,
+                "hover": False,
+                "inlayHint": True,
+                "documentSymbol": False,
+                "semanticTokens": True,
+                "implementation": True,
+            },
+        }
+    }
+    python_path = _python_executable_from_env(python_env)
+    if python_path:
+        initialization_options["pythonPath"] = python_path
+    return initialization_options

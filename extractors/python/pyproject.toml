@@ -46,6 +46,7 @@ dev = [
 [project.scripts]
 cf-extract = "cf_extractor.main:main"
 cf-extract-benchmark = "cf_extractor.benchmark:main"
+cf-extract-diff = "cf_extractor.diff_backends:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

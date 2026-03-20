@@ -1,6 +1,6 @@
 # cf-extractor
 
-Python semantic data extractor for [Context-Footprint](https://github.com/context-footprint/context-footprint). Outputs SemanticData JSON using **Python AST** plus a pluggable resolver backend. `jedi` is the default backend; `ty` is available as an experimental LSP-backed resolver.
+Python semantic data extractor for [Context-Footprint](https://github.com/context-footprint/context-footprint). Outputs SemanticData JSON using **Python AST** plus a pluggable resolver backend. `ty` is the default backend; `jedi` remains available as a baseline resolver, and other LSP-backed backends can be plugged in for comparison.
 
 ## As a dependency
 
@@ -41,8 +41,10 @@ Without arguments, uses the current directory (`.`). Output is written to stdout
 Resolver backend options:
 
 ```bash
+cf-extract /path/to/python/project
 cf-extract /path/to/python/project --resolver-backend jedi
 cf-extract /path/to/python/project --resolver-backend ty --ty-path /path/to/ty
+cf-extract /path/to/python/project --resolver-backend pyrefly --pyrefly-path /path/to/pyrefly
 ```
 
 Optional metrics output for benchmarking:
@@ -56,6 +58,13 @@ cf-extract-benchmark \
   --report-out benchmark.md
 ```
 
+Backend diffing:
+
+```bash
+cf-extract-diff /path/to/python/project --left jedi --right ty --report-out diff.md
+cf-extract-diff /path/to/python/project --left ty --right pyrefly --report-out diff.md
+```
+
 ## Tests
 
 ```bash
@@ -66,4 +75,5 @@ uv run pytest tests/ -v
 
 - Python >= 3.9
 - jedi, pydantic (installed automatically)
-- `ty` is optional and only required for `--resolver-backend ty`
+- `ty` is required for the default backend unless you explicitly switch to `--resolver-backend jedi`
+- `pyrefly` is optional and only required for `--resolver-backend pyrefly`

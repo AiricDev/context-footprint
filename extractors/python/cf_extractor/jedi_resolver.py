@@ -26,6 +26,9 @@ from .schema import (
     VariableDetails,
 )
 
+_BUILTIN_BEHAVIORAL_DECORATORS = {"classmethod", "staticmethod", "property"}
+_BUILTIN_INTRINSIC_CALLS = {"object"}
+
 
 def _add_parents(tree: ast.AST) -> None:
     """Mutate AST to add .parent on each node for later reference."""
@@ -390,6 +393,58 @@ class ReferenceCollector(ast.NodeVisitor):
             n = par
         return False
 
+    def _is_inside_annotation(self, node: ast.AST) -> bool:
+        current = node
+        while getattr(current, "parent", None) is not None:
+            parent = current.parent
+            if isinstance(parent, ast.arg) and parent.annotation is current:
+                return True
+            if isinstance(parent, ast.AnnAssign) and parent.annotation is current:
+                return True
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and parent.returns is current:
+                return True
+            if isinstance(parent, ast.ClassDef) and current in parent.bases:
+                return True
+            current = parent
+        return False
+
+    def _is_call_callee(self, node: ast.AST) -> bool:
+        parent = getattr(node, "parent", None)
+        return isinstance(parent, ast.Call) and parent.func is node
+
+    def _is_decorator_expr(self, node: ast.AST) -> bool:
+        current = node
+        while getattr(current, "parent", None) is not None:
+            parent = current.parent
+            if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and current in parent.decorator_list:
+                return True
+            current = parent
+        return False
+
+    def _builtin_external_symbol_id(self, name: str, *, kind: SymbolKind, node: ast.AST) -> str:
+        symbol_id = f"builtins.{name}"
+        self._collect_external_symbol(
+            symbol_id,
+            ResolvedTarget(
+                path="builtins",
+                line=node.lineno - 1,
+                column=getattr(node, "col_offset", 0) or 0,
+                name=name,
+                full_name=symbol_id,
+                kind="function",
+                documentation=[],
+            ),
+            kind_hint=kind,
+        )
+        return symbol_id
+
+    def _is_builtin_intrinsic_call(self, node: ast.Call) -> bool:
+        if not isinstance(node.func, ast.Name):
+            return False
+        if node.func.id not in _BUILTIN_INTRINSIC_CALLS:
+            return False
+        return self._resolve_internal_symbol_at(node.func.lineno, node.func.col_offset) is None
+
     def _collect_read_ref_from_expr(self, expr: ast.AST, enclosing_symbol: str) -> None:
         if isinstance(expr, ast.Name) and isinstance(expr.ctx, ast.Load):
             target_sym = self._resolve_name_to_read_target(expr)
@@ -437,6 +492,13 @@ class ReferenceCollector(ast.NodeVisitor):
             node.col_offset,
             kind_hint=SymbolKind.Variable,
         )
+        if not target_sym:
+            target_sym = self._resolve_symbol_at_with_hint(
+                node.lineno,
+                node.col_offset,
+                follow_imports=True,
+                kind_hint=SymbolKind.Variable,
+            )
         if target_sym and self._is_read_target(target_sym):
             return target_sym
 
@@ -650,9 +712,12 @@ class ReferenceCollector(ast.NodeVisitor):
         if not enc:
             self.generic_visit(node)
             return
+        if self._is_inside_annotation(node):
+            return
         target_sym = None
         receiver_sym = None
         method_name = None
+        is_super_method_call = False
 
         if (
             isinstance(node.func, ast.Attribute)
@@ -660,6 +725,7 @@ class ReferenceCollector(ast.NodeVisitor):
             and isinstance(node.func.value.func, ast.Name)
             and node.func.value.func.id == "super"
         ):
+            is_super_method_call = True
             method_name = node.func.attr
             target_sym = self._resolve_super_call_target(enc, method_name)
 
@@ -673,6 +739,13 @@ class ReferenceCollector(ast.NodeVisitor):
                     node.func.col_offset,
                     kind_hint=SymbolKind.Function,
                 )
+                if not target_sym:
+                    target_sym = self._resolve_symbol_at_with_hint(
+                        node.func.lineno,
+                        node.func.col_offset,
+                        follow_imports=True,
+                        kind_hint=SymbolKind.Function,
+                    )
         elif target_sym is None and isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
             target_sym = self._resolve_symbol_at_with_hint(
@@ -680,6 +753,13 @@ class ReferenceCollector(ast.NodeVisitor):
                 node.func.col_offset,
                 kind_hint=SymbolKind.Function,
             )
+            if not target_sym:
+                target_sym = self._resolve_symbol_at_with_hint(
+                    node.func.lineno,
+                    node.func.col_offset,
+                    follow_imports=True,
+                    kind_hint=SymbolKind.Function,
+                )
 
             if not target_sym and isinstance(node.func.value, ast.Name):
                 receiver_name = node.func.value.id
@@ -769,6 +849,12 @@ class ReferenceCollector(ast.NodeVisitor):
                 assigned_to=assigned_to,
             )
         )
+        if is_super_method_call:
+            for arg in node.args:
+                self.visit(arg)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+            return
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
@@ -779,12 +865,23 @@ class ReferenceCollector(ast.NodeVisitor):
         if self._is_inside_default_value(node):
             self.generic_visit(node)
             return
+        if self._is_inside_annotation(node):
+            return
+        if self._is_call_callee(node):
+            return
         if isinstance(node.ctx, ast.Load):
             target_sym = self._resolve_symbol_at_with_hint(
                 node.lineno,
                 node.col_offset,
                 kind_hint=SymbolKind.Variable,
             )
+            if not target_sym:
+                target_sym = self._resolve_symbol_at_with_hint(
+                    node.lineno,
+                    node.col_offset,
+                    follow_imports=True,
+                    kind_hint=SymbolKind.Variable,
+                )
             if target_sym and self._is_read_target(target_sym):
                 self.references.append(
                     SymbolReference(
@@ -872,7 +969,7 @@ class ReferenceCollector(ast.NodeVisitor):
                     assigned_to=None,
                 )
             )
-        self.generic_visit(node)
+        self.visit(node.value)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         enc = self._enclosing_symbol(node)
@@ -882,12 +979,23 @@ class ReferenceCollector(ast.NodeVisitor):
         if self._is_inside_default_value(node):
             self.generic_visit(node)
             return
+        if self._is_inside_annotation(node):
+            return
+        if self._is_call_callee(node):
+            return
         if isinstance(node.ctx, ast.Load):
             target_sym = self._resolve_symbol_at_with_hint(
                 node.lineno,
                 node.col_offset,
                 kind_hint=SymbolKind.Variable,
             )
+            if not target_sym:
+                target_sym = self._resolve_symbol_at_with_hint(
+                    node.lineno,
+                    node.col_offset,
+                    follow_imports=True,
+                    kind_hint=SymbolKind.Variable,
+                )
             if target_sym and self._is_read_target(target_sym):
                 receiver_sym = None
                 if isinstance(node.value, ast.Name):

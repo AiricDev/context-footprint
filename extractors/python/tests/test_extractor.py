@@ -57,7 +57,7 @@ def test_run_extract_produces_valid_json():
 def test_run_extract_with_metrics_reports_counts():
     data, metrics = run_extract_with_metrics(str(FIXTURES_DIR))
     assert data.documents
-    assert metrics.resolver_backend == "jedi"
+    assert metrics.resolver_backend == "ty"
     assert metrics.file_count >= 1
     assert metrics.definition_count >= 1
     assert metrics.reference_count >= 1
@@ -80,6 +80,41 @@ def test_fixtures_have_references():
     assert len(refs) >= 1
     roles = {r.role for r in refs}
     assert ReferenceRole.Call in roles
+
+
+def test_direct_call_does_not_emit_callee_read():
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol == "simple.foo"
+    ]
+    assert any(r.role == ReferenceRole.Call and r.target_symbol == "simple.bar" for r in refs)
+    assert not any(r.role == ReferenceRole.Read and r.target_symbol == "simple.bar" for r in refs)
+
+
+def test_imported_function_call_resolves_across_modules():
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol == "with_class.Helper.run"
+    ]
+    assert any(r.role == ReferenceRole.Call and r.target_symbol == "simple.bar" for r in refs)
+
+
+def test_super_call_does_not_emit_builtin_super_call():
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol == "test_super_call.Child.__init__"
+    ]
+    assert any(r.role == ReferenceRole.Call and r.target_symbol == "test_super_call.Base.__init__" for r in refs)
+    assert not any(r.target_symbol == "builtins.super" for r in refs)
 
 
 def test_schema_details_tagged_for_rust():

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .resolver_backend import DEFAULT_RESOLVER_BACKEND, RESOLVER_BACKENDS
+
 
 @dataclass(slots=True)
 class BenchmarkSample:
@@ -30,6 +32,16 @@ def _parse_dataset(value: str) -> tuple[str, str]:
     return name, path
 
 
+def _summarize_process_error(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    filtered = [line for line in lines if not line.startswith("[1/2]") and not line.startswith("[2/2]")]
+    if filtered:
+        return filtered[-1]
+    if lines:
+        return lines[-1]
+    return "unknown error"
+
+
 def _run_once(
     package_root: Path,
     dataset_name: str,
@@ -38,6 +50,7 @@ def _run_once(
     *,
     include_tests: bool,
     ty_path: str | None,
+    pyrefly_path: str | None,
 ) -> BenchmarkSample:
     dataset_path = str(Path(dataset_path).resolve())
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
@@ -57,6 +70,8 @@ def _run_once(
         cmd.append("--include-tests")
     if ty_path:
         cmd.extend(["--ty-path", ty_path])
+    if pyrefly_path:
+        cmd.extend(["--pyrefly-path", pyrefly_path])
 
     try:
         proc = subprocess.run(
@@ -70,7 +85,7 @@ def _run_once(
             return BenchmarkSample(
                 dataset=dataset_name,
                 backend=backend,
-                error=(proc.stderr or proc.stdout or f"exit {proc.returncode}").strip(),
+                error=_summarize_process_error(proc.stderr or proc.stdout or f"exit {proc.returncode}"),
             )
         return BenchmarkSample(
             dataset=dataset_name,
@@ -117,6 +132,7 @@ def _format_report(
     backends: list[str],
     aggregated: dict[tuple[str, str], dict[str, Any]],
 ) -> str:
+    baseline_backend = DEFAULT_RESOLVER_BACKEND
     lines = [
         "# Resolver Backend Benchmark",
         "",
@@ -125,8 +141,7 @@ def _format_report(
     ]
 
     for dataset in datasets:
-        jedi_metrics = aggregated.get((dataset, "jedi"))
-        ty_metrics = aggregated.get((dataset, "ty"))
+        baseline_metrics = aggregated.get((dataset, baseline_backend))
         for backend in backends:
             metrics = aggregated.get((dataset, backend), {})
             if metrics.get("error"):
@@ -135,11 +150,16 @@ def _format_report(
                 )
                 continue
             verdict = ""
-            if backend == "ty" and jedi_metrics and not jedi_metrics.get("error"):
-                ref_speedup = jedi_metrics["reference_phase_seconds_avg"] / metrics["reference_phase_seconds_avg"]
+            if (
+                backend != baseline_backend
+                and baseline_metrics
+                and not baseline_metrics.get("error")
+                and metrics["reference_phase_seconds_avg"] > 0
+            ):
+                ref_speedup = baseline_metrics["reference_phase_seconds_avg"] / metrics["reference_phase_seconds_avg"]
                 coverage_ok = (
-                    metrics["resolved_reference_count"] >= jedi_metrics["resolved_reference_count"]
-                    and metrics["unresolved_reference_count"] <= jedi_metrics["unresolved_reference_count"]
+                    metrics["resolved_reference_count"] >= baseline_metrics["resolved_reference_count"]
+                    and metrics["unresolved_reference_count"] <= baseline_metrics["unresolved_reference_count"]
                 )
                 verdict = "pass" if ref_speedup >= 2.0 and coverage_ok else "needs review"
             lines.append(
@@ -160,18 +180,30 @@ def _format_report(
                 + " |"
             )
 
-        if ty_metrics and jedi_metrics and not ty_metrics.get("error") and not jedi_metrics.get("error"):
+        if baseline_metrics and not baseline_metrics.get("error"):
             lines.extend(
                 [
                     "",
                     f"## {dataset}",
                     "",
-                    f"- ty reference speedup: {jedi_metrics['reference_phase_seconds_avg'] / ty_metrics['reference_phase_seconds_avg']:.2f}x",
-                    f"- Jedi resolved/unresolved: {jedi_metrics['resolved_reference_count']} / {jedi_metrics['unresolved_reference_count']}",
-                    f"- ty resolved/unresolved: {ty_metrics['resolved_reference_count']} / {ty_metrics['unresolved_reference_count']}",
-                    "",
+                    (
+                        f"- {baseline_backend} resolved/unresolved: "
+                        f"{baseline_metrics['resolved_reference_count']} / {baseline_metrics['unresolved_reference_count']}"
+                    ),
                 ]
             )
+            for backend in backends:
+                metrics = aggregated.get((dataset, backend), {})
+                if backend == baseline_backend or metrics.get("error") or metrics["reference_phase_seconds_avg"] <= 0:
+                    continue
+                lines.append(
+                    (
+                        f"- {backend} vs {baseline_backend}: "
+                        f"reference speed ratio {baseline_metrics['reference_phase_seconds_avg'] / metrics['reference_phase_seconds_avg']:.2f}x, "
+                        f"resolved/unresolved {metrics['resolved_reference_count']} / {metrics['unresolved_reference_count']}"
+                    )
+                )
+            lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -190,16 +222,17 @@ def main() -> None:
         "--backend",
         action="append",
         dest="backends",
-        choices=("jedi", "ty"),
+        choices=RESOLVER_BACKENDS,
         default=None,
         help="Backend(s) to benchmark.",
     )
     parser.add_argument("--iterations", type=int, default=1, help="Number of runs per dataset/backend.")
     parser.add_argument("--include-tests", action="store_true", help="Pass --include-tests to cf-extract.")
     parser.add_argument("--ty-path", help="Path to the ty executable for ty backend runs.")
+    parser.add_argument("--pyrefly-path", help="Path to the pyrefly executable for pyrefly backend runs.")
     parser.add_argument("--report-out", help="Optional path to write a Markdown report.")
     args = parser.parse_args()
-    backends = args.backends or ["jedi", "ty"]
+    backends = args.backends or [DEFAULT_RESOLVER_BACKEND, "jedi"]
 
     package_root = Path(__file__).resolve().parent.parent
     samples: list[BenchmarkSample] = []
@@ -214,6 +247,7 @@ def main() -> None:
                         backend,
                         include_tests=args.include_tests,
                         ty_path=args.ty_path,
+                        pyrefly_path=args.pyrefly_path,
                     )
                 )
 

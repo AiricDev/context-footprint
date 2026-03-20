@@ -11,7 +11,7 @@ import pytest
 # Add package to path when running tests without install
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cf_extractor.main import find_python_files, run_extract
+from cf_extractor.main import find_python_files, run_extract, run_extract_with_metrics
 from cf_extractor.schema import ReferenceRole, SemanticData, SymbolKind
 
 
@@ -52,6 +52,17 @@ def test_run_extract_produces_valid_json():
     assert "project_root" in parsed
     assert "documents" in parsed
     assert isinstance(parsed["documents"], list)
+
+
+def test_run_extract_with_metrics_reports_counts():
+    data, metrics = run_extract_with_metrics(str(FIXTURES_DIR))
+    assert data.documents
+    assert metrics.resolver_backend == "jedi"
+    assert metrics.file_count >= 1
+    assert metrics.definition_count >= 1
+    assert metrics.reference_count >= 1
+    assert metrics.resolved_reference_count >= 1
+    assert metrics.total_seconds >= 0
 
 
 def test_fixtures_have_definitions():

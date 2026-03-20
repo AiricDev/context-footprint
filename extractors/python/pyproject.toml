@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cf-extractor"
 version = "0.1.2"
-description = "Python semantic data extractor for Context-Footprint (AST + Jedi)"
+description = "Python semantic data extractor for Context-Footprint (AST + pluggable resolvers)"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 authors = [{ name = "Leric Zhang" }]
-keywords = ["context-footprint", "semantic", "extractor", "ast", "jedi", "python"]
+keywords = ["context-footprint", "semantic", "extractor", "ast", "jedi", "ty", "python"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: Apache Software License",
@@ -45,6 +45,7 @@ dev = [
 
 [project.scripts]
 cf-extract = "cf_extractor.main:main"
+cf-extract-benchmark = "cf_extractor.benchmark:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

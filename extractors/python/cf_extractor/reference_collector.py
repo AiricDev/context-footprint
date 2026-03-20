@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import ast
 import os
-from dataclasses import dataclass, field
 from typing import Optional
 
+from .reference_index import (
+    DefinitionIndex,
+    add_parents,
+    definition_symbol_id_from_target,
+    full_name_from_target,
+)
 from .resolver_backend import DocumentResolver, ResolvedTarget
 from .schema import (
     DocumentSemantics,
@@ -28,103 +33,6 @@ from .schema import (
 
 _BUILTIN_BEHAVIORAL_DECORATORS = {"classmethod", "staticmethod", "property"}
 _BUILTIN_INTRINSIC_CALLS = {"object"}
-
-
-def _add_parents(tree: ast.AST) -> None:
-    """Mutate AST to add .parent on each node for later reference."""
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            setattr(child, "parent", node)
-
-
-@dataclass(slots=True)
-class DefinitionIndex:
-    by_symbol_id: dict[str, SymbolDefinition] = field(default_factory=dict)
-    by_name: dict[str, list[SymbolDefinition]] = field(default_factory=dict)
-    by_file_and_name: dict[tuple[str, str], list[SymbolDefinition]] = field(default_factory=dict)
-    by_file_line_name: dict[tuple[str, int, str], SymbolDefinition] = field(default_factory=dict)
-    variables_or_functions_by_name: dict[str, list[SymbolDefinition]] = field(default_factory=dict)
-    variables_or_functions_by_file_name: dict[tuple[str, str], list[SymbolDefinition]] = field(
-        default_factory=dict
-    )
-    type_by_symbol_id: dict[str, SymbolDefinition] = field(default_factory=dict)
-    types_by_name: dict[str, list[SymbolDefinition]] = field(default_factory=dict)
-
-    @classmethod
-    def build(cls, definitions: list[SymbolDefinition]) -> "DefinitionIndex":
-        index = cls()
-        for definition in definitions:
-            index.by_symbol_id[definition.symbol_id] = definition
-            index.by_name.setdefault(definition.name, []).append(definition)
-            file_name_key = (definition.location.file_path, definition.name)
-            index.by_file_and_name.setdefault(file_name_key, []).append(definition)
-            index.by_file_line_name[(definition.location.file_path, definition.location.line, definition.name)] = definition
-
-            if definition.kind in (SymbolKind.Variable, SymbolKind.Function):
-                index.variables_or_functions_by_name.setdefault(definition.name, []).append(definition)
-                index.variables_or_functions_by_file_name.setdefault(file_name_key, []).append(definition)
-
-            if definition.kind == SymbolKind.Type:
-                index.type_by_symbol_id[definition.symbol_id] = definition
-                index.types_by_name.setdefault(definition.name, []).append(definition)
-        return index
-
-
-def _normalized_path(path: str | None) -> str | None:
-    if not path:
-        return None
-    return path.replace("\\", "/")
-
-
-def _definition_symbol_id_from_target(index: DefinitionIndex, resolved: ResolvedTarget | None) -> Optional[str]:
-    """Map a resolved target to our symbol_id by matching file, line, and optional name."""
-    if not resolved:
-        return None
-
-    j_path = _normalized_path(resolved.path)
-    j_name = resolved.name or ""
-    j_line_0 = resolved.line
-
-    candidates: list[SymbolDefinition]
-    if j_name:
-        candidates = index.by_name.get(j_name, [])
-    else:
-        candidates = list(index.by_symbol_id.values())
-    if not candidates:
-        return None
-
-    if j_path:
-        candidates = [
-            definition
-            for definition in candidates
-            if definition.location.file_path
-            and (
-                j_path.endswith(_normalized_path(definition.location.file_path) or "")
-                or (_normalized_path(definition.location.file_path) or "") in j_path
-            )
-        ]
-        if not candidates:
-            return None
-
-    exact_line = [definition for definition in candidates if definition.location.line == j_line_0]
-    if exact_line:
-        return exact_line[0].symbol_id
-
-    containing = [
-        definition
-        for definition in candidates
-        if definition.span.start_line <= j_line_0 <= definition.span.end_line
-    ]
-    if containing:
-        return containing[0].symbol_id
-
-    return None
-
-
-def _full_name_from_target(resolved: ResolvedTarget | None) -> Optional[str]:
-    if not resolved:
-        return None
-    return resolved.full_name or resolved.name
 
 
 class ReferenceCollector(ast.NodeVisitor):
@@ -220,9 +128,9 @@ class ReferenceCollector(ast.NodeVisitor):
         if not defs:
             return None
 
-        target_sym = _definition_symbol_id_from_target(self.definition_index, defs[0])
+        target_sym = definition_symbol_id_from_target(self.definition_index, defs[0])
         if not target_sym:
-            target_sym = _full_name_from_target(defs[0])
+            target_sym = full_name_from_target(defs[0])
             if target_sym and self._should_externalize(defs[0]):
                 self._collect_external_symbol(target_sym, defs[0], kind_hint=kind_hint)
             else:
@@ -258,7 +166,7 @@ class ReferenceCollector(ast.NodeVisitor):
     def _resolve_internal_symbol_from_targets(self, defs: list[ResolvedTarget]) -> Optional[str]:
         if not defs:
             return None
-        return _definition_symbol_id_from_target(self.definition_index, defs[0])
+        return definition_symbol_id_from_target(self.definition_index, defs[0])
 
     def _resolve_internal_symbol_at(
         self,
@@ -517,6 +425,14 @@ class ReferenceCollector(ast.NodeVisitor):
                 return narrowed
         return None
 
+    def _fallback_imported_symbol(self, name: str) -> Optional[str]:
+        by_name = self.definition_index.variables_or_functions_by_name.get(name, [])
+        if len(by_name) == 1:
+            return by_name[0].symbol_id
+        if len(by_name) > 1 and self.tree is not None:
+            return self._narrow_by_import(name, by_name)
+        return None
+
     def _resolve_import_module_prefix(self, node: ast.ImportFrom) -> Optional[str]:
         if node.level == 0:
             return node.module
@@ -600,6 +516,8 @@ class ReferenceCollector(ast.NodeVisitor):
                 node.col_offset,
                 kind_hint=SymbolKind.Function,
             )
+        if not target_sym and isinstance(node, ast.Name) and node.id in _BUILTIN_BEHAVIORAL_DECORATORS:
+            target_sym = self._builtin_external_symbol_id(node.id, kind=SymbolKind.Function, node=node)
         if target_sym:
             self.references.append(
                 SymbolReference(
@@ -686,7 +604,7 @@ class ReferenceCollector(ast.NodeVisitor):
                     if node_str == base_ref or node_str.split(".")[-1] == base_name:
                         defs = self._resolve_at(base_node.lineno, base_node.col_offset, follow_imports=True)
                         if defs:
-                            canon_id = _definition_symbol_id_from_target(self.definition_index, defs[0])
+                            canon_id = definition_symbol_id_from_target(self.definition_index, defs[0])
                             if canon_id:
                                 base_type = self.definition_index.type_by_symbol_id.get(canon_id)
                                 if base_type:
@@ -713,6 +631,12 @@ class ReferenceCollector(ast.NodeVisitor):
             self.generic_visit(node)
             return
         if self._is_inside_annotation(node):
+            return
+        if self._is_builtin_intrinsic_call(node):
+            for arg in node.args:
+                self.visit(arg)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
             return
         target_sym = None
         receiver_sym = None
@@ -746,6 +670,8 @@ class ReferenceCollector(ast.NodeVisitor):
                         follow_imports=True,
                         kind_hint=SymbolKind.Function,
                     )
+                if not target_sym:
+                    target_sym = self._fallback_imported_symbol(node.func.id)
         elif target_sym is None and isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
             target_sym = self._resolve_symbol_at_with_hint(
@@ -866,6 +792,8 @@ class ReferenceCollector(ast.NodeVisitor):
             self.generic_visit(node)
             return
         if self._is_inside_annotation(node):
+            return
+        if self._is_decorator_expr(node):
             return
         if self._is_call_callee(node):
             return
@@ -1056,7 +984,7 @@ def collect_references(
         resolver=resolver,
     )
     tree = ast.parse(source, filename=abs_path)
-    _add_parents(tree)
+    add_parents(tree)
     collector.tree = tree
     collector.visit(tree)
     return collector.references, list(collector.external_symbols.values())

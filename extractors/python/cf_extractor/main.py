@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .extractor import extract_definitions_from_file
-from .jedi_resolver import collect_references
+from .reference_collector import collect_references
 from .resolver_backend import DEFAULT_RESOLVER_BACKEND, RESOLVER_BACKENDS, build_project_resolver_backend
 from .schema import DocumentSemantics, SemanticData, SymbolDefinition
 

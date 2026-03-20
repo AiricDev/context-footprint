@@ -117,6 +117,29 @@ def test_super_call_does_not_emit_builtin_super_call():
     assert not any(r.target_symbol == "builtins.super" for r in refs)
 
 
+def test_builtin_intrinsic_object_call_is_not_emitted():
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol in {"sentinel_def", "test_default_arg_ref"}
+    ]
+    assert not any(r.target_symbol in {"object", "builtins.object"} for r in refs)
+
+
+def test_builtin_decorator_emits_decorate_without_read():
+    data = run_extract(str(FIXTURES_DIR), include_tests=True)
+    refs = [
+        r
+        for doc in data.documents
+        for r in doc.references
+        if r.enclosing_symbol in {"test_cls_call.MyClass.create", "test_cls_call"}
+    ]
+    assert any(r.role == ReferenceRole.Decorate and r.target_symbol == "builtins.classmethod" for r in refs)
+    assert not any(r.role == ReferenceRole.Read and r.target_symbol == "builtins.classmethod" for r in refs)
+
+
 def test_schema_details_tagged_for_rust():
     data = run_extract(str(FIXTURES_DIR))
     raw = json.loads(data.model_dump_json())

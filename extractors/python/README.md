@@ -74,6 +74,6 @@ uv run pytest tests/ -v
 ## Requirements
 
 - Python >= 3.9
-- jedi, pydantic (installed automatically)
-- `ty` is required for the default backend unless you explicitly switch to `--resolver-backend jedi`
-- `pyrefly` is optional and only required for `--resolver-backend pyrefly`
+- pydantic, ty (installed automatically)
+- `jedi` is only needed for baseline comparison with `--resolver-backend jedi`
+- `pyrefly` is only needed for comparison with `--resolver-backend pyrefly`

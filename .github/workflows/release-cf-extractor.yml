@@ -37,9 +37,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies and dev tools
-        run: |
-          uv sync
-          uv add --dev build twine
+        run: uv sync --group dev --locked
 
       - name: Run tests
         run: uv run pytest tests/ -v

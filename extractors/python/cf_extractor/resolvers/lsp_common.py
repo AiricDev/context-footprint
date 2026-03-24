@@ -150,7 +150,7 @@ class JsonRpcClient:
             "processId": os.getpid(),
             "rootUri": root_uri,
             "capabilities": {},
-            "clientInfo": {"name": "cf-extractor", "version": "0.1.2"},
+            "clientInfo": {"name": "cf-extractor", "version": "0.2.0"},
         }
         if initialization_options:
             params["initializationOptions"] = initialization_options

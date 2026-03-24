@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cf-extractor"
-version = "0.1.2"
+version = "0.2.0"
 description = "Python semantic data extractor for Context-Footprint (AST + pluggable resolvers)"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [{ name = "Leric Zhang" }]
 keywords = ["context-footprint", "semantic", "extractor", "ast", "jedi", "ty", "python"]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -22,8 +22,8 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "jedi>=0.19.0",
     "pydantic>=2.0",
+    "ty>=0.0.1",
 ]
 
 [project.urls]
@@ -33,12 +33,16 @@ Documentation = "https://github.com/AiricDev/context-footprint/tree/main/extract
 
 [project.optional-dependencies]
 dev = [
+    "jedi>=0.19.0",
+    "pyrefly>=0.57.1",
     "pytest>=7.0",
 ]
 
 [dependency-groups]
 dev = [
     "build>=1.4.0",
+    "jedi>=0.19.0",
+    "pyrefly>=0.57.1",
     "pytest>=7.0",
     "twine>=6.2.0",
 ]

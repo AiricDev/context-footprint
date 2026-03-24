@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cf_extractor.main import find_python_files, run_extract, run_extract_with_metrics
+from cf_extractor.resolvers.lsp_common import guess_symbol_name, module_name_from_path
 from cf_extractor.schema import ReferenceRole, SemanticData, SymbolKind
 
 
@@ -23,6 +24,17 @@ def test_find_python_files_include_pattern():
     """Include filter restricts to matching paths only."""
     files = find_python_files(str(FIXTURES_DIR), include_tests=True, include=["simple.py"])
     assert files == ["simple.py"]
+
+
+def test_guess_symbol_name_requires_cursor_inside_identifier(tmp_path: Path):
+    file_path = tmp_path / "sample.pyi"
+    file_path.write_text("# This is a comment\nvalue = 1\n", encoding="utf-8")
+    assert guess_symbol_name(str(file_path), 0, 0) is None
+
+
+def test_module_name_from_typeshed_path_uses_module_not_first_word():
+    path = "/tmp/typeshed/stdlib/os/__init__.pyi"
+    assert module_name_from_path(path) == "os"
 
 
 def test_find_python_files_exclude_pattern():
@@ -139,6 +151,248 @@ def test_builtin_decorator_emits_decorate_without_read():
     ]
     assert any(r.role == ReferenceRole.Decorate and r.target_symbol == "builtins.classmethod" for r in refs)
     assert not any(r.role == ReferenceRole.Read and r.target_symbol == "builtins.classmethod" for r in refs)
+
+
+def test_import_alias_calls_use_stable_external_ids(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+import json as r
+from itertools import chain
+
+
+def normalize(items):
+    r.dumps(items)
+    return list(chain.from_iterable(items))
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.normalize" and reference.role == ReferenceRole.Call
+    ]
+
+    assert any(reference.target_symbol == "json.dumps" for reference in refs)
+    assert any(reference.target_symbol == "itertools.chain.from_iterable" for reference in refs)
+    assert not any(reference.target_symbol in {"r", "from", "None"} for reference in refs)
+
+
+def test_import_driven_fallback_resolves_reexported_attribute_calls(tmp_path: Path):
+    pkg_dir = tmp_path / "pkg"
+    ops_dir = pkg_dir / "ops"
+    ops_dir.mkdir(parents=True)
+
+    (pkg_dir / "__init__.py").write_text("from . import ops\n", encoding="utf-8")
+    (ops_dir / "__init__.py").write_text("from .models import CreateModel\n", encoding="utf-8")
+    (ops_dir / "models.py").write_text(
+        """
+class CreateModel:
+    def __init__(self):
+        self.value = 1
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        """
+from pkg import ops
+
+
+def build():
+    return ops.CreateModel()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "main.build" and reference.role == ReferenceRole.Call
+    ]
+
+    assert any(reference.target_symbol == "pkg.ops.models.CreateModel" for reference in refs)
+
+
+def test_import_driven_fallback_prefers_package_reexport_definition(tmp_path: Path):
+    pkg_dir = tmp_path / "django" / "utils" / "translation"
+    pkg_dir.mkdir(parents=True)
+
+    (tmp_path / "django" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "django" / "utils" / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_dir / "__init__.py").write_text(
+        """
+def gettext(value):
+    return value
+
+
+gettext_lazy = gettext
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (pkg_dir / "trans_null.py").write_text(
+        """
+def _(value):
+    return value
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "sample.py").write_text(
+        """
+from django.utils.translation import gettext_lazy as _
+
+
+def render():
+    return _("hello")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.render" and reference.role == ReferenceRole.Call
+    ]
+
+    assert any(reference.target_symbol == "django.utils.translation.__init__.gettext_lazy" for reference in refs)
+
+
+def test_type_alias_assignments_do_not_emit_typing_reads(tmp_path: Path):
+    (tmp_path / "typing_aliases.py").write_text(
+        """
+from __future__ import annotations
+import typing as t
+
+ResponseValue = t.Union[str, bytes]
+HeadersValue = tuple[str, ...] | list[str]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.role == ReferenceRole.Read
+    ]
+
+    assert not any(
+        reference.target_symbol in {"typing.Union", "typing_aliases.ResponseValue", "typing_aliases.HeadersValue"}
+        for reference in refs
+    )
+
+
+def test_chained_path_method_calls_resolve_to_path_methods(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+from pathlib import Path
+
+
+def read_template(name: str) -> str:
+    return Path(__file__).parent.joinpath(name).read_text(encoding="utf-8")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.read_template" and reference.role == ReferenceRole.Call
+    ]
+
+    assert any(reference.target_symbol == "pathlib.Path.joinpath" for reference in refs)
+    assert any(reference.target_symbol == "pathlib.Path.read_text" for reference in refs)
+
+
+def test_local_path_variable_method_call_uses_constructor_type(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+from pathlib import Path
+
+
+def normalize(path: str) -> str:
+    current = Path(path)
+    return str(current.resolve())
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.normalize" and reference.role == ReferenceRole.Call
+    ]
+
+    assert any(reference.target_symbol == "pathlib.Path.resolve" for reference in refs)
+
+
+def test_string_literal_methods_do_not_emit_unresolved_builtin_calls(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+def render(name: str) -> str:
+    return "{!r}".format(name)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.render" and reference.role == ReferenceRole.Call
+    ]
+
+    assert not any(reference.method_name == "format" and reference.target_symbol is None for reference in refs)
+
+
+def test_path_method_on_binary_expression_uses_return_type_and_operator(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+from pathlib import Path
+
+
+class Store:
+    def root(self) -> Path:
+        return Path(__file__).parent
+
+    def read(self, name: str) -> str:
+        return (self.root() / name).resolve().read_text()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.Store.read" and reference.role == ReferenceRole.Call
+    ]
+
+    assert any(reference.target_symbol == "pathlib.Path.resolve" for reference in refs)
+    assert any(reference.target_symbol == "pathlib.Path.read_text" for reference in refs)
 
 
 @pytest.mark.skipif(shutil.which("pyrefly") is None, reason="pyrefly not installed")

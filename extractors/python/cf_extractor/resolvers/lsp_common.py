@@ -57,9 +57,27 @@ def guess_symbol_name(path: str | None, line: int, column: int) -> Optional[str]
     for match in _IDENT_RE.finditer(line_text):
         if match.start() <= column < match.end():
             return match.group(0)
-        if match.start() >= column:
-            return match.group(0)
     return None
+
+
+def module_name_from_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    normalized = path.replace("\\", "/")
+    marker = None
+    for candidate in ("/stdlib/", "/stubs/"):
+        if candidate in normalized:
+            marker = candidate
+            break
+    if marker is None:
+        return None
+    rel = normalized.split(marker, 1)[1]
+    if rel.endswith("/__init__.pyi") or rel.endswith("/__init__.py"):
+        rel = rel.rsplit("/__init__.", 1)[0]
+    elif rel.endswith(".pyi") or rel.endswith(".py"):
+        rel = rel.rsplit(".", 1)[0]
+    parts = [part for part in rel.split("/") if part]
+    return ".".join(parts) if parts else None
 
 
 def builtin_full_name(path: str | None, name: str | None) -> str | None:
@@ -270,6 +288,12 @@ class LspProjectResolverBackend(ProjectResolverBackend):
         column = int(start.get("character", 0))
         path = uri_to_path(uri)
         name = guess_symbol_name(path, line, column)
+        if not name and line == 0 and column == 0:
+            name = module_name_from_path(path)
+        elif line == 0 and column == 0:
+            module_name = module_name_from_path(path)
+            if module_name:
+                name = module_name
         return ResolvedTarget(
             path=path,
             line=line,

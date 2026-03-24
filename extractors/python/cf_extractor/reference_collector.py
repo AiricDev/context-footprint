@@ -47,6 +47,15 @@ _PATHLIKE_RECEIVER_TYPES = {
     "pathlib.PureWindowsPath",
 }
 _BOUND_METHOD_OWNER_RE = re.compile(r"(?:bound method |\(\s*bound method )([A-Za-z_][A-Za-z0-9_\.]*)\.")
+_FUNCTION_SIGNATURE_RE = re.compile(r"^(?:async\s+)?def\s+[A-Za-z_][A-Za-z0-9_]*\(.*\)\s*(?:->\s*(.+))?$")
+_INVALID_TYPE_REFS = {
+    "Any",
+    "Unknown",
+    "None",
+    "Never",
+    "typing.Any",
+    "t.Any",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -746,11 +755,43 @@ class ReferenceCollector(ast.NodeVisitor):
             return current_target
         return fallback_target
 
+    def _literal_type_ref(self, type_ref: str) -> Optional[str]:
+        stripped = type_ref.strip()
+        if stripped in {"LiteralString", "typing.LiteralString", "t.LiteralString"}:
+            return "builtins.str"
+
+        for prefix in ("Literal[", "typing.Literal[", "t.Literal["):
+            if not stripped.startswith(prefix) or not stripped.endswith("]"):
+                continue
+            inner = stripped[len(prefix) : -1].strip()
+            if not inner:
+                return None
+            try:
+                literal_value = ast.literal_eval(inner)
+            except (SyntaxError, ValueError):
+                return None
+            if isinstance(literal_value, tuple):
+                item_types = {
+                    builtin_type
+                    for item in literal_value
+                    if (builtin_type := self._builtin_receiver_type_from_constant(item))
+                }
+                if len(item_types) == 1:
+                    return next(iter(item_types))
+                return None
+            return self._builtin_receiver_type_from_constant(literal_value)
+        return None
+
     def _normalize_type_ref(self, type_ref: str | None, *, line: int, column: int) -> Optional[str]:
         if not type_ref:
             return None
+        literal_type = self._literal_type_ref(type_ref)
+        if literal_type:
+            return literal_type
         normalized = type_ref.split("[", 1)[0].strip()
         if not normalized:
+            return None
+        if not self._is_informative_type_ref(normalized):
             return None
         if "." in normalized:
             return self._symbol_id_from_qualified_name(normalized) or normalized
@@ -873,9 +914,14 @@ class ReferenceCollector(ast.NodeVisitor):
             self._variable_value_type_cache[definition.symbol_id] = None
             return None
 
+        enclosing_symbol = (
+            self._ast_enclosing_defined_symbol(value_expr)
+            or definition.enclosing_symbol
+            or self.module_symbol_id
+        )
         inferred_type = self._infer_expr_value_type(
             value_expr,
-            self._enclosing_symbol_defined(value_expr) or self.module_symbol_id,
+            enclosing_symbol,
         )
         self._variable_value_type_cache[definition.symbol_id] = inferred_type
         return inferred_type
@@ -941,6 +987,54 @@ class ReferenceCollector(ast.NodeVisitor):
             if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 return current
         return None
+
+    def _ast_enclosing_defined_symbol(self, node: ast.AST) -> Optional[str]:
+        scopes: list[tuple[str, int]] = []
+        current = node
+        while getattr(current, "parent", None) is not None:
+            current = current.parent
+            if isinstance(current, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                scopes.append((current.name, current.lineno - 1))
+
+        scopes.reverse()
+        matched_symbol = self.module_symbol_id if self.module_symbol_id in self.definition_index.by_symbol_id else None
+        prefix = matched_symbol
+        for name, line in scopes:
+            candidates = [
+                definition
+                for definition in self.definition_index.by_file_and_name.get((self.rel_path, name), [])
+                if definition.location.line == line
+            ]
+            if not candidates:
+                continue
+
+            if prefix:
+                scoped = [
+                    definition
+                    for definition in candidates
+                    if definition.symbol_id == f"{prefix}.{name}"
+                    or definition.symbol_id.startswith(prefix + "." + name)
+                ]
+                if scoped:
+                    candidates = scoped
+
+            chosen = min(candidates, key=lambda definition: definition.symbol_id.count("."))
+            matched_symbol = chosen.symbol_id
+            prefix = chosen.symbol_id
+
+        return matched_symbol
+
+    def _is_informative_type_ref(self, type_ref: str | None) -> bool:
+        if not type_ref:
+            return False
+        stripped = type_ref.strip()
+        if not stripped or stripped in _INVALID_TYPE_REFS:
+            return False
+        if stripped.startswith(("def ", "async def ", "class ")):
+            return False
+        if "@" in stripped:
+            return False
+        return True
 
     def _infer_local_name_type(
         self,
@@ -1009,6 +1103,13 @@ class ReferenceCollector(ast.NodeVisitor):
                 candidates.append(method_match.group(1))
                 continue
 
+            signature_match = _FUNCTION_SIGNATURE_RE.match(first_line)
+            if signature_match:
+                return_type = (signature_match.group(1) or "").strip()
+                if return_type:
+                    candidates.append(return_type)
+                continue
+
             cleaned = first_line.removeprefix(_UNKNOWN_HOVER_PREFIX).strip()
             for part in cleaned.split("|"):
                 candidate = part.strip().strip("()")
@@ -1022,6 +1123,8 @@ class ReferenceCollector(ast.NodeVisitor):
         seen: set[str] = set()
         line = line - 1
         for candidate in candidates:
+            if not self._is_informative_type_ref(candidate):
+                continue
             normalized_candidate = self._normalize_type_ref(
                 candidate,
                 line=line,
@@ -1487,8 +1590,12 @@ class ReferenceCollector(ast.NodeVisitor):
                 if enc_def and enc_def.kind == SymbolKind.Function and hasattr(enc_def.details, "parameters"):
                     param = next((p for p in enc_def.details.parameters if p.name == receiver_name), None)
                     if param and param.param_type:
-                        ptype = param.param_type.split("[")[0].strip()
-                        ptype_short = ptype.split(".")[-1]
+                        ptype = self._normalize_type_ref(
+                            param.param_type,
+                            line=node.func.value.lineno - 1,
+                            column=getattr(node.func.value, "col_offset", 0) or 0,
+                        )
+                        ptype_short = ptype.split(".")[-1] if ptype else ""
                         type_def = next(iter(self._type_candidates(ptype_short)), None)
                         if type_def:
                             target_sym = f"{type_def.symbol_id}.{method_name}"

@@ -737,6 +737,122 @@ def read(name: str):
     assert "pathlib.Path.read_text" in external_symbols
 
 
+def test_field_value_type_inference_uses_constructor_context(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+class Map:
+    def add(self, rule):
+        return rule
+
+
+class App:
+    url_map_class = Map
+
+    def __init__(self):
+        self.url_map = self.url_map_class()
+
+    def add_url_rule(self, rule):
+        self.url_map.add(rule)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.App.add_url_rule"
+    ]
+
+    assert any(
+        reference.role == ReferenceRole.Call
+        and reference.target_symbol == "sample.Map.add"
+        for reference in refs
+    )
+
+
+def test_unknown_function_hover_does_not_create_pseudo_receiver_type(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+def get_db():
+    return object()
+
+
+def init_db():
+    db = get_db()
+    db.executescript("schema")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.init_db"
+    ]
+    external_symbols = {definition.symbol_id for definition in data.external_symbols}
+
+    assert not any(reference.target_symbol == "def get_db.executescript" for reference in refs)
+    assert "def get_db.executescript" not in external_symbols
+
+
+def test_any_receiver_type_does_not_materialize_pseudo_method_target(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+from typing import Any
+
+
+def normalize(item: Any):
+    return item.upper()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.normalize"
+    ]
+    external_symbols = {definition.symbol_id for definition in data.external_symbols}
+
+    assert not any(reference.target_symbol == "Any.upper" for reference in refs)
+    assert "Any.upper" not in external_symbols
+
+
+def test_literal_receiver_type_does_not_materialize_pseudo_method_target(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+from typing import Literal
+
+
+def normalize(item: Literal["GET"]):
+    return item.upper()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.normalize"
+    ]
+    external_symbols = {definition.symbol_id for definition in data.external_symbols}
+
+    assert not any(reference.target_symbol == "Literal.upper" for reference in refs)
+    assert "Literal.upper" not in external_symbols
+
+
 def test_cls_call_resolves_to_init():
     """cls(name) in classmethod create() must produce Call ref from MyClass.create to MyClass.__init__."""
     data = run_extract(str(FIXTURES_DIR), include_tests=True)

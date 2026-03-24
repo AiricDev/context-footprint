@@ -496,6 +496,38 @@ def test_nested_function_call_attributed_to_outer():
     assert len(from_api_route) >= 1, "Call from nested decorator should be attributed to api_route"
 
 
+def test_nested_function_decorator_attributed_to_outer_and_not_defined(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+def deco(fn):
+    return fn
+
+
+def outer():
+    @deco
+    def inner():
+        return 1
+
+    return inner
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    defs = [definition.symbol_id for doc in data.documents for definition in doc.definitions]
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.role == ReferenceRole.Decorate and reference.target_symbol == "sample.deco"
+    ]
+
+    assert "sample.inner" not in defs
+    assert any(reference.enclosing_symbol == "sample.outer" for reference in refs)
+    assert not any(reference.enclosing_symbol == "sample.outer.inner" for reference in refs)
+
+
 def test_annotated_doc_extraction():
     """Ensure PEP 727 Doc() strings inside Annotated are extracted as documentation."""
     data = run_extract(str(FIXTURES_DIR), include_tests=True)
@@ -606,6 +638,103 @@ def test_augassign_emits_read_and_write():
         print("REFS for test_augassign.increment:", refs)
     assert len(counter_reads) >= 1, "counter += 1 should produce Read from increment to counter"
     assert len(counter_writes) >= 1, "counter += 1 should produce Write from increment to counter"
+
+
+def test_chained_attribute_call_uses_field_value_type(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+class Config:
+    def from_mapping(self):
+        return 1
+
+
+class App:
+    config: Config
+
+
+def build(app: App):
+    return app.config.from_mapping()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.build"
+    ]
+
+    assert any(
+        reference.role == ReferenceRole.Call
+        and reference.target_symbol == "sample.Config.from_mapping"
+        for reference in refs
+    )
+
+
+def test_chained_attribute_write_uses_field_value_type(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+class Inner:
+    value: int
+
+
+class Outer:
+    inner: Inner
+
+    def touch(self):
+        self.inner.value = 1
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.Outer.touch"
+    ]
+
+    assert any(
+        reference.role == ReferenceRole.Write
+        and reference.target_symbol == "sample.Inner.value"
+        for reference in refs
+    )
+
+
+def test_inferred_external_method_target_is_materialized(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+from pathlib import Path
+
+
+def read(name: str):
+    path = Path(name)
+    return path.read_text()
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path))
+    refs = [
+        reference
+        for doc in data.documents
+        for reference in doc.references
+        if reference.enclosing_symbol == "sample.read"
+    ]
+    external_symbols = {definition.symbol_id for definition in data.external_symbols}
+
+    assert any(
+        reference.role == ReferenceRole.Call
+        and reference.target_symbol == "pathlib.Path.read_text"
+        for reference in refs
+    )
+    assert "pathlib.Path.read_text" in external_symbols
 
 
 def test_cls_call_resolves_to_init():

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -36,6 +37,7 @@ _BUILTIN_BEHAVIORAL_DECORATORS = {"classmethod", "staticmethod", "property"}
 _BUILTIN_INTRINSIC_CALLS = {"object"}
 _BUILTIN_BEHAVIORAL_BOUNDARIES = {f"builtins.{name}" for name in _BUILTIN_BEHAVIORAL_DECORATORS}
 _NOISE_EXTERNAL_SYMBOLS = {"import"}
+_UNKNOWN_HOVER_PREFIX = "Unknown | "
 _PATHLIKE_RECEIVER_TYPES = {
     "pathlib.Path",
     "pathlib.PurePath",
@@ -44,6 +46,7 @@ _PATHLIKE_RECEIVER_TYPES = {
     "pathlib.WindowsPath",
     "pathlib.PureWindowsPath",
 }
+_BOUND_METHOD_OWNER_RE = re.compile(r"(?:bound method |\(\s*bound method )([A-Za-z_][A-Za-z0-9_\.]*)\.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +87,12 @@ class ReferenceCollector(ast.NodeVisitor):
         self._import_bindings: list[_ImportBinding] | None = None
         self._local_type_cache: dict[tuple[str, str, int, int], Optional[str]] = {}
         self._local_type_in_progress: set[tuple[str, str, int, int]] = set()
+        self._variable_value_type_cache: dict[str, Optional[str]] = {}
+        self._internal_roots = {
+            definition.symbol_id.split(".", 1)[0]
+            for definition in all_definitions
+            if definition.symbol_id
+        }
         self.tree: Optional[ast.AST] = None
 
     def _kind_rank(self, kind: SymbolKind) -> int:
@@ -251,6 +260,19 @@ class ReferenceCollector(ast.NodeVisitor):
             self._resolve_at(line, column, follow_imports=follow_imports)
         )
 
+    def _resolve_internal_variable_at(
+        self,
+        line: int,
+        column: int,
+        *,
+        follow_imports: bool = False,
+    ) -> Optional[str]:
+        symbol = self._resolve_internal_symbol_at(line, column, follow_imports=follow_imports)
+        definition = self._definition(symbol)
+        if definition and definition.kind == SymbolKind.Variable:
+            return symbol
+        return None
+
     def _definition(self, symbol_id: str | None) -> Optional[SymbolDefinition]:
         if not symbol_id:
             return None
@@ -318,6 +340,44 @@ class ReferenceCollector(ast.NodeVisitor):
             file_path=self.rel_path,
             line=node.lineno - 1,
             column=getattr(node, "col_offset", 0) or 0,
+        )
+
+    def _query_position(self, node: ast.AST) -> tuple[int, int]:
+        line = node.lineno
+        column = getattr(node, "col_offset", 0) or 0
+        if isinstance(node, ast.Attribute):
+            end_column = getattr(node, "end_col_offset", column) or column
+            attr_start = end_column - len(node.attr)
+            if attr_start >= column:
+                column = attr_start
+        return line, column
+
+    def _resolve_symbol_for_node_with_hint(
+        self,
+        node: ast.AST,
+        *,
+        follow_imports: bool = False,
+        kind_hint: SymbolKind,
+    ) -> Optional[str]:
+        line, column = self._query_position(node)
+        return self._resolve_symbol_at_with_hint(
+            line,
+            column,
+            follow_imports=follow_imports,
+            kind_hint=kind_hint,
+        )
+
+    def _resolve_internal_symbol_for_node(
+        self,
+        node: ast.AST,
+        *,
+        follow_imports: bool = False,
+    ) -> Optional[str]:
+        line, column = self._query_position(node)
+        return self._resolve_internal_symbol_at(
+            line,
+            column,
+            follow_imports=follow_imports,
         )
 
     def _prefer_same_module_variable(self, target_sym: str, bare_name: str) -> str:
@@ -476,16 +536,15 @@ class ReferenceCollector(ast.NodeVisitor):
                 )
             return
         if isinstance(expr, ast.Attribute) and isinstance(expr.ctx, ast.Load):
-            target_sym = self._resolve_symbol_at_with_hint(
-                expr.lineno,
-                expr.col_offset,
-                kind_hint=SymbolKind.Variable,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(expr, kind_hint=SymbolKind.Variable)
             target_sym = self._prefer_import_fallback(target_sym, expr, kind_hint=SymbolKind.Variable)
             if target_sym and self._is_read_target(target_sym):
                 receiver_sym = None
                 if isinstance(expr.value, ast.Name):
-                    receiver_sym = self._resolve_internal_symbol_at(expr.value.lineno, expr.value.col_offset)
+                    receiver_sym = self._resolve_internal_variable_at(
+                        expr.value.lineno,
+                        expr.value.col_offset,
+                    )
                 self._append_reference(
                     target_symbol=target_sym,
                     location=self._loc(expr),
@@ -703,6 +762,124 @@ class ReferenceCollector(ast.NodeVisitor):
             return candidates[0].symbol_id
         return normalized
 
+    def _is_likely_internal_symbol(self, symbol_id: str) -> bool:
+        if symbol_id in self.definition_index.by_symbol_id:
+            return True
+        return symbol_id.split(".", 1)[0] in self._internal_roots
+
+    def _ensure_external_symbol(
+        self,
+        target_sym: str | None,
+        node: ast.AST,
+        *,
+        kind_hint: SymbolKind,
+    ) -> None:
+        if not target_sym or target_sym.startswith("builtins."):
+            return
+        if target_sym in self.definition_index.by_symbol_id or target_sym in self.external_symbols:
+            return
+        if self._is_likely_internal_symbol(target_sym):
+            return
+
+        kind = "function" if kind_hint == SymbolKind.Function else "statement"
+        self._collect_external_symbol(
+            target_sym,
+            self._synthetic_target(target_sym, node, kind=kind),
+            kind_hint=kind_hint,
+        )
+
+    def _value_type_from_symbol(
+        self,
+        symbol_id: str | None,
+        *,
+        line: int,
+        column: int,
+    ) -> Optional[str]:
+        if not symbol_id:
+            return None
+
+        definition = self._definition(symbol_id)
+        if definition:
+            if definition.kind == SymbolKind.Type:
+                return definition.symbol_id
+
+            if definition.kind == SymbolKind.Function:
+                return self._function_return_type(symbol_id, line=line, column=column) or self._symbol_id_to_receiver_type(
+                    symbol_id
+                )
+
+            if definition.kind == SymbolKind.Variable and isinstance(definition.details, VariableDetails):
+                declared_type = self._normalize_type_ref(
+                    definition.details.var_type,
+                    line=line,
+                    column=column,
+                )
+                if declared_type:
+                    return declared_type
+                return self._infer_variable_value_type(definition)
+
+            return None
+
+        return self._symbol_id_to_receiver_type(symbol_id)
+
+    def _target_matches_definition(
+        self,
+        target: ast.AST,
+        definition: SymbolDefinition,
+    ) -> bool:
+        line = definition.location.line
+        column = definition.location.column
+
+        if isinstance(target, ast.Name):
+            return (
+                target.id == definition.name
+                and target.lineno - 1 == line
+                and (getattr(target, "col_offset", 0) or 0) == column
+            )
+
+        if isinstance(target, ast.Attribute):
+            return (
+                target.attr == definition.name
+                and target.lineno - 1 == line
+                and (getattr(target, "col_offset", 0) or 0) == column
+            )
+
+        return False
+
+    def _value_expr_for_variable_definition(
+        self,
+        definition: SymbolDefinition,
+    ) -> Optional[ast.AST]:
+        if not self.tree or definition.location.file_path != self.rel_path:
+            return None
+
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if self._target_matches_definition(target, definition):
+                        return node.value
+            elif isinstance(node, ast.AnnAssign):
+                if self._target_matches_definition(node.target, definition):
+                    return node.value
+        return None
+
+    def _infer_variable_value_type(self, definition: SymbolDefinition) -> Optional[str]:
+        cached = self._variable_value_type_cache.get(definition.symbol_id)
+        if definition.symbol_id in self._variable_value_type_cache:
+            return cached
+
+        value_expr = self._value_expr_for_variable_definition(definition)
+        if value_expr is None:
+            self._variable_value_type_cache[definition.symbol_id] = None
+            return None
+
+        inferred_type = self._infer_expr_value_type(
+            value_expr,
+            self._enclosing_symbol_defined(value_expr) or self.module_symbol_id,
+        )
+        self._variable_value_type_cache[definition.symbol_id] = inferred_type
+        return inferred_type
+
     def _builtin_receiver_type_from_constant(self, value: object) -> Optional[str]:
         if isinstance(value, bool):
             return "builtins.bool"
@@ -819,7 +996,49 @@ class ReferenceCollector(ast.NodeVisitor):
         self._local_type_cache[cache_key] = best
         return best
 
-    def _infer_name_receiver_type(self, node: ast.Name, enclosing_symbol: str) -> Optional[str]:
+    def _hover_type_candidates(self, node: ast.AST) -> list[str]:
+        candidates: list[str] = []
+        line, column = self._query_position(node)
+        for hover_text in self.resolver.hover(line, column):
+            first_line = hover_text.splitlines()[0].strip()
+            if not first_line:
+                continue
+
+            method_match = _BOUND_METHOD_OWNER_RE.search(first_line)
+            if method_match:
+                candidates.append(method_match.group(1))
+                continue
+
+            cleaned = first_line.removeprefix(_UNKNOWN_HOVER_PREFIX).strip()
+            for part in cleaned.split("|"):
+                candidate = part.strip().strip("()")
+                if not candidate or candidate == "Unknown":
+                    continue
+                candidate = candidate.split("(", 1)[0].strip()
+                if candidate:
+                    candidates.append(candidate)
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        line = line - 1
+        for candidate in candidates:
+            normalized_candidate = self._normalize_type_ref(
+                candidate,
+                line=line,
+                column=column,
+            )
+            if normalized_candidate and normalized_candidate not in seen:
+                normalized.append(normalized_candidate)
+                seen.add(normalized_candidate)
+        return normalized
+
+    def _hover_value_type(self, node: ast.AST) -> Optional[str]:
+        candidates = self._hover_type_candidates(node)
+        if candidates:
+            return candidates[0]
+        return None
+
+    def _infer_name_value_type(self, node: ast.Name, enclosing_symbol: str) -> Optional[str]:
         import_target = self._stable_symbol_from_import_expr(node, kind_hint=SymbolKind.Type)
         import_type = self._symbol_id_to_receiver_type(import_target)
         if import_type:
@@ -850,9 +1069,13 @@ class ReferenceCollector(ast.NodeVisitor):
         if node.id == "cls" and "." in enclosing_symbol:
             return self._find_type_for_enclosing_symbol(enclosing_symbol)
 
-        return self._infer_local_name_type(node.id, node, enclosing_symbol)
+        local_type = self._infer_local_name_type(node.id, node, enclosing_symbol)
+        if local_type:
+            return local_type
 
-    def _infer_call_result_type(
+        return self._hover_value_type(node)
+
+    def _infer_call_value_type(
         self,
         node: ast.Call,
         enclosing_symbol: str,
@@ -884,23 +1107,18 @@ class ReferenceCollector(ast.NodeVisitor):
             result_type = self._symbol_id_to_receiver_type(target_sym)
             if result_type:
                 return result_type
-            imported_type = self._infer_name_receiver_type(node.func, enclosing_symbol)
+            imported_type = self._infer_name_value_type(node.func, enclosing_symbol)
             if imported_type:
                 return imported_type
-            return None
+            return self._hover_value_type(node)
 
         if not isinstance(node.func, ast.Attribute):
             return None
 
-        target_sym = self._resolve_symbol_at_with_hint(
-            node.func.lineno,
-            node.func.col_offset,
-            kind_hint=SymbolKind.Function,
-        )
+        target_sym = self._resolve_symbol_for_node_with_hint(node.func, kind_hint=SymbolKind.Function)
         if not target_sym:
-            target_sym = self._resolve_symbol_at_with_hint(
-                node.func.lineno,
-                node.func.col_offset,
+            target_sym = self._resolve_symbol_for_node_with_hint(
+                node.func,
                 follow_imports=True,
                 kind_hint=SymbolKind.Function,
             )
@@ -922,16 +1140,16 @@ class ReferenceCollector(ast.NodeVisitor):
         )
         if return_type:
             return return_type
-        result_type = self._symbol_id_to_receiver_type(target_sym)
+        result_type = self._value_type_from_symbol(
+            target_sym,
+            line=node.lineno - 1,
+            column=getattr(node, "col_offset", 0) or 0,
+        )
         if result_type:
             return result_type
+        return self._hover_value_type(node)
 
-        base_type = self._infer_receiver_type_symbol(node.func.value, enclosing_symbol)
-        if base_type:
-            return base_type
-        return None
-
-    def _infer_receiver_type_symbol(self, expr: ast.AST, enclosing_symbol: str) -> Optional[str]:
+    def _infer_expr_value_type(self, expr: ast.AST, enclosing_symbol: str) -> Optional[str]:
         if isinstance(expr, ast.Constant):
             return self._builtin_receiver_type_from_constant(expr.value)
         if isinstance(expr, ast.JoinedStr):
@@ -945,35 +1163,61 @@ class ReferenceCollector(ast.NodeVisitor):
         if isinstance(expr, (ast.Dict, ast.DictComp)):
             return "builtins.dict"
         if isinstance(expr, ast.Name):
-            return self._infer_name_receiver_type(expr, enclosing_symbol)
+            return self._infer_name_value_type(expr, enclosing_symbol)
         if isinstance(expr, ast.Call):
-            return self._infer_call_result_type(expr, enclosing_symbol)
+            return self._infer_call_value_type(expr, enclosing_symbol)
         if isinstance(expr, ast.Attribute):
-            target_sym = self._resolve_symbol_at_with_hint(
-                expr.lineno,
-                expr.col_offset,
-                kind_hint=SymbolKind.Variable,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(expr, kind_hint=SymbolKind.Variable)
             target_sym = self._prefer_import_fallback(target_sym, expr, kind_hint=SymbolKind.Variable)
-            resolved_type = self._symbol_id_to_receiver_type(target_sym)
+            resolved_type = self._value_type_from_symbol(
+                target_sym,
+                line=expr.lineno - 1,
+                column=getattr(expr, "col_offset", 0) or 0,
+            )
             if resolved_type:
                 return resolved_type
-            return self._infer_receiver_type_symbol(expr.value, enclosing_symbol)
+
+            base_type = self._infer_expr_value_type(expr.value, enclosing_symbol)
+            if not base_type:
+                return self._hover_value_type(expr)
+
+            member_sym = f"{base_type}.{expr.attr}"
+            member_type = self._value_type_from_symbol(
+                member_sym,
+                line=expr.lineno - 1,
+                column=getattr(expr, "col_offset", 0) or 0,
+            )
+            if member_type:
+                return member_type
+            return self._hover_value_type(expr)
         if isinstance(expr, ast.BinOp):
-            left_type = self._infer_receiver_type_symbol(expr.left, enclosing_symbol)
-            right_type = self._infer_receiver_type_symbol(expr.right, enclosing_symbol)
+            left_type = self._infer_expr_value_type(expr.left, enclosing_symbol)
+            right_type = self._infer_expr_value_type(expr.right, enclosing_symbol)
             if isinstance(expr.op, ast.Div) and left_type in _PATHLIKE_RECEIVER_TYPES:
                 return left_type
             if left_type and left_type == right_type and isinstance(expr.op, (ast.Add, ast.BitOr, ast.Mod)):
                 return left_type
             return left_type or right_type
         if isinstance(expr, ast.IfExp):
-            body_type = self._infer_receiver_type_symbol(expr.body, enclosing_symbol)
-            orelse_type = self._infer_receiver_type_symbol(expr.orelse, enclosing_symbol)
+            body_type = self._infer_expr_value_type(expr.body, enclosing_symbol)
+            orelse_type = self._infer_expr_value_type(expr.orelse, enclosing_symbol)
             if body_type and body_type == orelse_type:
                 return body_type
             return body_type or orelse_type
-        return None
+        return self._hover_value_type(expr)
+
+    def _infer_name_receiver_type(self, node: ast.Name, enclosing_symbol: str) -> Optional[str]:
+        return self._infer_name_value_type(node, enclosing_symbol)
+
+    def _infer_call_result_type(
+        self,
+        node: ast.Call,
+        enclosing_symbol: str,
+    ) -> Optional[str]:
+        return self._infer_call_value_type(node, enclosing_symbol)
+
+    def _infer_receiver_type_symbol(self, expr: ast.AST, enclosing_symbol: str) -> Optional[str]:
+        return self._infer_expr_value_type(expr, enclosing_symbol)
 
     def _fallback_method_target_from_receiver_type(
         self,
@@ -994,6 +1238,25 @@ class ReferenceCollector(ast.NodeVisitor):
                 self._synthetic_target(target_sym, node, kind="function"),
                 kind_hint=SymbolKind.Function,
             )
+        return target_sym
+
+    def _fallback_attribute_target_from_receiver_type(
+        self,
+        node: ast.Attribute,
+        enclosing_symbol: str,
+    ) -> Optional[str]:
+        receiver_type = self._infer_receiver_type_symbol(node.value, enclosing_symbol)
+        if not receiver_type:
+            return None
+
+        target_sym = f"{receiver_type}.{node.attr}"
+        if target_sym in self.definition_index.by_symbol_id or target_sym in self.external_symbols:
+            return target_sym
+
+        if receiver_type in self.definition_index.type_by_symbol_id:
+            return None
+
+        self._ensure_external_symbol(target_sym, node, kind_hint=SymbolKind.Variable)
         return target_sym
 
     def _narrow_by_import(self, name: str, candidates: list[SymbolDefinition]) -> Optional[str]:
@@ -1025,6 +1288,18 @@ class ReferenceCollector(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         enc = self._enclosing_symbol(node)
+        if self._func_spans:
+            enclosing_symbol = self._enclosing_symbol_defined(node)
+            for dec in node.decorator_list:
+                self._visit_decorator(dec, enclosing_symbol)
+            for default in node.args.defaults or []:
+                self._collect_read_ref_from_expr(default, enclosing_symbol)
+            for kw_default in node.args.kw_defaults or []:
+                if kw_default is not None:
+                    self._collect_read_ref_from_expr(kw_default, enclosing_symbol)
+            self.generic_visit(node)
+            return
+
         func_id = f"{enc}.{node.name}"
         exact = self.definition_index.by_symbol_id.get(func_id)
         if not exact:
@@ -1053,20 +1328,13 @@ class ReferenceCollector(ast.NodeVisitor):
     def _visit_decorator(self, node: ast.expr, decorated_symbol_id: str) -> None:
         target_sym = None
         if isinstance(node, ast.Name):
-            target_sym = self._resolve_symbol_at_with_hint(
-                node.lineno,
-                node.col_offset,
-                kind_hint=SymbolKind.Function,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(node, kind_hint=SymbolKind.Function)
         elif isinstance(node, ast.Attribute):
-            target_sym = self._resolve_symbol_at_with_hint(
-                node.lineno,
-                node.col_offset,
-                kind_hint=SymbolKind.Function,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(node, kind_hint=SymbolKind.Function)
         target_sym = self._prefer_import_fallback(target_sym, node, kind_hint=SymbolKind.Function)
         if not target_sym and isinstance(node, ast.Name) and node.id in _BUILTIN_BEHAVIORAL_DECORATORS:
             target_sym = self._builtin_external_symbol_id(node.id, kind=SymbolKind.Function, node=node)
+        self._ensure_external_symbol(target_sym, node, kind_hint=SymbolKind.Function)
         if target_sym:
             self._append_reference(
                 target_symbol=target_sym,
@@ -1081,11 +1349,7 @@ class ReferenceCollector(ast.NodeVisitor):
 
             def _extract_type(t_node: ast.AST) -> None:
                 if isinstance(t_node, (ast.Name, ast.Attribute)):
-                    target_sym = self._resolve_symbol_at_with_hint(
-                        t_node.lineno,
-                        t_node.col_offset,
-                        kind_hint=SymbolKind.Type,
-                    )
+                    target_sym = self._resolve_symbol_for_node_with_hint(t_node, kind_hint=SymbolKind.Type)
                     if target_sym:
                         self._append_reference(
                             target_symbol=target_sym,
@@ -1141,7 +1405,8 @@ class ReferenceCollector(ast.NodeVisitor):
                 for base_node in class_def_node.bases:
                     node_str = ast.unparse(base_node)
                     if node_str == base_ref or node_str.split(".")[-1] == base_name:
-                        defs = self._resolve_at(base_node.lineno, base_node.col_offset, follow_imports=True)
+                        line, column = self._query_position(base_node)
+                        defs = self._resolve_at(line, column, follow_imports=True)
                         if defs:
                             canon_id = definition_symbol_id_from_target(self.definition_index, defs[0])
                             if canon_id:
@@ -1197,15 +1462,10 @@ class ReferenceCollector(ast.NodeVisitor):
                 class_symbol_id = ".".join(enc.split(".")[:-1])
                 target_sym = f"{class_symbol_id}.__init__"
             else:
-                target_sym = self._resolve_symbol_at_with_hint(
-                    node.func.lineno,
-                    node.func.col_offset,
-                    kind_hint=SymbolKind.Function,
-                )
+                target_sym = self._resolve_symbol_for_node_with_hint(node.func, kind_hint=SymbolKind.Function)
                 if not target_sym:
-                    target_sym = self._resolve_symbol_at_with_hint(
-                        node.func.lineno,
-                        node.func.col_offset,
+                    target_sym = self._resolve_symbol_for_node_with_hint(
+                        node.func,
                         follow_imports=True,
                         kind_hint=SymbolKind.Function,
                     )
@@ -1213,15 +1473,10 @@ class ReferenceCollector(ast.NodeVisitor):
                     target_sym = self._fallback_imported_symbol(node.func.id)
         elif target_sym is None and isinstance(node.func, ast.Attribute):
             method_name = node.func.attr
-            target_sym = self._resolve_symbol_at_with_hint(
-                node.func.lineno,
-                node.func.col_offset,
-                kind_hint=SymbolKind.Function,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(node.func, kind_hint=SymbolKind.Function)
             if not target_sym:
-                target_sym = self._resolve_symbol_at_with_hint(
-                    node.func.lineno,
-                    node.func.col_offset,
+                target_sym = self._resolve_symbol_for_node_with_hint(
+                    node.func,
                     follow_imports=True,
                     kind_hint=SymbolKind.Function,
                 )
@@ -1303,12 +1558,13 @@ class ReferenceCollector(ast.NodeVisitor):
                 target_sym = self._fallback_method_target_from_receiver_type(node.func, enc)
 
             if isinstance(node.func.value, ast.Name):
-                receiver_sym = self._resolve_internal_symbol_at(
+                receiver_sym = self._resolve_internal_variable_at(
                     node.func.value.lineno,
                     node.func.value.col_offset,
                 )
 
         target_sym = self._prefer_import_fallback(target_sym, node.func, kind_hint=SymbolKind.Function)
+        self._ensure_external_symbol(target_sym, node.func, kind_hint=SymbolKind.Function)
 
         assigned_to = None
         parent = getattr(node, "parent", None)
@@ -1366,6 +1622,7 @@ class ReferenceCollector(ast.NodeVisitor):
                     kind_hint=SymbolKind.Variable,
                 )
             target_sym = self._prefer_import_fallback(target_sym, node, kind_hint=SymbolKind.Variable)
+            self._ensure_external_symbol(target_sym, node, kind_hint=SymbolKind.Variable)
             if target_sym and self._is_read_target(target_sym):
                 self._append_reference(
                     target_symbol=target_sym,
@@ -1379,7 +1636,10 @@ class ReferenceCollector(ast.NodeVisitor):
                 node.col_offset,
                 kind_hint=SymbolKind.Variable,
             )
+            if not target_sym and not self._func_spans:
+                target_sym = self._same_module_variable_symbol(node.id)
             target_sym = self._prefer_import_fallback(target_sym, node, kind_hint=SymbolKind.Variable)
+            self._ensure_external_symbol(target_sym, node, kind_hint=SymbolKind.Variable)
             if target_sym and self._is_write_target(target_sym):
                 self._append_reference(
                     target_symbol=target_sym,
@@ -1407,15 +1667,14 @@ class ReferenceCollector(ast.NodeVisitor):
             else:
                 target_sym = self._same_module_variable_symbol(node.target.id)
         elif isinstance(node.target, ast.Attribute):
-            target_sym = self._resolve_symbol_at_with_hint(
-                node.target.lineno,
-                node.target.col_offset,
-                kind_hint=SymbolKind.Variable,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(node.target, kind_hint=SymbolKind.Variable)
+            if not target_sym:
+                target_sym = self._fallback_attribute_target_from_receiver_type(node.target, enc)
             if target_sym:
                 target_sym = self._prefer_same_module_variable(target_sym, node.target.attr)
+                self._ensure_external_symbol(target_sym, node.target, kind_hint=SymbolKind.Variable)
             if isinstance(node.target.value, ast.Name):
-                receiver_sym = self._resolve_internal_symbol_at(
+                receiver_sym = self._resolve_internal_variable_at(
                     node.target.value.lineno,
                     node.target.value.col_offset,
                 )
@@ -1454,23 +1713,24 @@ class ReferenceCollector(ast.NodeVisitor):
             self.visit(node.value)
             return
         if isinstance(node.ctx, ast.Load):
-            target_sym = self._resolve_symbol_at_with_hint(
-                node.lineno,
-                node.col_offset,
-                kind_hint=SymbolKind.Variable,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(node, kind_hint=SymbolKind.Variable)
             if not target_sym:
-                target_sym = self._resolve_symbol_at_with_hint(
-                    node.lineno,
-                    node.col_offset,
+                target_sym = self._resolve_symbol_for_node_with_hint(
+                    node,
                     follow_imports=True,
                     kind_hint=SymbolKind.Variable,
                 )
             target_sym = self._prefer_import_fallback(target_sym, node, kind_hint=SymbolKind.Variable)
+            if not target_sym:
+                target_sym = self._fallback_attribute_target_from_receiver_type(node, enc)
+            self._ensure_external_symbol(target_sym, node, kind_hint=SymbolKind.Variable)
             if target_sym and self._is_read_target(target_sym):
                 receiver_sym = None
                 if isinstance(node.value, ast.Name):
-                    receiver_sym = self._resolve_internal_symbol_at(node.value.lineno, node.value.col_offset)
+                    receiver_sym = self._resolve_internal_variable_at(
+                        node.value.lineno,
+                        node.value.col_offset,
+                    )
                 self._append_reference(
                     target_symbol=target_sym,
                     location=self._loc(node),
@@ -1479,16 +1739,18 @@ class ReferenceCollector(ast.NodeVisitor):
                     receiver=receiver_sym,
                 )
         elif isinstance(node.ctx, ast.Store):
-            target_sym = self._resolve_symbol_at_with_hint(
-                node.lineno,
-                node.col_offset,
-                kind_hint=SymbolKind.Variable,
-            )
+            target_sym = self._resolve_symbol_for_node_with_hint(node, kind_hint=SymbolKind.Variable)
+            if not target_sym:
+                target_sym = self._fallback_attribute_target_from_receiver_type(node, enc)
             target_sym = self._prefer_import_fallback(target_sym, node, kind_hint=SymbolKind.Variable)
+            self._ensure_external_symbol(target_sym, node, kind_hint=SymbolKind.Variable)
             if target_sym and self._is_write_target(target_sym):
                 receiver_sym = None
                 if isinstance(node.value, ast.Name):
-                    receiver_sym = self._resolve_internal_symbol_at(node.value.lineno, node.value.col_offset)
+                    receiver_sym = self._resolve_internal_variable_at(
+                        node.value.lineno,
+                        node.value.col_offset,
+                    )
                 self._append_reference(
                     target_symbol=target_sym,
                     location=self._loc(node),

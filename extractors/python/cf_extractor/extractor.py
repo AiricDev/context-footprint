@@ -267,6 +267,12 @@ class DefinitionCollector(ast.NodeVisitor):
     def _visit_function_def(
         self, node: ast.FunctionDef | ast.AsyncFunctionDef, is_async: bool
     ) -> None:
+        if self._func_stack:
+            # Nested functions are not extracted as standalone definitions.
+            # Their references are attributed to the enclosing function.
+            self.generic_visit(node)
+            return
+
         prefix = self._current_scope_prefix()
         func_id = f"{prefix}.{node.name}"
         params: list[Parameter] = []

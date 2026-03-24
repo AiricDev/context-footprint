@@ -33,6 +33,8 @@ from .schema import (
 
 _BUILTIN_BEHAVIORAL_DECORATORS = {"classmethod", "staticmethod", "property"}
 _BUILTIN_INTRINSIC_CALLS = {"object"}
+_BUILTIN_BEHAVIORAL_BOUNDARIES = {f"builtins.{name}" for name in _BUILTIN_BEHAVIORAL_DECORATORS}
+_NOISE_EXTERNAL_SYMBOLS = {"import"}
 
 
 class ReferenceCollector(ast.NodeVisitor):
@@ -138,6 +140,11 @@ class ReferenceCollector(ast.NodeVisitor):
         return target_sym
 
     def _should_externalize(self, resolved: ResolvedTarget) -> bool:
+        full_name = full_name_from_target(resolved)
+        if full_name in _NOISE_EXTERNAL_SYMBOLS or resolved.name in _NOISE_EXTERNAL_SYMBOLS:
+            return False
+        if full_name and full_name.startswith("builtins."):
+            return False
         if resolved.kind in {"param", "statement"}:
             return False
         if resolved.path:
@@ -161,6 +168,40 @@ class ReferenceCollector(ast.NodeVisitor):
         return self._resolve_symbol_from_targets_with_hint(
             self._resolve_at(line, column, follow_imports=follow_imports),
             kind_hint=kind_hint,
+        )
+
+    def _should_keep_target(self, target_symbol: str | None, *, role: ReferenceRole) -> bool:
+        if not target_symbol:
+            return True
+        if target_symbol in _NOISE_EXTERNAL_SYMBOLS:
+            return False
+        if not target_symbol.startswith("builtins."):
+            return True
+        return role == ReferenceRole.Decorate and target_symbol in _BUILTIN_BEHAVIORAL_BOUNDARIES
+
+    def _append_reference(
+        self,
+        *,
+        target_symbol: str | None,
+        location: SourceLocation,
+        enclosing_symbol: str | None,
+        role: ReferenceRole,
+        receiver: str | None = None,
+        method_name: str | None = None,
+        assigned_to: str | None = None,
+    ) -> None:
+        if not self._should_keep_target(target_symbol, role=role):
+            return
+        self.references.append(
+            SymbolReference(
+                target_symbol=target_symbol,
+                location=location,
+                enclosing_symbol=enclosing_symbol,
+                role=role,
+                receiver=receiver,
+                method_name=method_name,
+                assigned_to=assigned_to,
+            )
         )
 
     def _resolve_internal_symbol_from_targets(self, defs: list[ResolvedTarget]) -> Optional[str]:
@@ -357,16 +398,11 @@ class ReferenceCollector(ast.NodeVisitor):
         if isinstance(expr, ast.Name) and isinstance(expr.ctx, ast.Load):
             target_sym = self._resolve_name_to_read_target(expr)
             if target_sym:
-                self.references.append(
-                    SymbolReference(
-                        target_symbol=target_sym,
-                        location=self._loc(expr),
-                        enclosing_symbol=enclosing_symbol,
-                        role=ReferenceRole.Read,
-                        receiver=None,
-                        method_name=None,
-                        assigned_to=None,
-                    )
+                self._append_reference(
+                    target_symbol=target_sym,
+                    location=self._loc(expr),
+                    enclosing_symbol=enclosing_symbol,
+                    role=ReferenceRole.Read,
                 )
             return
         if isinstance(expr, ast.Attribute) and isinstance(expr.ctx, ast.Load):
@@ -379,16 +415,12 @@ class ReferenceCollector(ast.NodeVisitor):
                 receiver_sym = None
                 if isinstance(expr.value, ast.Name):
                     receiver_sym = self._resolve_internal_symbol_at(expr.value.lineno, expr.value.col_offset)
-                self.references.append(
-                    SymbolReference(
-                        target_symbol=target_sym,
-                        location=self._loc(expr),
-                        enclosing_symbol=enclosing_symbol,
-                        role=ReferenceRole.Read,
-                        receiver=receiver_sym,
-                        method_name=None,
-                        assigned_to=None,
-                    )
+                self._append_reference(
+                    target_symbol=target_sym,
+                    location=self._loc(expr),
+                    enclosing_symbol=enclosing_symbol,
+                    role=ReferenceRole.Read,
+                    receiver=receiver_sym,
                 )
             return
         for child in ast.iter_child_nodes(expr):
@@ -519,16 +551,11 @@ class ReferenceCollector(ast.NodeVisitor):
         if not target_sym and isinstance(node, ast.Name) and node.id in _BUILTIN_BEHAVIORAL_DECORATORS:
             target_sym = self._builtin_external_symbol_id(node.id, kind=SymbolKind.Function, node=node)
         if target_sym:
-            self.references.append(
-                SymbolReference(
-                    target_symbol=target_sym,
-                    location=self._loc(node),
-                    enclosing_symbol=decorated_symbol_id,
-                    role=ReferenceRole.Decorate,
-                    receiver=None,
-                    method_name=None,
-                    assigned_to=None,
-                )
+            self._append_reference(
+                target_symbol=target_sym,
+                location=self._loc(node),
+                enclosing_symbol=decorated_symbol_id,
+                role=ReferenceRole.Decorate,
             )
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
@@ -543,16 +570,11 @@ class ReferenceCollector(ast.NodeVisitor):
                         kind_hint=SymbolKind.Type,
                     )
                     if target_sym:
-                        self.references.append(
-                            SymbolReference(
-                                target_symbol=target_sym,
-                                location=self._loc(t_node),
-                                enclosing_symbol=self._enclosing_symbol_defined(node),
-                                role=ReferenceRole.Read,
-                                receiver=None,
-                                method_name=None,
-                                assigned_to=None,
-                            )
+                        self._append_reference(
+                            target_symbol=target_sym,
+                            location=self._loc(t_node),
+                            enclosing_symbol=self._enclosing_symbol_defined(node),
+                            role=ReferenceRole.Read,
                         )
                 elif isinstance(t_node, ast.Tuple):
                     for elt in t_node.elts:
@@ -764,16 +786,14 @@ class ReferenceCollector(ast.NodeVisitor):
                     if definition and definition.kind == SymbolKind.Variable:
                         assigned_to = definition.symbol_id
                 break
-        self.references.append(
-            SymbolReference(
-                target_symbol=target_sym,
-                location=self._loc(node),
-                enclosing_symbol=self._enclosing_symbol_defined(node),
-                role=ReferenceRole.Call,
-                receiver=receiver_sym,
-                method_name=method_name,
-                assigned_to=assigned_to,
-            )
+        self._append_reference(
+            target_symbol=target_sym,
+            location=self._loc(node),
+            enclosing_symbol=self._enclosing_symbol_defined(node),
+            role=ReferenceRole.Call,
+            receiver=receiver_sym,
+            method_name=method_name,
+            assigned_to=assigned_to,
         )
         if is_super_method_call:
             for arg in node.args:
@@ -811,16 +831,11 @@ class ReferenceCollector(ast.NodeVisitor):
                     kind_hint=SymbolKind.Variable,
                 )
             if target_sym and self._is_read_target(target_sym):
-                self.references.append(
-                    SymbolReference(
-                        target_symbol=target_sym,
-                        location=self._loc(node),
-                        enclosing_symbol=self._enclosing_symbol_defined(node),
-                        role=ReferenceRole.Read,
-                        receiver=None,
-                        method_name=None,
-                        assigned_to=None,
-                    )
+                self._append_reference(
+                    target_symbol=target_sym,
+                    location=self._loc(node),
+                    enclosing_symbol=self._enclosing_symbol_defined(node),
+                    role=ReferenceRole.Read,
                 )
         elif isinstance(node.ctx, ast.Store):
             target_sym = self._resolve_symbol_at_with_hint(
@@ -829,16 +844,11 @@ class ReferenceCollector(ast.NodeVisitor):
                 kind_hint=SymbolKind.Variable,
             )
             if target_sym and self._is_write_target(target_sym):
-                self.references.append(
-                    SymbolReference(
-                        target_symbol=target_sym,
-                        location=self._loc(node),
-                        enclosing_symbol=self._enclosing_symbol_defined(node),
-                        role=ReferenceRole.Write,
-                        receiver=None,
-                        method_name=None,
-                        assigned_to=None,
-                    )
+                self._append_reference(
+                    target_symbol=target_sym,
+                    location=self._loc(node),
+                    enclosing_symbol=self._enclosing_symbol_defined(node),
+                    role=ReferenceRole.Write,
                 )
         self.generic_visit(node)
 
@@ -875,27 +885,19 @@ class ReferenceCollector(ast.NodeVisitor):
         if target_sym and self._is_write_target(target_sym):
             loc = self._loc(node.target)
             enc_def = self._enclosing_symbol_defined(node)
-            self.references.append(
-                SymbolReference(
-                    target_symbol=target_sym,
-                    location=loc,
-                    enclosing_symbol=enc_def,
-                    role=ReferenceRole.Read,
-                    receiver=receiver_sym,
-                    method_name=None,
-                    assigned_to=None,
-                )
+            self._append_reference(
+                target_symbol=target_sym,
+                location=loc,
+                enclosing_symbol=enc_def,
+                role=ReferenceRole.Read,
+                receiver=receiver_sym,
             )
-            self.references.append(
-                SymbolReference(
-                    target_symbol=target_sym,
-                    location=loc,
-                    enclosing_symbol=enc_def,
-                    role=ReferenceRole.Write,
-                    receiver=receiver_sym,
-                    method_name=None,
-                    assigned_to=None,
-                )
+            self._append_reference(
+                target_symbol=target_sym,
+                location=loc,
+                enclosing_symbol=enc_def,
+                role=ReferenceRole.Write,
+                receiver=receiver_sym,
             )
         self.visit(node.value)
 
@@ -928,16 +930,12 @@ class ReferenceCollector(ast.NodeVisitor):
                 receiver_sym = None
                 if isinstance(node.value, ast.Name):
                     receiver_sym = self._resolve_internal_symbol_at(node.value.lineno, node.value.col_offset)
-                self.references.append(
-                    SymbolReference(
-                        target_symbol=target_sym,
-                        location=self._loc(node),
-                        enclosing_symbol=self._enclosing_symbol_defined(node),
-                        role=ReferenceRole.Read,
-                        receiver=receiver_sym,
-                        method_name=None,
-                        assigned_to=None,
-                    )
+                self._append_reference(
+                    target_symbol=target_sym,
+                    location=self._loc(node),
+                    enclosing_symbol=self._enclosing_symbol_defined(node),
+                    role=ReferenceRole.Read,
+                    receiver=receiver_sym,
                 )
         elif isinstance(node.ctx, ast.Store):
             target_sym = self._resolve_symbol_at_with_hint(
@@ -949,16 +947,12 @@ class ReferenceCollector(ast.NodeVisitor):
                 receiver_sym = None
                 if isinstance(node.value, ast.Name):
                     receiver_sym = self._resolve_internal_symbol_at(node.value.lineno, node.value.col_offset)
-                self.references.append(
-                    SymbolReference(
-                        target_symbol=target_sym,
-                        location=self._loc(node),
-                        enclosing_symbol=self._enclosing_symbol_defined(node),
-                        role=ReferenceRole.Write,
-                        receiver=receiver_sym,
-                        method_name=None,
-                        assigned_to=None,
-                    )
+                self._append_reference(
+                    target_symbol=target_sym,
+                    location=self._loc(node),
+                    enclosing_symbol=self._enclosing_symbol_defined(node),
+                    role=ReferenceRole.Write,
+                    receiver=receiver_sym,
                 )
         self.generic_visit(node)
 

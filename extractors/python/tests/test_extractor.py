@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -138,6 +139,42 @@ def test_builtin_decorator_emits_decorate_without_read():
     ]
     assert any(r.role == ReferenceRole.Decorate and r.target_symbol == "builtins.classmethod" for r in refs)
     assert not any(r.role == ReferenceRole.Read and r.target_symbol == "builtins.classmethod" for r in refs)
+
+
+@pytest.mark.skipif(shutil.which("pyrefly") is None, reason="pyrefly not installed")
+def test_pyrefly_suppresses_builtin_noise_but_keeps_behavioral_decorator(tmp_path: Path):
+    (tmp_path / "sample.py").write_text(
+        """
+class Example:
+    @classmethod
+    def build(cls, values):
+        if isinstance(values, list):
+            return cls(str(len(values)))
+        try:
+            raise ValueError("bad")
+        except Exception:
+            return cls(str(max(values)))
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = run_extract(str(tmp_path), resolver_backend="pyrefly")
+    refs = [reference for doc in data.documents for reference in doc.references]
+
+    assert any(
+        reference.role == ReferenceRole.Decorate and reference.target_symbol == "builtins.classmethod"
+        for reference in refs
+    )
+    assert not any(
+        reference.target_symbol
+        and reference.target_symbol.startswith("builtins.")
+        and not (
+            reference.role == ReferenceRole.Decorate
+            and reference.target_symbol == "builtins.classmethod"
+        )
+        for reference in refs
+    )
 
 
 def test_schema_details_tagged_for_rust():

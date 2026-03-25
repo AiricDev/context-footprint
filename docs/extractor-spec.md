@@ -1,202 +1,459 @@
 # Extractor Specification
 
-> Formal contract for language-specific extractors. Any extractor that outputs SemanticData JSON
-> conforming to this spec will produce correct CF results via the language-agnostic Builder + Solver.
+> Formal contract for language-specific extractors. Any extractor that outputs `SemanticData`
+> conforming to this spec can be consumed by the language-agnostic Builder + Solver.
 
 ## Overview
 
 An extractor converts source code into `SemanticData` (defined in `src/domain/semantic.rs`).
-The SemanticData schema defines the **shape** of the output. This document defines the
-**behavioral completeness requirements** — i.e., exactly which source-code patterns MUST
-produce which references, so that the CF graph captures all meaningful dependencies.
+The JSON schema defines the output shape. This document defines the correctness contract:
 
-### Three Layers of This Spec
+1. **Reference coverage**: which semantic situations MUST produce which references.
+2. **Correctness invariants**: which classes of wrong output are forbidden, even if the
+   extractor has partial information.
+3. **Language mapping**: how a language-specific extractor should realize the above.
+4. **Conformance tests**: how an implementation proves that it satisfies the contract.
 
-1. **Abstract Reference Patterns** (language-agnostic): enumerate every semantic situation
-   where one symbol depends on another. This is the "what".
-2. **Language Mapping** (per-language): map each abstract pattern to concrete AST forms
-   and resolution strategies. This is the "how".
-3. **Conformance Test Suite** (per-language): a fixture + assertion for each pattern.
-   This is the "proof".
+A new extractor is not considered complete merely because it emits "some plausible graph".
+It must:
 
-A new extractor is considered complete when every applicable abstract pattern has
-a passing conformance test.
+- cover every applicable abstract reference pattern,
+- satisfy every applicable correctness invariant,
+- and have a passing conformance test for each required case.
+
+## Three Layers of This Spec
+
+1. **Abstract Reference Patterns**: language-agnostic dependency situations. This is the "what".
+2. **Correctness Invariants**: cross-language rules that prevent systematically wrong output.
+   This is the "what must never go wrong".
+3. **Language Mapping + Conformance Tests**: AST mapping, resolution strategy, and fixtures.
+   This is the "how" and the "proof".
 
 ---
 
 ## Part 1: Abstract Reference Patterns
 
-Each pattern describes a **semantic situation** where a function or variable depends on
-another symbol. The pattern is language-agnostic; the AST forms differ per language.
+Each pattern describes a semantic situation where one symbol depends on another symbol.
+AST forms differ by language, but the dependency meaning is the same.
 
 ### Call Patterns
 
 | ID | Pattern | Role | Description |
 |----|---------|------|-------------|
-| REF-CALL-01 | Direct function call | Call | `foo()` — call a named function |
-| REF-CALL-02 | Method call (self/this) | Call | `self.method()` / `this.method()` — call own method |
-| REF-CALL-03 | Method call (typed receiver) | Call | `obj.method()` where obj has known type — resolved via type |
-| REF-CALL-04 | Method call (untyped receiver) | Call | `obj.method()` where obj has no type — unresolved, builder may recover |
-| REF-CALL-05 | Constructor call | Call | `MyClass()` / `new MyClass()` — target is the constructor function |
-| REF-CALL-06 | Super/parent method call | Call | `super().method()` / `super.method()` — target is parent class method |
-| REF-CALL-07 | Class method factory call (cls) | Call | `cls()` / `cls.method()` in classmethod — target via enclosing class |
-| REF-CALL-08 | Decorator / annotation | Decorate | `@decorator` — decorator function applied to a definition |
+| REF-CALL-01 | Direct function call | Call | `foo()` |
+| REF-CALL-02 | Method call on enclosing instance/class | Call | `self.method()` / `this.method()` |
+| REF-CALL-03 | Method call on typed receiver | Call | `obj.method()` where `obj` has a known value type |
+| REF-CALL-04 | Method call on untyped receiver | Call | `obj.method()` where the receiver type is unknown; emit unresolved |
+| REF-CALL-05 | Constructor call | Call | `MyClass()` / `new MyClass()` |
+| REF-CALL-06 | Super/parent method call | Call | `super().method()` / `super.method()` |
+| REF-CALL-07 | Class method factory call | Call | `cls()` / `cls.method()` inside classmethod-style context |
+| REF-CALL-08 | Decorator / annotation application | Decorate | `@decorator` |
 
 ### Read Patterns
 
 | ID | Pattern | Role | Description |
 |----|---------|------|-------------|
-| REF-READ-01 | Read module/global variable | Read | `print(CONFIG)` — use a module-level or global variable |
-| REF-READ-02 | Read instance/class field | Read | `self.field` / `obj.field` — read a field |
-| REF-READ-03 | Default argument value | Read | `def f(x=SENTINEL)` — reference in default param expression |
-| REF-READ-04 | Function/method as value | Read | `callback = handler` / `register(fn)` — function used as value, not called |
-| REF-READ-05 | Exception type in catch | Read | `except MyError` / `catch (MyError e)` — type used in exception handler |
+| REF-READ-01 | Read module/global variable | Read | `print(CONFIG)` |
+| REF-READ-02 | Read instance/class field | Read | `self.field` / `obj.field` |
+| REF-READ-03 | Default argument value | Read | `def f(x=SENTINEL)` |
+| REF-READ-04 | Function/method as value | Read | `callback = handler` / `register(fn)` |
+| REF-READ-05 | Exception type in catch | Read | `except MyError` / `catch (MyError e)` |
 
 ### Write Patterns
 
 | ID | Pattern | Role | Description |
 |----|---------|------|-------------|
-| REF-WRITE-01 | Assign to module/global variable | Write | `CONFIG = val` — write to module-level variable |
+| REF-WRITE-01 | Assign to module/global variable | Write | `CONFIG = val` |
 | REF-WRITE-02 | Assign to instance/class field | Write | `self.field = val` / `obj.field = val` |
-| REF-WRITE-03 | Compound assignment (augmented) | Read + Write | `x += 1` — both reads and writes the target |
-| REF-WRITE-04 | Delete variable/field | Write | `del obj.field` — removal is a mutation |
+| REF-WRITE-03 | Compound assignment | Read + Write | `x += 1` |
+| REF-WRITE-04 | Delete variable/field | Write | `del obj.field` |
 
 ### Notes
 
-- **Local variables are excluded**: references to/from local variables do not produce edges.
-  Only module-level variables, class fields, functions, and methods are graph nodes.
-- **Type annotations** are captured as metadata (`param_type`, `return_types`, `var_type`)
-  for signature completeness and type-driven edge recovery, but do NOT produce graph edges
-  themselves. Type context (class docstrings, bases) is handled at the context assembly layer.
-- **Unresolved references**: when a target cannot be statically resolved, emit the reference
-  with `target_symbol=None` and fill `receiver` + `method_name` if available. The builder's
-  Pass 3 may recover the edge via type propagation. If recovery also fails, the reference
-  remains unresolved — the CF result should track this for confidence scoring.
+- Local variables are excluded as graph nodes. They may carry type information for resolution,
+  but they do not become graph nodes and should not create edges by themselves.
+- Type annotations are metadata, not edges. Their role is to support signature completeness
+  and type-driven recovery.
+- The patterns above apply recursively to arbitrary receiver expressions, not only simple names.
+  `obj.method()`, `a.b.method()`, and `factory().method()` are all instances of the same
+  abstract receiver-call pattern.
+- When a target cannot be resolved with acceptable confidence, emit the reference as unresolved
+  (`target_symbol=None`) and preserve partial information such as `method_name` and `receiver`
+  when available.
 
 ---
 
-## Part 2: Python Language Mapping
+## Part 2: Cross-Language Correctness Invariants
 
-Maps each abstract pattern to Python AST forms and resolution strategies.
+Reference coverage is not enough. An extractor can "cover" a pattern and still emit incorrect
+symbols that poison the graph. The following invariants are cross-language and mandatory.
+
+### Invariant Table
+
+| ID | Invariant | Requirement |
+|----|-----------|-------------|
+| INV-SYM-01 | Stable symbol identity | The same semantic entity must have exactly one stable `symbol_id` across definitions and references |
+| INV-SYM-02 | No fabricated pseudo-symbols | Extractors MUST NOT synthesize symbols from placeholders such as `Any`, `Unknown`, `Self@...`, raw signatures, or similar analyzer artifacts |
+| INV-RES-01 | Query the referent token | Resolver queries must target the token that denotes the semantic referent, not merely the enclosing expression start |
+| INV-TYPE-01 | Receiver means value type | For `expr.member`, type-driven resolution must use the value type of `expr`, not a broader container or owner type |
+| INV-TYPE-02 | Conservative over wrong | If the best available type information is non-informative or ambiguous, the extractor MUST leave the reference unresolved rather than invent a target |
+| INV-SCOPE-01 | Inference uses syntactic scope | Local/field value-type inference must use the true enclosing definition from syntax/AST, not transient traversal state |
+| INV-EXT-01 | External symbols must be semantically real | External symbols may be materialized only when they denote a stable library/module/type/member, not a placeholder type root |
+| INV-ATTR-01 | Chains are first-class | `a.b.c()` and `a.b.c = x` must be resolved using the intermediate value `a.b`, not reduced to `a` |
+
+### Practical Meaning of the Invariants
+
+#### INV-SYM-01: Stable Symbol Identity
+
+If a definition pass emits `pkg.mod.outer`, the reference pass must not emit
+`pkg.mod.outer.inner` for the same extracted node merely because the syntax was nested.
+Any instability in `symbol_id` breaks graph construction.
+
+#### INV-SYM-02: No Fabricated Pseudo-Symbols
+
+The following are examples of forbidden output roots:
+
+- `Any.upper`
+- `Unknown.foo`
+- `Self@__init__.add`
+- `def get_db.executescript`
+
+These strings may appear in analyzer hover output, but they are not valid graph symbols.
+
+#### INV-RES-01: Query the Referent Token
+
+For a member chain such as `app.config.from_mapping()`, the resolver query for the call target
+must point at `from_mapping`, and the query for the intermediate field type must point at
+`config`. Querying the start of the whole expression (`app`) is incorrect.
+
+This invariant generalizes to all languages with member access syntax.
+
+#### INV-TYPE-01 and INV-ATTR-01: Receiver Means Value Type
+
+For `a.b.c()`, the call target depends on the value type of `a.b`, not just the declared type
+of `a`. Likewise for writes such as `a.b.c = x`, the write target is the field on the value type
+of `a.b`.
+
+#### INV-TYPE-02: Conservative Over Wrong
+
+If the extractor cannot confidently infer the receiver value type, unresolved output is correct.
+A missing edge is preferable to a confidently wrong edge with a fake symbol.
+
+#### INV-SCOPE-01: Inference Uses Syntactic Scope
+
+Offline inference helpers must not depend on runtime visitor stacks that are only valid during
+one traversal. When inferring types from local assignments or field initializers, the enclosing
+definition must be reconstructed from syntax/AST or other stable metadata.
+
+#### INV-EXT-01: External Symbols Must Be Semantically Real
+
+Materializing `pathlib.Path.read_text` or `werkzeug.routing.Map.add` is correct.
+Materializing `Literal.upper` or `Any.upper` is not.
+
+### Recommended Decision Rule
+
+When in doubt, apply this order:
+
+1. Emit the correct internal or external symbol.
+2. Otherwise emit unresolved with partial information.
+3. Never emit a fabricated pseudo-symbol.
+
+### Strongly Typed vs Weakly Typed Languages
+
+The invariants above are universal, but the implementation burden is not.
+
+#### Strongly Typed Languages
+
+Examples: Rust, TypeScript (in typed codebases), Java, Kotlin, C#.
+
+These languages usually make extractors simpler because:
+
+- receiver value types are often directly available from the compiler or language service,
+- member targets are usually exposed as stable symbols rather than free-form hover text,
+- field and local variable types are more often explicit,
+- unresolved cases are concentrated at dynamic boundaries rather than ordinary method calls.
+
+For these languages, extractor implementations should prefer:
+
+- structured symbol/type APIs from the compiler or language server,
+- direct symbol identity mapping over string parsing,
+- minimal heuristics,
+- unresolved output only at genuinely dynamic boundaries.
+
+Typical risk areas still remain:
+
+- aliasing and re-exports,
+- trait/interface dispatch,
+- macros/code generation,
+- generic instantiation boundaries,
+- overloaded or extension methods,
+- partially typed TypeScript code (`any`, dynamic property access).
+
+#### Weakly Typed or Gradually Typed Languages
+
+Examples: Python, Ruby, JavaScript, mixed-quality TypeScript.
+
+These languages usually require more fallback logic because:
+
+- receiver types may be implicit or unavailable,
+- local assignments often carry the only usable type clue,
+- analyzer outputs may contain placeholders or textual approximations,
+- many ordinary member calls sit near the boundary between statically knowable and dynamic.
+
+For these languages, the extractor must invest more in:
+
+- receiver value-type inference,
+- import-context disambiguation,
+- type-text normalization and pseudo-symbol filtering,
+- negative tests that prove the extractor does not fabricate targets.
+
+#### Important Constraint
+
+Strong typing reduces the number of heuristics, but it does not relax the invariants.
+
+Even for Rust or TypeScript, an extractor is still incorrect if it:
+
+- emits unstable `symbol_id`s,
+- queries the wrong token in a member chain,
+- collapses `a.b.c()` to the type of `a`,
+- or fabricates external symbols from analyzer placeholders.
+
+---
+
+## Part 3: Python Language Mapping
+
+This section maps the abstract patterns and invariants to Python AST forms and resolution rules.
+It is intentionally phrased in backend-agnostic terms. The current implementation may use `ty`,
+Jedi, or another resolver, but the behavioral contract is the same.
 
 ### Definitions (Pass 1)
 
 | What | Python AST | Scope Rule |
-|------|-----------|------------|
-| Module-level function | `FunctionDef` / `AsyncFunctionDef` (no class enclosing) | symbol_id = `module.func_name` |
-| Class method | `FunctionDef` inside `ClassDef` | symbol_id = `module.Class.method`, enclosing_symbol = class |
-| Class definition | `ClassDef` | kind=Type, inherits from bases |
-| Module-level variable | `Assign` / `AnnAssign` (no func enclosing) | kind=Variable, scope=Global |
-| Class body field | `Assign` / `AnnAssign` in class (no func) | kind=Variable, scope=Field |
-| Instance field (self.x) | `Assign` / `AnnAssign` with target `self.x` in method | kind=Variable, scope=Field |
-| Nested function | `FunctionDef` inside function | NOT extracted; refs attributed to enclosing method |
+|------|------------|------------|
+| Module-level function | `FunctionDef` / `AsyncFunctionDef` with no class enclosing | `module.func_name` |
+| Class method | `FunctionDef` inside `ClassDef` | `module.Class.method` |
+| Class definition | `ClassDef` | kind=`Type`, inherits from bases |
+| Module-level variable | `Assign` / `AnnAssign` with no function enclosing | kind=`Variable`, scope=`Global` |
+| Class body field | `Assign` / `AnnAssign` in class body | kind=`Variable`, scope=`Field` |
+| Instance field | assignment target `self.x` inside method | kind=`Variable`, scope=`Field` |
+| Nested function | `FunctionDef` inside function | NOT extracted as a standalone symbol; references are attributed to the nearest extracted enclosing definition |
 
 ### References (Pass 2)
 
 | Pattern ID | Python AST Form | Resolution Strategy |
-|------------|----------------|---------------------|
-| REF-CALL-01 | `Call(func=Name('foo'))` | Jedi `goto` at func position |
-| REF-CALL-02 | `Call(func=Attribute(value=Name('self'), attr='m'))` | Enclosing class prefix + method name; Jedi fallback |
-| REF-CALL-03 | `Call(func=Attribute(value=Name('obj'), attr='m'))` where `obj` has type annotation | Jedi `goto`; fallback: lookup param type → class → method |
-| REF-CALL-04 | `Call(func=Attribute(value=Name('obj'), attr='m'))` where `obj` is untyped | Emit with `target_symbol=None`, `receiver=obj_symbol`, `method_name='m'` |
-| REF-CALL-05 | `Call(func=Name('MyClass'))` | Jedi resolves to class; Builder maps via init_map → `__init__` |
-| REF-CALL-06 | `Call(func=Attribute(value=Call(func=Name('super')), attr='m'))` | AST pattern match; enclosing class → `inherits[0]` (short name) → resolve base: same-module prefix first; then **cross-module** fallback by type name when unique; then **alias fallback**: walk ClassDef bases in AST, use Jedi `goto(..., follow_imports=True)` to resolve import aliases to their actual class → `parent.m` |
-| REF-CALL-07 | `Call(func=Name('cls'))` in `@classmethod` | Treat as constructor of enclosing class → `__init__` |
-| REF-CALL-07 | `Call(func=Attribute(value=Name('cls'), attr='m'))` | Same fallback logic as `self` — enclosing class + method name |
-| REF-CALL-08 | `decorator_list` entries on `FunctionDef` / `ClassDef` | Jedi `goto` on decorator expression |
-| REF-READ-01 | `Name(ctx=Load)` resolving to Variable definition | Jedi `goto` → check kind=Variable → emit Read |
-| REF-READ-02 | `Attribute(ctx=Load)` resolving to Variable/Field | Jedi `goto` → check kind=Variable → emit Read with receiver |
-| REF-READ-03 | `FunctionDef.args.defaults[]`, `args.kw_defaults[]` | Walk default expressions; Jedi; same-file by name; **cross-module unique**: by name in `all_definitions` when only one match; **import-context disambiguation**: when multiple same-named definitions exist, walk module's `ImportFrom` nodes to narrow to the one actually imported in this file |
-| REF-READ-04 | `Name(ctx=Load)` resolving to Function definition | Jedi `goto` → check kind=Function → emit Read |
-| REF-READ-04 | `Attribute(ctx=Load)` resolving to Function definition | Same, with receiver |
-| REF-READ-05 | `ExceptHandler.type` | Walk type expression, resolve names, emit Read |
-| REF-WRITE-01 | `Name(ctx=Store)` resolving to Variable | Jedi `goto` → emit Write |
-| REF-WRITE-02 | `Attribute(ctx=Store)` resolving to Variable/Field | Jedi `goto` → emit Write with receiver |
-| REF-WRITE-03 | `AugAssign(target=Name/Attribute)` | Resolve target → emit **both** Read and Write |
-| REF-WRITE-04 | `Delete(targets=[Name/Attribute])` | Resolve target → emit Write |
+|------------|-----------------|---------------------|
+| REF-CALL-01 | `Call(func=Name('foo'))` | Resolver definition lookup on callee token; fallback by import context |
+| REF-CALL-02 | `Call(func=Attribute(value=Name('self'/'cls'), attr='m'))` | Enclosing class + method name; resolver may refine |
+| REF-CALL-03 | `Call(func=Attribute(value=<expr>, attr='m'))` | Resolve member token first; if needed infer value type of `<expr>` and map to `Type.m` |
+| REF-CALL-04 | Same as above with no informative receiver type | Emit unresolved with `method_name='m'` and `receiver` when available |
+| REF-CALL-05 | `Call(func=Name('MyClass'))` | Resolve class/type; builder maps via constructor convention to `__init__` |
+| REF-CALL-06 | `Call(func=Attribute(value=Call(func=Name('super')), attr='m'))` | Resolve parent method from enclosing class bases, including cross-module and alias cases |
+| REF-CALL-07 | `Call(func=Name('cls'))` or `Attribute(value=Name('cls'), ...)` | Treat `cls()` as constructor and `cls.m()` as method on enclosing class |
+| REF-CALL-08 | `decorator_list` entries | Resolve decorator expression and emit `Decorate` |
+| REF-READ-01 | `Name(ctx=Load)` resolving to module/class variable | Emit `Read` |
+| REF-READ-02 | `Attribute(ctx=Load)` resolving to field/module variable | Resolve attribute token or infer receiver value type; emit `Read` |
+| REF-READ-03 | `args.defaults`, `args.kw_defaults` | Walk default expression and resolve symbols within it |
+| REF-READ-04 | `Name/Attribute(ctx=Load)` resolving to function/method used as value | Emit `Read` |
+| REF-READ-05 | `ExceptHandler.type` | Resolve type expression and emit `Read` |
+| REF-WRITE-01 | `Name(ctx=Store)` resolving to variable | Emit `Write` |
+| REF-WRITE-02 | `Attribute(ctx=Store)` resolving to field | Resolve attribute token or infer receiver value type; emit `Write` |
+| REF-WRITE-03 | `AugAssign(target=Name/Attribute)` | Resolve target and emit both `Read` and `Write` |
+| REF-WRITE-04 | `Delete(targets=[Name/Attribute])` | Resolve target and emit `Write` |
 
-### Resolution Priority
+### Python Resolution Ladder
 
-For each reference, the extractor tries resolution in this order:
+For each reference, try resolution in this order:
 
-1. **Jedi `goto`** at the source position → match against `all_definitions` by file + line
-2. **Jedi `full_name`** → match by qualified name (may be external symbol)
-3. **AST-based fallback** (pattern-specific):
-   - `self.method()` → enclosing class + method name
-   - `super().method()` → enclosing class → first base: (a) same-module prefix, (b) cross-module by type name when unique, (c) alias resolution via Jedi `follow_imports=True` on ClassDef base node → method
-   - `cls()` → enclosing class `__init__`
-   - Default arg names → (a) same-file variable by name, (b) cross-file unique by name, (c) import-context: resolve via `ImportFrom` nodes to disambiguate when multiple same-named definitions exist
-4. **Emit unresolved** with `receiver` + `method_name` for Builder Pass 3 recovery
+1. **Exact resolver query on the referent token**
+   - For `foo()`, query `foo`.
+   - For `obj.method()`, query `method`.
+   - For `obj.field`, query `field`.
+2. **Definition matching**
+   - Match resolver result to internal definitions by file + line + name.
+   - If internal match fails and the result is a real external symbol, materialize it.
+3. **Value-type inference**
+   - Infer the value type of the receiver expression, not merely the leftmost name.
+   - Use, in order:
+     - declared parameter type,
+     - declared variable/field type,
+     - local assignments preceding the use,
+     - function return types,
+     - resolver hover/type info on the receiver expression,
+     - import context.
+4. **Pattern-specific fallback**
+   - `self.method()` / `cls.method()` via enclosing class.
+   - `super().method()` via enclosing class bases.
+   - default-arg name disambiguation via import context.
+5. **Conservative unresolved**
+   - If the remaining type information is non-informative, emit unresolved.
+
+### Python Normalization Rules
+
+Python extractors MUST apply these normalization rules before synthesizing a target symbol:
+
+- Query `Attribute` nodes at the member token, not the expression start.
+- Normalize literal-derived types:
+  - `Literal["x"]` -> `builtins.str`
+  - `Literal[1]` -> `builtins.int`
+  - `LiteralString` -> `builtins.str`
+- Treat these as non-informative and unsuitable for symbol synthesis:
+  - `Any`, `typing.Any`, `t.Any`
+  - `Unknown`
+  - raw signature text such as `def foo() -> ...`
+  - self-like placeholders such as `Self@...`
+- If the best candidate is builtins noise and the project does not track builtins as graph nodes,
+  prefer dropping the target to emitting a fake external symbol.
+
+### Python-Specific Clarifications
+
+- Nested functions are not graph nodes. References inside nested functions are attributed to the
+  nearest extracted enclosing definition.
+- Chained attribute access is not a special case; it is the normal behavior of receiver value-type
+  inference applied recursively.
+- External symbol materialization is valid only after a symbol root is normalized to a semantically
+  real module/type/member path.
 
 ---
 
-## Part 3: Conformance Test Suite
+## Part 4: Conformance Test Suite
 
-Each abstract pattern has a corresponding test fixture and assertion. A language extractor
-is considered complete when all applicable tests pass.
+Each language extractor must provide fixtures that prove both coverage and correctness.
 
 ### Test Structure
 
-Tests live in `extractors/<language>/tests/fixtures/` with one fixture file per pattern
-(or per related group). Each test:
+Each test:
 
-1. Creates a fixture file exercising the pattern
-2. Runs the extractor on the fixtures directory
-3. Asserts the expected reference exists: `(enclosing_symbol, role, target_symbol)`
+1. creates a fixture exercising one pattern or invariant,
+2. runs the extractor,
+3. asserts the expected `(enclosing_symbol, role, target_symbol)` or equivalent negative property.
 
 ### Python Conformance Tests
 
-| Pattern ID | Fixture File | Assertion |
-|------------|-------------|-----------|
+| Requirement | Fixture(s) | Assertion |
+|-------------|------------|-----------|
 | REF-CALL-01 | `simple.py` | Call from `foo` to `bar` |
 | REF-CALL-02 | `test_self_call.py` | Call from `APIRouter.put` to `APIRouter.api_route` |
 | REF-CALL-03 | `test_method_resolve.py` | Call from `create_image_edit` to `RelayImageUseCase.execute` |
-| REF-CALL-05 | (covered by Builder test) | Constructor `MyClass()` → `__init__` via init_map |
-| REF-CALL-06 | `test_super_call.py` | Call from `Child.__init__` to `Base.__init__` (same module) |
-| REF-CALL-06 | `base_super.py`, `child_super.py` | Call from `child_super.Child.__init__` to `base_super.Base.__init__` (cross-module, same name) |
-| REF-CALL-06 | `base_alias.py`, `child_alias.py` | Call from `child_alias.Child.__init__` to `base_alias.Base.__init__` (base imported under alias `AliasBase`) |
-| REF-CALL-07 | `test_cls_call.py` | Call from `MyClass.create` to `MyClass.__init__` |
-| REF-CALL-08 | `test_annotated_doc.py` | Decorator extraction (use_signature_only_for_size) |
-| REF-READ-01 | `test_default_arg_ref.py` | Read from `foo` to `SENTINEL` (module variable) |
-| REF-READ-03 | `test_default_arg_ref.py` | Read from `foo` to `SENTINEL` (same-module default arg) |
-| REF-READ-03 | `sentinel_def.py`, `default_arg_cross.py` | Read from `default_arg_cross.foo` to `sentinel_def.SENTINEL` (cross-module default arg, single definition) |
-| REF-READ-03 | `sentinel_a.py`, `sentinel_b.py`, `default_arg_ambig.py` | Read from `default_arg_ambig.bar` to `sentinel_a._sentinel` (multiple same-named defs, import context selects the right one) |
-| REF-READ-04 | `test_func_as_value.py` | Read from `setup` to `handler` (function as value) |
-| REF-READ-05 | `test_except_resolve.py` | Read from `create_image_edit` to `QuotaError` |
-| REF-WRITE-03 | `test_augassign.py` | Read + Write from `increment` to `counter` |
+| REF-CALL-03 + INV-ATTR-01 | `sample.py` chained field call fixture | `app.config.from_mapping()` resolves to `Config.from_mapping`, not owner/container type |
+| REF-WRITE-02 + INV-ATTR-01 | `sample.py` chained field write fixture | `self.inner.value = 1` resolves to `Inner.value` |
+| REF-CALL-05 | builder/integration fixture | Constructor call maps to `__init__` |
+| REF-CALL-06 | `test_super_call.py` | Same-module `super().__init__` resolves to base constructor |
+| REF-CALL-06 | `base_super.py`, `child_super.py` | Cross-module `super().__init__` resolves correctly |
+| REF-CALL-06 | `base_alias.py`, `child_alias.py` | Aliased base class still resolves correctly |
+| REF-CALL-07 | `test_cls_call.py` | `cls(name)` resolves to enclosing class `__init__` |
+| REF-CALL-08 | `test_annotated_doc.py` | Decorator extraction works |
+| REF-READ-03 | `test_default_arg_ref.py` | Same-module default arg read resolves correctly |
+| REF-READ-03 | `sentinel_def.py`, `default_arg_cross.py` | Cross-module default arg read resolves correctly |
+| REF-READ-03 | `sentinel_a.py`, `sentinel_b.py`, `default_arg_ambig.py` | Import context disambiguates same-named defs |
+| REF-READ-04 | `test_func_as_value.py` | Function used as value emits `Read` |
+| REF-READ-05 | `test_except_resolve.py` | Exception type emits `Read` |
+| REF-WRITE-03 | `test_augassign.py` | AugAssign emits both `Read` and `Write` |
+| INV-SYM-01 | nested-function fixture | Nested helper does not become a standalone definition; references remain attributed to outer function |
+| INV-SCOPE-01 | constructor-context fixture | Field initialized in `__init__` carries the correct inferred value type into later method calls |
+| INV-EXT-01 | external-method fixture | A correctly inferred external method target is materialized into `external_symbols` |
+| INV-SYM-02 | unknown-return fixture | No pseudo-symbol like `def get_db.executescript` is emitted |
+| INV-SYM-02 | any/literal receiver fixtures | No pseudo-symbol like `Any.upper` or `Literal.upper` is emitted |
+
+### Conformance Philosophy
+
+The test suite must contain both:
+
+- **positive assertions**: the correct edge exists,
+- **negative assertions**: known bad pseudo-symbols are absent.
+
+This is important. Many extractor failures are not "missing edge" failures; they are
+"wrong symbol but still graph-shaped" failures. Negative tests are therefore part of the
+contract, not merely optional hygiene.
 
 ### Adding a New Language
 
 When implementing an extractor for a new language:
 
-1. Create `extractors/<language>/` with the extractor implementation
-2. Copy this conformance table, replacing Python fixtures with equivalent code in the target language
-3. For each row, create the fixture file and test
-4. Implement extractor logic until all tests pass
-5. Add the Language Mapping table to this document (Part 2 equivalent for the new language)
+1. create `extractors/<language>/`,
+2. copy the abstract pattern table and invariant table,
+3. add a language mapping section equivalent to Part 3,
+4. create one fixture per applicable pattern/invariant,
+5. implement until all tests pass,
+6. do not mark the extractor complete until both positive and negative cases pass.
 
-Patterns that don't apply to a language (e.g., REF-CALL-07/cls for Java) should be
-marked N/A in the mapping table.
+Patterns that do not apply to a language should be marked `N/A` in that language mapping.
+
+### Implementation Checklist
+
+Use this checklist before declaring a new extractor "complete".
+
+#### Phase 1: Symbol Model
+
+- Define the language's symbol naming scheme and ensure it is stable across passes.
+- Verify that every extracted definition kind maps cleanly to `Function`, `Variable`, or `Type`.
+- Decide which language constructs are graph nodes and which are only metadata.
+- Write tests proving nested/local-only constructs do not accidentally become graph nodes when the language model says they should not.
+
+#### Phase 2: Reference Coverage
+
+- Implement every applicable abstract reference pattern from Part 1.
+- For each pattern, add at least one positive conformance fixture.
+- Ensure unresolved output preserves partial information (`method_name`, `receiver`) where the schema supports it.
+
+#### Phase 3: Resolver Discipline
+
+- Verify that every resolver query is issued on the semantic referent token, not a larger enclosing expression.
+- Verify that internal symbol matching is based on stable metadata such as file, line, symbol identity, or compiler symbol id.
+- If the language tooling returns textual type information, define a normalization step before any target synthesis.
+
+#### Phase 4: Type-Driven Resolution
+
+- Implement receiver value-type inference for member reads/calls/writes.
+- Prove that chained access uses the intermediate expression value type (`a.b.c()` via `a.b`).
+- Ensure value-type inference can use syntactic scope without relying on transient traversal state.
+- Define which type roots are considered informative versus placeholders/noise.
+
+#### Phase 5: External Symbols
+
+- Define when an external symbol may be materialized.
+- Prove that real external APIs are materialized when confidently known.
+- Prove that placeholder roots and pseudo-types are not materialized.
+
+#### Phase 6: Negative Correctness Tests
+
+- Add tests that assert the absence of known bad pseudo-symbols.
+- Add tests for wrong-owner regression classes, not only missing-edge cases.
+- Add tests for symbol-id stability across definition and reference passes.
+- Add at least one conservative-unresolved case where the correct behavior is to avoid guessing.
+
+#### Phase 7: End-to-End Validation
+
+- Run the extractor on a medium-sized real project in that language.
+- Inspect several representative functions with low, medium, and high context footprint.
+- Verify that suspicious high-CF results come from real dependency structure, not pseudo-symbols or wrong-owner edges.
+- Compare graph statistics before and after fixes, but do not use density alone as a correctness signal.
+
+### Acceptance Checklist
+
+An extractor should only be considered ready when all of the following are true:
+
+- all applicable conformance tests pass,
+- all required negative tests pass,
+- no known pseudo-symbol class is present in real-project output,
+- unresolved references correspond to genuine information gaps rather than avoidable mis-resolution,
+- and a real-project spot check finds no major invariant violations.
 
 ---
 
 ## Appendix: Patterns Explicitly Out of Scope
 
-These patterns involve fundamentally dynamic behavior that no static extractor can
-reliably resolve. They are documented here so extractor authors know NOT to spend
-effort on them — the CF algorithm handles the impact via its confidence/uncertainty
-reporting.
+These patterns are fundamentally dynamic and should not be "solved" with brittle heuristics.
+When encountered, prefer unresolved output with partial information.
 
 | Pattern | Example | Why Out of Scope |
 |---------|---------|------------------|
-| Dynamic attribute access | `getattr(obj, name)` | Attribute name is a runtime value |
-| Metaclass-generated methods | `class Meta(type): ...` | Methods created at class-creation time |
-| Monkey-patching | `obj.method = lambda: ...` | Replaces method at runtime |
+| Dynamic attribute access | `getattr(obj, name)` | Attribute name is runtime data |
+| Metaclass-generated methods | `class Meta(type): ...` | Methods created during class creation |
+| Monkey-patching | `obj.method = lambda: ...` | Runtime replacement of behavior |
 | `exec` / `eval` generated symbols | `exec("def foo(): ...")` | Code generated from strings |
-| Star imports (`from mod import *`) | Namespace pollution | Requires full module resolution |
-| Descriptor protocol | `__get__`, `__set__` | Implicit method dispatch |
-| `__getattr__` / `__getattribute__` | Fallback attribute resolution | Intercepts all attribute access |
+| Star imports | `from mod import *` | Namespace depends on external module state |
+| Descriptor protocol | `__get__`, `__set__` | Implicit dispatch through runtime protocol |
+| `__getattr__` / `__getattribute__` | dynamic fallback attribute resolution | Intercepts nearly all attribute access |
 
-When an extractor encounters these patterns, it should emit the reference as
-**unresolved** (`target_symbol=None`) with whatever partial information is available
-(`method_name`, etc.), so the CF result can report reduced confidence.
+When an extractor encounters these patterns, it should emit unresolved references with whatever
+partial information is available, rather than synthesizing unstable or fake targets.
